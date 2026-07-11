@@ -45,6 +45,7 @@ struct FileConfig {
     pub cursor: Option<CursorConfig>,
     pub grok: Option<GrokConfig>,
     pub opencode: Option<OpenCodeConfig>,
+    pub glm: Option<GlmConfig>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -118,6 +119,12 @@ struct GrokConfig {
 struct OpenCodeConfig {
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct GlmConfig {
     #[serde(rename = "baseUrl")]
     pub base_url: Option<String>,
 }
@@ -306,6 +313,9 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     }
     if env.contains_key("CCP_KIMI_BASE_URL") {
         out.push("kimi.baseUrl (env)".to_string());
+    }
+    if env.contains_key("CCP_GLM_BASE_URL") {
+        out.push("glm.baseUrl (env)".to_string());
     }
     if env.contains_key("CCP_CURSOR_BASE_URL") {
         out.push("cursor.baseUrl (env)".to_string());
@@ -651,6 +661,21 @@ pub fn kimi_base_url() -> String {
         return url;
     }
     "https://api.kimi.com/coding/v1".to_string()
+}
+
+pub fn glm_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_GLM_BASE_URL") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(glm) = file.glm
+        && let Some(url) = glm.base_url
+    {
+        return url;
+    }
+    "https://api.z.ai/api/anthropic".to_string()
 }
 
 pub fn kimi_user_agent(default: &str) -> String {

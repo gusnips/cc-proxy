@@ -70,6 +70,7 @@ cc-proxy <provider> auth <action>
 | `kimi` | Device code | Unsupported | User, expiry, scope, storage | Delete proxy credential |
 | `grok` | Browser PKCE | Device code | Expiry and storage | Delete proxy credential |
 | `cursor` | Browser polling flow | Unsupported | Source, claims, expiry | Delete proxy credential |
+| `glm` | API key entry | Unsupported | Env and stored key presence | Delete proxy credential |
 
 Examples:
 

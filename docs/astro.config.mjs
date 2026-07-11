@@ -48,6 +48,7 @@ export default defineConfig({
             { label: 'Kimi', slug: 'providers/kimi' },
             { label: 'Grok', slug: 'providers/grok' },
             { label: 'OpenCode Go', slug: 'providers/opencode-go' },
+            { label: 'GLM', slug: 'providers/glm' },
             { label: 'Cursor Agent', slug: 'providers/cursor-agent' },
           ],
         },

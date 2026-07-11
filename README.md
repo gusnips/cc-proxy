@@ -103,6 +103,7 @@ The opt-in Images API returns base64 image data and consumes the signed-in accou
 | Grok         | grok.com                       | Registered Grok models                          |
 | OpenCode Go  | OpenCode Go subscription       | Non-conflicting IDs and `opencode-go/<model-id>` |
 | Cursor Agent | Cursor account                 | Cursor aliases and `cursor:<model-id>` prefixes |
+| GLM          | z.ai API key                   | `glm-4.7` and `glm-5.2`                         |
 
 Run `cc-proxy models` for the current catalog or
 `cc-proxy models --full` for every dynamic Cursor alias.

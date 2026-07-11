@@ -71,6 +71,11 @@ enum Commands {
         #[command(subcommand)]
         command: ProviderGroup,
     },
+    /// Manage GLM authentication
+    Glm {
+        #[command(subcommand)]
+        command: ProviderGroup,
+    },
     /// Inspect OpenCode Go account state
     #[command(name = "opencode")]
     OpenCode {
@@ -206,6 +211,7 @@ fn main() -> Result<()> {
         Commands::Kimi { command } => run_provider_cli("kimi", command),
         Commands::Cursor { command } => run_provider_cli("cursor", command),
         Commands::Grok { command } => run_provider_cli("grok", command),
+        Commands::Glm { command } => run_provider_cli("glm", command),
         Commands::OpenCode { command } => match command {
             OpenCodeGroup::Usage { json } => run_opencode_usage(json),
         },
@@ -369,7 +375,7 @@ fn run_opencode_usage(json: bool) -> Result<()> {
 
 fn print_models(registry: &Registry, full: bool) {
     let grouped = registry.grouped_models();
-    for provider in ["codex", "kimi", "grok", "opencode", "cursor"] {
+    for provider in ["codex", "kimi", "grok", "opencode", "cursor", "glm"] {
         let Some(models) = grouped.get(provider) else {
             continue;
         };
