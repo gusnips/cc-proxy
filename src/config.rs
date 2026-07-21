@@ -73,6 +73,8 @@ struct CodexConfig {
     pub service_tier: Option<String>,
     #[serde(rename = "reasoningSummary")]
     pub reasoning_summary: Option<String>,
+    #[serde(rename = "reasoningSignatures")]
+    pub reasoning_signatures: Option<String>,
     #[serde(rename = "effort")]
     pub effort: Option<String>,
     #[serde(rename = "model")]
@@ -343,6 +345,12 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     {
         out.push("CCP_AUTO_REVIEW_MODEL (env)".to_string());
     }
+    if env
+        .get("CCP_CODEX_REASONING_SIGNATURES")
+        .is_some_and(|raw| !raw.is_empty())
+    {
+        out.push("CCP_CODEX_REASONING_SIGNATURES (env)".to_string());
+    }
     if let Some(file_cfg) = file {
         if let Some(bind_address) = file_cfg.bind_address {
             out.push(format!("bindAddress: {bind_address}"));
@@ -381,6 +389,12 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
                 .is_some_and(|value| !value.is_empty())
             {
                 out.push("codex.reasoningSummary (config)".to_string());
+            }
+            if codex
+                .reasoning_signatures
+                .is_some_and(|value| !value.is_empty())
+            {
+                out.push("codex.reasoningSignatures (config)".to_string());
             }
             if let Some(enabled) = codex.server_compaction {
                 out.push(format!("codex.serverCompaction: {enabled}"));
@@ -884,6 +898,28 @@ pub fn codex_reasoning_summary() -> Option<String> {
     None
 }
 
+pub fn codex_reasoning_signatures_enabled() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env
+        .get("CCP_CODEX_REASONING_SIGNATURES")
+        .filter(|raw| !raw.is_empty())
+    {
+        return reasoning_signatures_enabled(raw);
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(signatures) = codex.reasoning_signatures.filter(|raw| !raw.is_empty())
+    {
+        return reasoning_signatures_enabled(&signatures);
+    }
+    true
+}
+
+fn reasoning_signatures_enabled(raw: &str) -> bool {
+    !matches!(raw, "off" | "none" | "false" | "0")
+}
+
 pub fn codex_model() -> Option<String> {
     let env: HashMap<_, _> = std::env::vars().collect();
     if let Some(raw) = env.get("CCP_CODEX_MODEL") {
@@ -1112,6 +1148,7 @@ mod tests {
             EnvGuard::unset("CCP_CODEX_TRANSCRIPTIONS_API"),
             EnvGuard::unset("CCP_CODEX_HEADER_TIMEOUT_MS"),
             EnvGuard::unset("CCP_CODEX_FULL_LANE"),
+            EnvGuard::unset("CCP_CODEX_REASONING_SIGNATURES"),
             EnvGuard::unset("CCP_AUTO_REVIEW_MODEL"),
         ];
         guards.push(EnvGuard::set("CCP_CONFIG_DIR", config.path()));
@@ -1529,5 +1566,43 @@ mod tests {
         assert!(codex_server_compaction());
         let _disabled_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "false");
         assert!(!codex_server_compaction());
+    }
+
+    #[test]
+    fn codex_reasoning_signatures_default_to_enabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+
+        assert!(codex_reasoning_signatures_enabled());
+    }
+
+    #[test]
+    fn codex_reasoning_signatures_reads_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"reasoningSignatures":"off"}}"#,
+        )
+        .unwrap();
+
+        assert!(!codex_reasoning_signatures_enabled());
+    }
+
+    #[test]
+    fn codex_reasoning_signatures_env_overrides_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"reasoningSignatures":"off"}}"#,
+        )
+        .unwrap();
+        let _signature_env = EnvGuard::set("CCP_CODEX_REASONING_SIGNATURES", "on");
+
+        assert!(codex_reasoning_signatures_enabled());
     }
 }

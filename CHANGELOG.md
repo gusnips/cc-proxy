@@ -99,6 +99,9 @@ description: Release notes for claude-code-proxy.
 
 ## Unreleased
 
+- Codex encrypted reasoning continuation signatures can now be disabled with
+  `codex.reasoningSignatures` / `CCP_CODEX_REASONING_SIGNATURES`, reducing
+  transcript growth in tool-heavy Claude Code sessions.
 - Codex WebSocket connection pacing is adaptive: connections start without
   spacing while the origin accepts upgrades, widen after a rejected upgrade,
   and relax again after sustained success. A fixed 1s spacing previously
@@ -250,7 +253,7 @@ description: Release notes for claude-code-proxy.
 - Codex errors preserve upstream status codes and optional retry timing, with
   clearer permission failures and safer WebSocket handshake diagnostics.
 - Codex streaming limits oversized events and error responses, preventing
-  malformed or stalled upstream responses from consuming unbounded memory.
+  malformed or stalled upstream responses from   consuming unbounded memory.
 
 ## v0.1.22 (2026-07-20)
 

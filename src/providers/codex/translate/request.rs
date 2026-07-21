@@ -607,7 +607,7 @@ fn translate_request_inner(
             context: opts.use_responses_lite.then_some("all_turns".to_string()),
         });
     }
-    if wants_reasoning {
+    if wants_reasoning && config::codex_reasoning_signatures_enabled() {
         out.include = Some(vec!["reasoning.encrypted_content".to_string()]);
     }
 
