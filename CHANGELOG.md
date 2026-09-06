@@ -97,6 +97,12 @@ description: Release notes for claude-code-proxy.
   [#105](https://github.com/raine/claude-code-proxy/pull/105))
 - Nix builds avoid dependency download failures caused by crates.io API rate limits.
 
+## Unreleased
+
+- Codex standalone searches keep stable per-Agent sessions without colliding
+  with sibling Agents that share a Claude Code session, and align all upstream
+  search identity headers with the request body owner.
+
 ## v0.1.35 (2026-08-19)
 
 - Grok web search works reliably with Claude Code, preserves other tools, and
