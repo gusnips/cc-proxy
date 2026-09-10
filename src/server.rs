@@ -33,7 +33,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, FromRequest, Multipart, Query, State},
-    http::{Request, StatusCode},
+    http::{HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -263,6 +263,8 @@ pub fn app_with_features(
     let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/monitor", get(handler_monitor))
+        .route("/.well-known/ccr/account", get(handler_opencode_account))
+        .route("/v1/account/limits", get(handler_opencode_account))
         .route("/v1/messages", post(handler_messages))
         .route("/v1/messages/count_tokens", post(handler_count_tokens))
         .route("/v1/models", get(handler_models));
@@ -341,6 +343,40 @@ async fn handler_monitor(
 
 async fn healthz() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
+}
+
+async fn handler_opencode_account() -> Response {
+    let client = match crate::providers::opencode::client::OpenCodeClient::new(
+        crate::config::opencode_base_url(),
+        crate::config::opencode_api_key(),
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            return account_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error":{"type":"api_error", "message":error.to_string()}}),
+            );
+        }
+    };
+    match client.get_usage().await {
+        Ok(usage) => account_response(
+            StatusCode::OK,
+            crate::providers::opencode::usage::ccr_snapshot(&usage),
+        ),
+        Err(error) => account_response(
+            error.status,
+            json!({"error":{"type":"api_error", "message":error.message}}),
+        ),
+    }
+}
+
+fn account_response(status: StatusCode, body: Value) -> Response {
+    let mut response = (status, Json(body)).into_response();
+    response.headers_mut().insert(
+        http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 #[derive(serde::Deserialize)]

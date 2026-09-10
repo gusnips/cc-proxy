@@ -71,6 +71,12 @@ enum Commands {
         #[command(subcommand)]
         command: ProviderGroup,
     },
+    /// Inspect OpenCode Go account state
+    #[command(name = "opencode")]
+    OpenCode {
+        #[command(subcommand)]
+        command: OpenCodeGroup,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -78,6 +84,16 @@ enum ProviderGroup {
     Auth {
         #[command(subcommand)]
         command: cc_proxy::provider::AuthCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OpenCodeGroup {
+    /// Show rolling, weekly, and monthly usage limits
+    Usage {
+        /// Print the upstream response as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -190,6 +206,9 @@ fn main() -> Result<()> {
         Commands::Kimi { command } => run_provider_cli("kimi", command),
         Commands::Cursor { command } => run_provider_cli("cursor", command),
         Commands::Grok { command } => run_provider_cli("grok", command),
+        Commands::OpenCode { command } => match command {
+            OpenCodeGroup::Usage { json } => run_opencode_usage(json),
+        },
     }
 }
 
@@ -326,6 +345,28 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
     }
 }
 
+fn run_opencode_usage(json: bool) -> Result<()> {
+    let client = cc_proxy::providers::opencode::client::OpenCodeClient::new(
+        config::opencode_base_url(),
+        config::opencode_api_key(),
+    )?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let usage = runtime
+        .block_on(client.get_usage())
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&usage)?);
+    } else {
+        println!(
+            "{}",
+            cc_proxy::providers::opencode::usage::format_text(&usage)
+        );
+    }
+    Ok(())
+}
+
 fn print_models(registry: &Registry, full: bool) {
     let grouped = registry.grouped_models();
     for provider in ["codex", "kimi", "grok", "opencode", "cursor"] {
@@ -427,6 +468,19 @@ mod tests {
         let mut signals = ServiceShutdownSignals::new().unwrap();
         let receive = signals.recv();
         assert_io_future(&receive);
+    }
+
+    #[test]
+    fn opencode_usage_command_parses_json_flag() {
+        let cli =
+            Cli::try_parse_from(["cc-proxy", "opencode", "usage", "--json"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::OpenCode {
+                command: OpenCodeGroup::Usage { json: true }
+            })
+        ));
     }
 
     #[test]
