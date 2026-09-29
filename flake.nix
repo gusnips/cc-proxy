@@ -29,9 +29,9 @@
 
             meta = with pkgs.lib; {
               description = cargoToml.package.description;
-              homepage = "https://github.com/raine/claude-code-proxy";
+              homepage = "https://github.com/gusnips/cc-proxy";
               license = licenses.mit;
-              mainProgram = "claude-code-proxy";
+              mainProgram = "cc-proxy";
             };
           };
         }
@@ -40,7 +40,7 @@
       apps = forAllSystems (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/claude-code-proxy";
+          program = "${self.packages.${system}.default}/bin/cc-proxy";
         };
       });
 

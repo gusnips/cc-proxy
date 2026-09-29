@@ -4,10 +4,10 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
-use claude_code_proxy::providers::codex::compaction::clear_all_compactions_for_tests;
-use claude_code_proxy::providers::codex::continuation::clear_all_continuations_for_tests;
-use claude_code_proxy::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
-use claude_code_proxy::{
+use cc_proxy::providers::codex::compaction::clear_all_compactions_for_tests;
+use cc_proxy::providers::codex::continuation::clear_all_continuations_for_tests;
+use cc_proxy::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
+use cc_proxy::{
     registry::Registry,
     server::{app, app_with_options},
 };
@@ -140,7 +140,7 @@ fn collect_files(root: &Path) -> Vec<PathBuf> {
 fn traffic_files(state_dir: &Path) -> Vec<PathBuf> {
     collect_files(
         &state_dir
-            .join("claude-code-proxy")
+            .join("cc-proxy")
             .join("traffic")
             .join("smoke-session"),
     )
@@ -1122,14 +1122,14 @@ struct ZeroRetryDelayGuard;
 
 impl ZeroRetryDelayGuard {
     fn enable() -> Self {
-        claude_code_proxy::retry::set_zero_retry_delay_for_tests(true);
+        cc_proxy::retry::set_zero_retry_delay_for_tests(true);
         ZeroRetryDelayGuard
     }
 }
 
 impl Drop for ZeroRetryDelayGuard {
     fn drop(&mut self) {
-        claude_code_proxy::retry::set_zero_retry_delay_for_tests(false);
+        cc_proxy::retry::set_zero_retry_delay_for_tests(false);
     }
 }
 

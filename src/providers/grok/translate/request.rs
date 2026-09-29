@@ -1419,7 +1419,7 @@ mod tests {
     fn grok_translation_maps_x_intent_to_required_hosted_x_search() {
         let request: MessagesRequest = serde_json::from_value(serde_json::json!({
             "model":"grok-4.5",
-            "messages":[{"role":"user","content":"Search X for recent posts mentioning claude-code-proxy"}],
+            "messages":[{"role":"user","content":"Search X for recent posts mentioning cc-proxy"}],
             "tools":[
                 {"name":"Bash","description":"Run a command","input_schema":{"type":"object"}},
                 {"name":"WebSearch","description":"Search the web","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}}
@@ -1439,7 +1439,7 @@ mod tests {
     fn grok_translation_offers_x_search_without_forcing_it() {
         let request: MessagesRequest = serde_json::from_value(serde_json::json!({
             "model":"grok-4.5",
-            "messages":[{"role":"user","content":"Search X for recent posts mentioning claude-code-proxy"}],
+            "messages":[{"role":"user","content":"Search X for recent posts mentioning cc-proxy"}],
             "tools":[
                 {"name":"Bash","description":"Run a command","input_schema":{"type":"object"}},
                 {"name":"WebSearch","description":"Search the web","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}}

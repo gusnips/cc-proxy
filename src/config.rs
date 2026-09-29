@@ -131,9 +131,24 @@ fn parse_alias(raw: &str) -> Option<AliasProvider> {
 }
 
 fn read_file_config(config_dir: &Path) -> Option<FileConfig> {
-    let path = config_dir.join("config.json");
-    let raw = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+    read_file_config_with_legacy(
+        config_dir,
+        &paths::legacy_config_dir(&paths::DirResolverEnv::default()),
+    )
+}
+
+fn read_file_config_with_legacy(config_dir: &Path, legacy_dir: &Path) -> Option<FileConfig> {
+    if let Ok(raw) = fs::read_to_string(config_dir.join("config.json"))
+        && let Ok(parsed) = serde_json::from_str(&raw)
+    {
+        return Some(parsed);
+    }
+    // Fallback to the pre-fork config dir so existing checkouts keep working.
+    if legacy_dir != config_dir {
+        let raw = fs::read_to_string(legacy_dir.join("config.json")).ok()?;
+        return serde_json::from_str(&raw).ok();
+    }
+    None
 }
 
 pub fn load_config() -> LoadedConfig {
@@ -158,7 +173,7 @@ pub fn load_config_for_env(env: &HashMap<String, String>) -> LoadedConfig {
 }
 
 fn load_config_from_env(env: &HashMap<String, String>, config_dir: PathBuf) -> LoadedConfig {
-    let file = read_file_config(&config_dir);
+    let file = read_file_config_with_legacy(&config_dir, &legacy_dir_for_env(env));
 
     let mut out = LoadedConfig {
         bind_address: "127.0.0.1".to_string(),
@@ -214,6 +229,15 @@ fn load_config_from_env(env: &HashMap<String, String>, config_dir: PathBuf) -> L
     }
 
     out
+}
+
+fn legacy_dir_for_env(env: &HashMap<String, String>) -> PathBuf {
+    let home = env
+        .get("HOME")
+        .or_else(|| env.get("USERPROFILE"))
+        .map(String::as_str)
+        .unwrap_or("/");
+    paths::legacy_config_dir_for_home(home)
 }
 
 pub fn config_path() -> PathBuf {
@@ -522,7 +546,8 @@ fn resolve_opencode_config(
     env: &HashMap<String, String>,
     config_dir: &Path,
 ) -> ResolvedOpenCodeConfig {
-    let file = read_file_config(config_dir).and_then(|file| file.opencode);
+    let file = read_file_config_with_legacy(config_dir, &legacy_dir_for_env(env))
+        .and_then(|file| file.opencode);
     let file_key = file
         .as_ref()
         .and_then(|config| config.api_key.as_ref())

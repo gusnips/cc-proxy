@@ -1,24 +1,24 @@
 ---
 title: Command reference
-description: Canonical claude-code-proxy command syntax for serving, monitoring, listing models, version output, and provider authentication.
+description: Canonical cc-proxy command syntax for serving, monitoring, listing models, version output, and provider authentication.
 ---
 
-Running `claude-code-proxy` without a subcommand is equivalent to `claude-code-proxy serve`.
+Running `cc-proxy` without a subcommand is equivalent to `cc-proxy serve`.
 
 ## Global version commands
 
 ```sh
-claude-code-proxy --version
-claude-code-proxy -v
-claude-code-proxy version
+cc-proxy --version
+cc-proxy -v
+cc-proxy version
 ```
 
-Each prints `claude-code-proxy <version>`.
+Each prints `cc-proxy <version>`.
 
 ## `serve`
 
 ```sh
-claude-code-proxy serve [--port <PORT>] [--no-monitor]
+cc-proxy serve [--port <PORT>] [--no-monitor]
 ```
 
 Starts the local HTTP proxy and blocks until shutdown.
@@ -35,7 +35,7 @@ Plain mode continues collecting monitor history and supports separate dashboards
 ## `monitor`
 
 ```sh
-claude-code-proxy monitor [--url <URL>]
+cc-proxy monitor [--url <URL>]
 ```
 
 Attach a read-only dashboard to a running proxy. The default URL is `http://127.0.0.1:<configured-port>`. No provider login is needed in the dashboard process. `q` and `Ctrl-C` detach without stopping the proxy; multiple dashboards are supported. After a connection failure, the dashboard retains its last snapshot and retries. The proxy accepts monitor reads only from loopback peers; use an SSH port forward for another machine.
@@ -43,7 +43,7 @@ Attach a read-only dashboard to a running proxy. The default URL is `http://127.
 ## `demo`
 
 ```sh
-claude-code-proxy demo
+cc-proxy demo
 ```
 
 Opens the monitor with deterministic simulated traffic. It does not bind a network port or contact providers.
@@ -51,7 +51,7 @@ Opens the monitor with deterministic simulated traffic. It does not bind a netwo
 ## `models`
 
 ```sh
-claude-code-proxy models [--full]
+cc-proxy models [--full]
 ```
 
 Prints supported IDs grouped by provider. The default output compacts Cursor's runtime catalog. `--full` prints every Cursor alias.
@@ -61,7 +61,7 @@ Prints supported IDs grouped by provider. The default output compacts Cursor's r
 The command shape is:
 
 ```text
-claude-code-proxy <provider> auth <action>
+cc-proxy <provider> auth <action>
 ```
 
 | Provider | `login` | `device` | `status` | `logout` |
@@ -74,10 +74,10 @@ claude-code-proxy <provider> auth <action>
 Examples:
 
 ```sh
-claude-code-proxy codex auth login
-claude-code-proxy grok auth device
-claude-code-proxy kimi auth status
-claude-code-proxy cursor auth logout
+cc-proxy codex auth login
+cc-proxy grok auth device
+cc-proxy kimi auth status
+cc-proxy cursor auth logout
 ```
 
 A missing credential makes `auth status` exit with status 1. Other provider command failures exit with status 2. Successful commands exit with status 0.

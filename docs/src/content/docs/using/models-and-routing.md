@@ -12,19 +12,23 @@ The model ID in each request selects its provider. One proxy listener can serve 
 | Registered `gpt-*` IDs and their `-fast` forms | Codex |
 | `kimi-for-coding`, `kimi-k2.6`, `k2.6` | Kimi |
 | `grok-composer-2.5-fast`, `grok-4.5`, `grok-4.6` | Grok |
-| Non-conflicting registered OpenCode Go IDs and every `opencode-go/<model-id>` | OpenCode Go |
+| Non-conflicting OpenCode Go IDs and **every** `opencode-go/<model-id>`, registered or not | OpenCode Go |
 | `cursor`, Cursor legacy aliases, `cursor:<id>`, `cursor-plan:<id>`, `cursor-ask:<id>` | Cursor Agent |
 | Anthropic-style aliases such as `haiku`, `sonnet`, `opus`, `fable`, and registered `claude-*` aliases | The `aliasProvider`, Codex by default |
 
-An unknown ID returns HTTP 400 with the supported provider catalog. There is no implicit fallback for arbitrary model names.
+An unknown ID returns HTTP 400 with the supported provider catalog. The one
+exception is the `opencode-go/` prefix: any ID with that prefix is forwarded
+to OpenCode Go with an inferred wire protocol, and OpenCode Go itself reports
+the IDs it does not serve. There is no other implicit fallback for arbitrary
+model names.
 
 ## Prefer the live catalog
 
 The model list changes faster than documentation. Ask the installed CLI:
 
 ```sh
-claude-code-proxy models
-claude-code-proxy models --full
+cc-proxy models
+cc-proxy models --full
 ```
 
 The compact command abbreviates Cursor's dynamic aliases. `--full` prints every alias discovered through the installed Cursor Agent catalog.

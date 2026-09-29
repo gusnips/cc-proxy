@@ -17,8 +17,8 @@ Start with `llms.txt`, follow only the pages relevant to the task, and prefer ca
 The installed CLI and running server are authoritative for the active build:
 
 ```sh
-claude-code-proxy models
-claude-code-proxy models --full
+cc-proxy models
+cc-proxy models --full
 curl -s http://127.0.0.1:18765/v1/models
 ```
 
@@ -54,7 +54,7 @@ For a source checkout, implementation and tests are the final authority when doc
 ## Diagnostics workflow
 
 1. Check liveness with `curl http://127.0.0.1:18765/healthz`.
-2. Check the selected model with `claude-code-proxy models`.
+2. Check the selected model with `cc-proxy models`.
 3. Check stored provider credentials with `<provider> auth status`. For OpenCode Go, inspect whether its API-key environment variable or config key is configured without printing the secret.
 4. Read the monitor request detail and structured `proxy.log`.
 5. Read the redacted payload under `errors/` for a failed response.

@@ -11,8 +11,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use claude_code_proxy::MessagesRequest;
-use claude_code_proxy::providers::codex::translate::request::{
+use cc_proxy::MessagesRequest;
+use cc_proxy::providers::codex::translate::request::{
     TranslateOptions, translate_request,
 };
 use serde_json::{Value, json};

@@ -11,17 +11,17 @@ Check the process and liveness route:
 curl http://127.0.0.1:18765/healthz
 ```
 
-A healthy listener returns `{"ok":true}`. Confirm `ANTHROPIC_BASE_URL` uses the same address and port. `claude-code-proxy serve --port 11435` and `PORT=11435` change the listener port. `--port` wins for that command.
+A healthy listener returns `{"ok":true}`. Confirm `ANTHROPIC_BASE_URL` uses the same address and port. `cc-proxy serve --port 11435` and `PORT=11435` change the listener port. `--port` wins for that command.
 
 ## Authentication error
 
 Check the provider selected by the model, then inspect its credential:
 
 ```sh
-claude-code-proxy codex auth status
-claude-code-proxy kimi auth status
-claude-code-proxy grok auth status
-claude-code-proxy cursor auth status
+cc-proxy codex auth status
+cc-proxy kimi auth status
+cc-proxy grok auth status
+cc-proxy cursor auth status
 ```
 
 Use that provider's login command when credentials are missing or expired. Codex requires ChatGPT subscription auth, not an OpenAI API key. Each provider uses proxy-owned credentials.
@@ -34,8 +34,8 @@ OpenCode Go has no `auth status` command; configure its API key through
 Run:
 
 ```sh
-claude-code-proxy models
-claude-code-proxy models --full
+cc-proxy models
+cc-proxy models --full
 ```
 
 An unknown local ID returns a catalog in the error. A known ID can still be rejected upstream when the account, subscription, or region lacks access. Cursor's prefixed form, such as `cursor:gpt-5.5`, forces Cursor routing and avoids cross-provider collisions.
@@ -61,16 +61,16 @@ For a non-TUN local HTTP proxy, set both destination-scheme variables before sta
 | `HTTP_PROXY` | `http://127.0.0.1:7890` |
 | `HTTPS_PROXY` | `http://127.0.0.1:7890` |
 
-Set them through the operating system, service manager, or shell, then start `claude-code-proxy serve` in the same environment.
+Set them through the operating system, service manager, or shell, then start `cc-proxy serve` in the same environment.
 
-The default `wss://chatgpt.com` connection uses `HTTPS_PROXY`; a working proxy should show `CONNECT chatgpt.com:443`. The `http://` value is normal: it describes how to reach the proxy, while `HTTPS_PROXY` describes which destinations use it. Restart claude-code-proxy after changing these variables because the client and pooled WebSocket route are created at startup.
+The default `wss://chatgpt.com` connection uses `HTTPS_PROXY`; a working proxy should show `CONNECT chatgpt.com:443`. The `http://` value is normal: it describes how to reach the proxy, while `HTTPS_PROXY` describes which destinations use it. Restart cc-proxy after changing these variables because the client and pooled WebSocket route are created at startup.
 
 Check `NO_PROXY` when the proxy sees no request. Proxy connection, authentication, or CONNECT failure is returned as an error and never retried directly. Environment variables are supported; OS proxy settings and PAC/WPAD discovery are not automatic.
 
 Use HTTP SSE to isolate transport behavior:
 
 ```sh
-CCP_CODEX_TRANSPORT=http claude-code-proxy serve
+CCP_CODEX_TRANSPORT=http cc-proxy serve
 ```
 
 `auto` falls back only when WebSocket setup fails before sending the request. It does not replay an in-flight request.
@@ -81,7 +81,7 @@ Cursor needs the installed Cursor Agent JavaScript bundle for protobuf schemas. 
 
 ```sh
 CCP_CURSOR_AGENT_BUNDLE=/path/to/cursor-agent/index.js \
-  claude-code-proxy serve
+  cc-proxy serve
 ```
 
 ## Rate limited
@@ -105,7 +105,7 @@ It prints a random local URL, a sourceable `client.env`, and artifact paths. Kee
 ```sh
 CCP_LOG_VERBOSE=1 \
 CCP_TRAFFIC_LOG=1 \
-  claude-code-proxy serve --no-monitor
+  cc-proxy serve --no-monitor
 ```
 
 Traffic capture writes the inbound request, translated upstream request, upstream headers and events, and downstream events in emission order. Known credentials are redacted, but prompts and tool content are preserved. Disable capture and delete artifacts after diagnosis.

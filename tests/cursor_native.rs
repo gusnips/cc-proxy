@@ -23,7 +23,7 @@ static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[test]
 fn prost_roundtrip_preserves_cursor_server_message() {
-    use claude_code_proxy::providers::cursor::proto::*;
+    use cc_proxy::providers::cursor::proto::*;
     use prost::Message;
 
     let msg = AgentServerMessage {
@@ -52,7 +52,7 @@ fn prost_roundtrip_preserves_cursor_server_message() {
 
 #[test]
 fn prost_roundtrip_preserves_client_message() {
-    use claude_code_proxy::providers::cursor::proto::*;
+    use cc_proxy::providers::cursor::proto::*;
     use prost::Message;
 
     let msg = AgentClientMessage {
@@ -101,7 +101,7 @@ fn prost_roundtrip_preserves_client_message() {
 
 #[test]
 fn connect_frame_fixture_matches_reference_layout() {
-    use claude_code_proxy::providers::cursor::connect::encode_connect_frame;
+    use cc_proxy::providers::cursor::connect::encode_connect_frame;
 
     let frame = encode_connect_frame(b"abc", 0);
     assert_eq!(hex::encode(frame), "0000000003616263");
@@ -109,7 +109,7 @@ fn connect_frame_fixture_matches_reference_layout() {
 
 #[test]
 fn connect_frame_decode_reference() {
-    use claude_code_proxy::providers::cursor::connect::ConnectFrameDecoder;
+    use cc_proxy::providers::cursor::connect::ConnectFrameDecoder;
 
     let wire = hex::decode("0000000003616263").unwrap();
     let mut decoder = ConnectFrameDecoder::new();
@@ -121,8 +121,8 @@ fn connect_frame_decode_reference() {
 
 #[test]
 fn connect_frame_with_flags_decode() {
-    use claude_code_proxy::providers::cursor::connect::ConnectFrameDecoder;
-    use claude_code_proxy::providers::cursor::connect::encode_connect_frame;
+    use cc_proxy::providers::cursor::connect::ConnectFrameDecoder;
+    use cc_proxy::providers::cursor::connect::encode_connect_frame;
 
     let frame = encode_connect_frame(b"xyz", 0x03);
     let mut decoder = ConnectFrameDecoder::new();
@@ -140,7 +140,7 @@ fn auth_returns_token_from_env() {
     unsafe {
         std::env::set_var("CCP_CURSOR_AUTH_TOKEN", "test-token-123");
     }
-    let token = claude_code_proxy::providers::cursor::auth::load_cursor_token();
+    let token = cc_proxy::providers::cursor::auth::load_cursor_token();
     assert_eq!(token.as_deref(), Some("test-token-123"));
     unsafe {
         std::env::remove_var("CCP_CURSOR_AUTH_TOKEN");
@@ -153,7 +153,7 @@ fn auth_returns_token_from_env() {
 
 #[test]
 fn model_resolution_resolves_cursor_agent_prefix() {
-    use claude_code_proxy::providers::cursor::model::*;
+    use cc_proxy::providers::cursor::model::*;
 
     let r = resolve_cursor_model("cursor-agent:gpt-5.5").unwrap();
     assert_eq!(r.model_id, "gpt-5.5");
@@ -162,7 +162,7 @@ fn model_resolution_resolves_cursor_agent_prefix() {
 
 #[test]
 fn model_resolution_accepts_legacy_cursor_agent() {
-    use claude_code_proxy::providers::cursor::model::*;
+    use cc_proxy::providers::cursor::model::*;
 
     let r = resolve_cursor_model("cursor-agent").unwrap();
     assert_eq!(r.mode, CursorAgentMode::Agent);
@@ -170,8 +170,8 @@ fn model_resolution_accepts_legacy_cursor_agent() {
 
 #[test]
 fn registry_routes_cursor_model_to_cursor_provider() {
-    use claude_code_proxy::Registry;
-    use claude_code_proxy::config::AliasProvider;
+    use cc_proxy::Registry;
+    use cc_proxy::config::AliasProvider;
 
     let registry = Registry::new(AliasProvider::Codex);
     let provider = registry.provider_for_model("cursor:gpt-5.5", None);
@@ -189,8 +189,8 @@ fn registry_routes_cursor_model_to_cursor_provider() {
 
 #[test]
 fn prompt_renders_system_tools_and_messages() {
-    use claude_code_proxy::MessagesRequest;
-    use claude_code_proxy::providers::cursor::request::render_cursor_prompt;
+    use cc_proxy::MessagesRequest;
+    use cc_proxy::providers::cursor::request::render_cursor_prompt;
 
     let req: MessagesRequest = serde_json::from_value(serde_json::json!({
         "model": "cursor:gpt-5.5",
@@ -214,8 +214,8 @@ fn prompt_renders_system_tools_and_messages() {
 
 #[test]
 fn selected_images_count_matches_base64_images() {
-    use claude_code_proxy::MessagesRequest;
-    use claude_code_proxy::providers::cursor::request::cursor_selected_images;
+    use cc_proxy::MessagesRequest;
+    use cc_proxy::providers::cursor::request::cursor_selected_images;
 
     let req: MessagesRequest = serde_json::from_value(serde_json::json!({
         "model": "cursor:gpt-5.5",
@@ -239,7 +239,7 @@ fn selected_images_count_matches_base64_images() {
 
 #[test]
 fn cursor_client_constructs_correct_url() {
-    use claude_code_proxy::providers::cursor::client::CursorHttpClient;
+    use cc_proxy::providers::cursor::client::CursorHttpClient;
 
     let client = CursorHttpClient::new();
     // Just ensure construction doesn't panic
@@ -248,7 +248,7 @@ fn cursor_client_constructs_correct_url() {
 
 #[test]
 fn cursor_error_display_works() {
-    use claude_code_proxy::providers::cursor::client::CursorError;
+    use cc_proxy::providers::cursor::client::CursorError;
 
     let err = CursorError::new(429, "rate limited", Some("backoff".to_string()));
     let display = format!("{err}");
@@ -260,12 +260,12 @@ fn cursor_error_display_works() {
 #[allow(clippy::await_holding_lock)]
 async fn cursor_client_sends_connect_proto_headers_and_run_request_frame() {
     use axum::{Router, routing::post};
-    use claude_code_proxy::providers::cursor::client::CursorHttpClient;
-    use claude_code_proxy::providers::cursor::connect::{
+    use cc_proxy::providers::cursor::client::CursorHttpClient;
+    use cc_proxy::providers::cursor::connect::{
         ConnectFrameDecoder, encode_connect_frame,
     };
-    use claude_code_proxy::providers::cursor::proto::*;
-    use claude_code_proxy::providers::cursor::request::CursorSelectedImage;
+    use cc_proxy::providers::cursor::proto::*;
+    use cc_proxy::providers::cursor::request::CursorSelectedImage;
     use prost::Message;
     use std::sync::{Arc, Mutex};
 
@@ -458,9 +458,9 @@ async fn cursor_client_sends_connect_proto_headers_and_run_request_frame() {
 
 #[test]
 fn response_decode_extracts_text_and_usage() {
-    use claude_code_proxy::providers::cursor::connect::encode_connect_frame;
-    use claude_code_proxy::providers::cursor::proto::*;
-    use claude_code_proxy::providers::cursor::response::*;
+    use cc_proxy::providers::cursor::connect::encode_connect_frame;
+    use cc_proxy::providers::cursor::proto::*;
+    use cc_proxy::providers::cursor::response::*;
     use prost::Message;
 
     let mut body = Vec::new();
@@ -501,7 +501,7 @@ fn response_decode_extracts_text_and_usage() {
     // End frame
     body.extend_from_slice(&encode_connect_frame(b"", 2));
 
-    let upstream = claude_code_proxy::providers::cursor::client::CursorUpstreamResponse {
+    let upstream = cc_proxy::providers::cursor::client::CursorUpstreamResponse {
         status: 200,
         body,
         error_detail: None,
@@ -520,9 +520,9 @@ fn response_decode_extracts_text_and_usage() {
 
 #[test]
 fn sse_parses_event_names_and_data() {
-    use claude_code_proxy::providers::cursor::connect::encode_connect_frame;
-    use claude_code_proxy::providers::cursor::proto::*;
-    use claude_code_proxy::providers::cursor::sse::frame_cursor_stream;
+    use cc_proxy::providers::cursor::connect::encode_connect_frame;
+    use cc_proxy::providers::cursor::proto::*;
+    use cc_proxy::providers::cursor::sse::frame_cursor_stream;
     use prost::Message;
 
     let mut body = Vec::new();
@@ -558,7 +558,7 @@ fn sse_parses_event_names_and_data() {
 
     body.extend_from_slice(&encode_connect_frame(b"", 2));
 
-    let upstream = claude_code_proxy::providers::cursor::client::CursorUpstreamResponse {
+    let upstream = cc_proxy::providers::cursor::client::CursorUpstreamResponse {
         status: 200,
         body,
         error_detail: None,
@@ -589,9 +589,9 @@ fn sse_parses_event_names_and_data() {
 
 #[test]
 fn sse_message_delta_contains_usage() {
-    use claude_code_proxy::providers::cursor::connect::encode_connect_frame;
-    use claude_code_proxy::providers::cursor::proto::*;
-    use claude_code_proxy::providers::cursor::sse::frame_cursor_stream;
+    use cc_proxy::providers::cursor::connect::encode_connect_frame;
+    use cc_proxy::providers::cursor::proto::*;
+    use cc_proxy::providers::cursor::sse::frame_cursor_stream;
     use prost::Message;
 
     let mut body = Vec::new();
@@ -616,7 +616,7 @@ fn sse_message_delta_contains_usage() {
     body.extend_from_slice(&encode_connect_frame(&payload, 0));
     body.extend_from_slice(&encode_connect_frame(b"", 2));
 
-    let upstream = claude_code_proxy::providers::cursor::client::CursorUpstreamResponse {
+    let upstream = cc_proxy::providers::cursor::client::CursorUpstreamResponse {
         status: 200,
         body,
         error_detail: None,
@@ -648,8 +648,8 @@ fn sse_message_delta_contains_usage() {
 
 #[test]
 fn registry_provider_for_legacy_cursor_model() {
-    use claude_code_proxy::Registry;
-    use claude_code_proxy::config::AliasProvider;
+    use cc_proxy::Registry;
+    use cc_proxy::config::AliasProvider;
 
     let registry = Registry::new(AliasProvider::Codex);
 
@@ -683,10 +683,10 @@ fn registry_provider_for_legacy_cursor_model() {
 #[allow(clippy::await_holding_lock)]
 async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
     use axum::{Router, routing::post};
-    use claude_code_proxy::providers::cursor::connect::encode_connect_frame;
-    use claude_code_proxy::providers::cursor::proto::*;
-    use claude_code_proxy::providers::cursor::response::decode_cursor_upstream;
-    use claude_code_proxy::providers::cursor::sse::frame_cursor_stream;
+    use cc_proxy::providers::cursor::connect::encode_connect_frame;
+    use cc_proxy::providers::cursor::proto::*;
+    use cc_proxy::providers::cursor::response::decode_cursor_upstream;
+    use cc_proxy::providers::cursor::sse::frame_cursor_stream;
     use prost::Message;
 
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -758,8 +758,8 @@ async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    use claude_code_proxy::providers::cursor::auth::load_cursor_token;
-    use claude_code_proxy::providers::cursor::client::CursorHttpClient;
+    use cc_proxy::providers::cursor::auth::load_cursor_token;
+    use cc_proxy::providers::cursor::client::CursorHttpClient;
 
     let token = load_cursor_token().unwrap();
     let client = CursorHttpClient::new();
@@ -805,8 +805,8 @@ async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
 #[allow(clippy::await_holding_lock)]
 async fn cursor_provider_handle_messages_returns_anthropic_json() {
     use axum::{Router, routing::post};
-    use claude_code_proxy::providers::cursor::connect::encode_connect_frame;
-    use claude_code_proxy::providers::cursor::proto::*;
+    use cc_proxy::providers::cursor::connect::encode_connect_frame;
+    use cc_proxy::providers::cursor::proto::*;
     use prost::Message;
 
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -865,9 +865,9 @@ async fn cursor_provider_handle_messages_returns_anthropic_json() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Send via handle_messages (non-streaming)
-    use claude_code_proxy::provider::Provider;
-    use claude_code_proxy::provider::RequestContext;
-    use claude_code_proxy::providers::cursor::CursorProvider;
+    use cc_proxy::provider::Provider;
+    use cc_proxy::provider::RequestContext;
+    use cc_proxy::providers::cursor::CursorProvider;
 
     let provider = CursorProvider::new();
     let body = serde_json::from_value(serde_json::json!({
@@ -904,10 +904,10 @@ async fn cursor_provider_handle_messages_returns_anthropic_json() {
 #[allow(clippy::await_holding_lock)]
 async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
     use axum::{Router, routing::post};
-    use claude_code_proxy::providers::cursor::connect::{
+    use cc_proxy::providers::cursor::connect::{
         ConnectFrameDecoder, encode_connect_frame,
     };
-    use claude_code_proxy::providers::cursor::proto::*;
+    use cc_proxy::providers::cursor::proto::*;
     use prost::Message;
     use std::sync::{Arc, Mutex};
 
@@ -1004,7 +1004,7 @@ async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
     let proxy_addr = proxy_listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let _proxy_handle = tokio::spawn(async move {
-        claude_code_proxy::server::serve_listener(proxy_listener, None, async move {
+        cc_proxy::server::serve_listener(proxy_listener, None, async move {
             let _ = shutdown_rx.await;
         })
         .await
@@ -1072,8 +1072,8 @@ async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
 
 #[test]
 fn bridge_start_pauses_on_tool_use_xml() {
-    use claude_code_proxy::providers::cursor::response::*;
-    use claude_code_proxy::providers::cursor::tool_bridge::*;
+    use cc_proxy::providers::cursor::response::*;
+    use cc_proxy::providers::cursor::tool_bridge::*;
 
     // Create upstream events with a text delta containing XML tool_use
     let events = vec![
@@ -1147,8 +1147,8 @@ fn bridge_start_pauses_on_tool_use_xml() {
 
 #[test]
 fn bridge_start_passes_through_without_tool_use() {
-    use claude_code_proxy::providers::cursor::response::*;
-    use claude_code_proxy::providers::cursor::tool_bridge::*;
+    use cc_proxy::providers::cursor::response::*;
+    use cc_proxy::providers::cursor::tool_bridge::*;
 
     let events = vec![
         CursorStreamEvent::TextDelta {
@@ -1197,8 +1197,8 @@ fn bridge_start_passes_through_without_tool_use() {
 
 #[test]
 fn bridge_start_creates_pending_tool_in_registry() {
-    use claude_code_proxy::providers::cursor::response::*;
-    use claude_code_proxy::providers::cursor::tool_bridge::*;
+    use cc_proxy::providers::cursor::response::*;
+    use cc_proxy::providers::cursor::tool_bridge::*;
 
     // Clean state
     BridgeRegistry::clear();
@@ -1229,8 +1229,8 @@ fn bridge_start_creates_pending_tool_in_registry() {
 
 #[test]
 fn bridge_resume_continues_after_tool_use_pause() {
-    use claude_code_proxy::providers::cursor::response::*;
-    use claude_code_proxy::providers::cursor::tool_bridge::*;
+    use cc_proxy::providers::cursor::response::*;
+    use cc_proxy::providers::cursor::tool_bridge::*;
 
     BridgeRegistry::clear();
 
@@ -1272,7 +1272,7 @@ fn bridge_resume_continues_after_tool_use_pause() {
     );
     assert!(paused);
 
-    let body: claude_code_proxy::MessagesRequest =
+    let body: cc_proxy::MessagesRequest =
         serde_json::from_value(serde_json::json!({
             "model": "cursor-test",
             "messages": [
@@ -1331,8 +1331,8 @@ fn bridge_resume_continues_after_tool_use_pause() {
 
 #[test]
 fn bridge_rejects_tool_not_in_allowed_list() {
-    use claude_code_proxy::providers::cursor::response::*;
-    use claude_code_proxy::providers::cursor::tool_bridge::*;
+    use cc_proxy::providers::cursor::response::*;
+    use cc_proxy::providers::cursor::tool_bridge::*;
 
     BridgeRegistry::clear();
 
@@ -1372,7 +1372,7 @@ fn bridge_rejects_tool_not_in_allowed_list() {
 
 #[test]
 fn bridge_result_messages_have_correct_read_shape() {
-    use claude_code_proxy::providers::cursor::tool_bridge::*;
+    use cc_proxy::providers::cursor::tool_bridge::*;
 
     let exec = CursorExec {
         id: Some(42),
@@ -1405,7 +1405,7 @@ fn bridge_result_messages_have_correct_read_shape() {
 
 #[test]
 fn bridge_result_messages_have_correct_write_shape() {
-    use claude_code_proxy::providers::cursor::tool_bridge::*;
+    use cc_proxy::providers::cursor::tool_bridge::*;
 
     let exec = CursorExec {
         id: Some(99),
@@ -1455,7 +1455,7 @@ fn bridge_result_messages_have_correct_write_shape() {
 
 #[test]
 fn bridge_shell_stream_result_has_correct_shape() {
-    use claude_code_proxy::providers::cursor::tool_bridge::*;
+    use cc_proxy::providers::cursor::tool_bridge::*;
 
     let exec = CursorExec {
         id: Some(7),

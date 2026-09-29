@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use claude_code_proxy::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
-use claude_code_proxy::{registry::Registry, server::app};
+use cc_proxy::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
+use cc_proxy::{registry::Registry, server::app};
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::json;
@@ -53,14 +53,14 @@ struct ZeroRetryDelayGuard;
 
 impl ZeroRetryDelayGuard {
     fn new() -> Self {
-        claude_code_proxy::retry::set_zero_retry_delay_for_tests(true);
+        cc_proxy::retry::set_zero_retry_delay_for_tests(true);
         Self
     }
 }
 
 impl Drop for ZeroRetryDelayGuard {
     fn drop(&mut self) {
-        claude_code_proxy::retry::set_zero_retry_delay_for_tests(false);
+        cc_proxy::retry::set_zero_retry_delay_for_tests(false);
     }
 }
 

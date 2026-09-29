@@ -16,17 +16,17 @@ harnesses:
 Sign in with a **ChatGPT Plus or Pro account**, not OpenAI API credentials.
 
 ```sh
-claude-code-proxy codex auth login
+cc-proxy codex auth login
 # Headless device-code flow
-claude-code-proxy codex auth device
-claude-code-proxy codex auth status
+cc-proxy codex auth device
+cc-proxy codex auth status
 ```
 
 The proxy owns its tokens and does not read native Codex CLI credentials. It refreshes expiring access tokens with a single-flight guard. See [Files and storage](/reference/files-and-storage/) for credential locations.
 
 ## Models and fast mode
 
-Use `claude-code-proxy models` as the current catalog. Model access depends on your ChatGPT account. A model rejected by the subscription produces the upstream error verbatim.
+Use `cc-proxy models` as the current catalog. Model access depends on your ChatGPT account. A model rejected by the subscription produces the upstream error verbatim.
 
 Claude-style aliases map to Codex models: `haiku` and `claude-haiku-*` to `gpt-6-luna`, `sonnet` and `claude-sonnet-*` to `gpt-5.6-terra`, and `opus`, `fable`, `claude-opus-*` (including `claude-opus-5-5`), and `claude-fable-*` to `gpt-6-sol`.
 
@@ -103,7 +103,7 @@ Server compaction is disabled by default. Enable it in `config.json`:
 Or enable it for one proxy process:
 
 ```sh
-CCP_CODEX_SERVER_COMPACTION=1 claude-code-proxy serve
+CCP_CODEX_SERVER_COMPACTION=1 cc-proxy serve
 ```
 
 ### Fallbacks and visibility
@@ -125,7 +125,7 @@ The proxy replaces incoming credentials with stored Codex auth for both routes. 
 `CCP_CODEX_IMAGES_API=1` separately enables `POST /v1/images/generations` and `POST /v1/images/edits`. The routes reuse the proxy's stored ChatGPT OAuth session and target the ChatGPT Codex image backend; no OpenAI Platform API key is required.
 
 ```sh
-CCP_CODEX_IMAGES_API=1 claude-code-proxy serve
+CCP_CODEX_IMAGES_API=1 cc-proxy serve
 ```
 
 The model defaults to and is restricted to `gpt-image-2`. Generation accepts JSON. Editing accepts either Codex JSON data URLs or OpenAI-style multipart uploads, which the proxy validates and converts into the Codex JSON contract. Results are returned as `data[].b64_json`. Masks, remote URLs, URL-formatted output, and image variations are not supported.

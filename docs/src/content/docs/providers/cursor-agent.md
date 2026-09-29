@@ -10,8 +10,8 @@ Cursor uses Cursor Agent's HTTP/2 full-duplex Connect protocol at `https://api2.
 Use a **Cursor account**:
 
 ```sh
-claude-code-proxy cursor auth login
-claude-code-proxy cursor auth status
+cc-proxy cursor auth login
+cc-proxy cursor auth status
 ```
 
 The browser flow stores proxy-owned tokens. It does not read Cursor Agent's Keychain or `auth.json`. `CCP_CURSOR_AUTH_TOKEN` can supply a bearer token directly to the proxy process.
@@ -33,7 +33,7 @@ Legacy IDs such as `cursor`, `cursor-plan`, `cursor-ask`, `composer-2.5`, and `c
 The provider reads Cursor Agent's current model catalog at runtime. Use:
 
 ```sh
-claude-code-proxy models --full
+cc-proxy models --full
 ```
 
 Unknown future IDs are accepted through `cursor:<raw-model>`.

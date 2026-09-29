@@ -10,14 +10,14 @@ Grok uses the Responses endpoint at `https://cli-chat-proxy.grok.com/v1/response
 Use a **grok.com account**. Browser login uses S256 PKCE through `auth.x.ai` and an ephemeral loopback callback:
 
 ```sh
-claude-code-proxy grok auth login
+cc-proxy grok auth login
 ```
 
 For a headless host, use the device-code flow:
 
 ```sh
-claude-code-proxy grok auth device
-claude-code-proxy grok auth status
+cc-proxy grok auth device
+cc-proxy grok auth status
 ```
 
 The proxy owns and refreshes its Grok tokens. It does not read `~/.grok/auth.json`.

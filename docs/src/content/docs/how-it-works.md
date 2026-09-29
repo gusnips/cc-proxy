@@ -1,11 +1,11 @@
 ---
 title: How it works
-description: Follow authentication, routing, protocol translation, streaming, session state, and diagnostics through claude-code-proxy.
+description: Follow authentication, routing, protocol translation, streaming, session state, and diagnostics through cc-proxy.
 ---
 
-claude-code-proxy exposes Anthropic Messages and optional OpenAI-compatible routes. Every route selects a provider from the request model and translates through that provider's native protocol.
+cc-proxy exposes Anthropic Messages and optional OpenAI-compatible routes. Every route selects a provider from the request model and translates through that provider's native protocol.
 
-<div class="route-rail" aria-label="claude-code-proxy request architecture">
+<div class="route-rail" aria-label="cc-proxy request architecture">
   <div class="route-node"><strong>API client</strong><span>Anthropic Messages<br/>OpenAI Chat or Responses</span></div>
   <div class="route-arrow" aria-hidden="true">→</div>
   <div class="route-node"><strong>Proxy pipeline</strong><span>route model<br/>refresh auth<br/>translate events</span></div>
@@ -31,7 +31,7 @@ Codex Responses requests go directly to the native Codex API. The proxy translat
 
 ## Authentication boundary
 
-Each provider login belongs to claude-code-proxy. The proxy does not read native Codex, Grok, or Cursor Agent credentials. Credentials live in the platform credential store described in [Files and storage](/reference/files-and-storage/). OpenCode Go instead uses the configured subscription API key. Incoming `ANTHROPIC_AUTH_TOKEN` values are accepted for client compatibility and are not used as upstream credentials.
+Each provider login belongs to cc-proxy. The proxy does not read native Codex, Grok, or Cursor Agent credentials. Credentials live in the platform credential store described in [Files and storage](/reference/files-and-storage/). OpenCode Go instead uses the configured subscription API key. Incoming `ANTHROPIC_AUTH_TOKEN` values are accepted for client compatibility and are not used as upstream credentials.
 
 ## Routing boundary
 

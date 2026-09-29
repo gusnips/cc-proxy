@@ -1,17 +1,21 @@
 ---
 title: Files and storage
-description: Canonical claude-code-proxy configuration, credential, device ID, log, error, traffic-capture, and service-log paths on macOS, Linux, and Windows.
+description: Canonical cc-proxy configuration, credential, device ID, log, error, traffic-capture, and service-log paths on macOS, Linux, and Windows.
 ---
 
-claude-code-proxy separates configuration and credentials from runtime state.
+cc-proxy separates configuration and credentials from runtime state.
 
 ## Directory roots
 
 | Platform | Configuration root | State root |
 | --- | --- | --- |
-| macOS | `~/.config/claude-code-proxy` | `${XDG_STATE_HOME:-~/.local/state}/claude-code-proxy` |
-| Linux | `${XDG_CONFIG_HOME:-~/.config}/claude-code-proxy` | `${XDG_STATE_HOME:-~/.local/state}/claude-code-proxy` |
-| Windows | `%APPDATA%/claude-code-proxy` | `%LOCALAPPDATA%/claude-code-proxy` |
+| macOS | `~/.config/cc-proxy` | `${XDG_STATE_HOME:-~/.local/state}/cc-proxy` |
+| Linux | `${XDG_CONFIG_HOME:-~/.config}/cc-proxy` | `${XDG_STATE_HOME:-~/.local/state}/cc-proxy` |
+| Windows | `%APPDATA%/cc-proxy` | `%LOCALAPPDATA%/cc-proxy` |
+
+A `config.json` left in the previous `claude-code-proxy` configuration root is
+still read when the new location has none, and file-backed provider
+credentials fall back to the old directory the same way.
 
 Windows falls back to `%USERPROFILE%/AppData/Roaming` and `%USERPROFILE%/AppData/Local` when the corresponding environment variable is absent.
 

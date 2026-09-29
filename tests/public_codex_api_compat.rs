@@ -4,17 +4,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use claude_code_proxy::provider::RequestContext;
-use claude_code_proxy::providers::codex::client::{
+use cc_proxy::provider::RequestContext;
+use cc_proxy::providers::codex::client::{
     ActualTransport, CodexError, CodexHttpClient, CodexResponse,
 };
-use claude_code_proxy::providers::codex::continuation::{
+use cc_proxy::providers::codex::continuation::{
     ContinuationCandidate, abort_continuation, clear_continuation, continuation_candidate,
     has_continuation_for_tests, if_current_turn, is_current_turn, record_continuation,
     with_current_turn,
 };
-use claude_code_proxy::providers::codex::translate::request::ResponsesRequest;
-use claude_code_proxy::providers::codex::websocket::{
+use cc_proxy::providers::codex::translate::request::ResponsesRequest;
+use cc_proxy::providers::codex::websocket::{
     CodexWebSocketEventReceiver, invalidate_codex_websocket_pool_key,
     invalidate_codex_websocket_pool_turn,
 };

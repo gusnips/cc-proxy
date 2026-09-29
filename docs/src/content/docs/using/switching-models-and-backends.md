@@ -1,6 +1,6 @@
 ---
 title: Switching models and backends
-description: Choose launch-time patterns for switching between claude-code-proxy and direct Anthropic, then switch routed models within a proxy session.
+description: Choose launch-time patterns for switching between cc-proxy and direct Anthropic, then switch routed models within a proxy session.
 ---
 
 Claude Code binds its base URL and client auth when the process starts. A **backend switch** needs a new Claude Code process. A **model switch** can stay in the same proxy-backed session because the proxy routes each request by model ID.
@@ -31,8 +31,8 @@ Put a wrapper named `claude` ahead of the real binary on `PATH`. Set `REAL_CLAUD
 set -euo pipefail
 
 real_claude="${REAL_CLAUDE:-$HOME/.local/bin/claude-real}"
-flag="$HOME/.claude/claude-code-proxy-enabled"
-model_file="$HOME/.claude/claude-code-proxy-model"
+flag="$HOME/.claude/cc-proxy-enabled"
+model_file="$HOME/.claude/cc-proxy-model"
 
 if [ -f "$flag" ]; then
   model="gpt-6-sol[1m]"
@@ -53,10 +53,10 @@ Toggle it with ordinary file operations:
 
 ```sh
 mkdir -p ~/.claude
-touch ~/.claude/claude-code-proxy-enabled
-printf '%s\n' 'kimi-for-coding[1m]' > ~/.claude/claude-code-proxy-model
+touch ~/.claude/cc-proxy-enabled
+printf '%s\n' 'kimi-for-coding[1m]' > ~/.claude/cc-proxy-model
 # Disable for future sessions
-rm ~/.claude/claude-code-proxy-enabled
+rm ~/.claude/cc-proxy-enabled
 ```
 
 New processes read the flag and model. Running processes retain their launch environment.
@@ -76,4 +76,4 @@ The provider changes with the model. Provider auth must already exist. Claude Co
 
 ## Scope
 
-claude-code-proxy does not provide a profile GUI, rewrite Claude Code settings, change base URLs in a running process, or configure Desktop and IDE launch environments. Use process environment, a wrapper, or a dedicated profile manager for those concerns.
+cc-proxy does not provide a profile GUI, rewrite Claude Code settings, change base URLs in a running process, or configure Desktop and IDE launch environments. Use process environment, a wrapper, or a dedicated profile manager for those concerns.

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
-use claude_code_proxy::{
+use cc_proxy::{
     config, logging,
     monitor::MonitorHandle,
     paths,
@@ -14,7 +14,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "claude-code-proxy",
+    name = "cc-proxy",
     version = VERSION,
     about = "Anthropic-compatible proxy for Claude Code provider backends",
     disable_version_flag = true
@@ -77,7 +77,7 @@ enum Commands {
 enum ProviderGroup {
     Auth {
         #[command(subcommand)]
-        command: claude_code_proxy::provider::AuthCommand,
+        command: cc_proxy::provider::AuthCommand,
     },
 }
 
@@ -85,7 +85,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.version_flag {
-        println!("claude-code-proxy {}", VERSION);
+        println!("cc-proxy {}", VERSION);
         return Ok(());
     }
 
@@ -96,7 +96,7 @@ fn main() -> Result<()> {
 
     match commands {
         Commands::Version => {
-            println!("claude-code-proxy {}", VERSION);
+            println!("cc-proxy {}", VERSION);
             Ok(())
         }
         Commands::Serve { port, no_monitor } => {
@@ -177,7 +177,7 @@ fn main() -> Result<()> {
                 .timeout(std::time::Duration::from_secs(2))
                 .build()?;
             let monitor = runtime.block_on(
-                claude_code_proxy::monitor::remote::RemoteMonitor::connect(client, url.clone()),
+                cc_proxy::monitor::remote::RemoteMonitor::connect(client, url.clone()),
             )?;
             tui::run_attached_monitor(|| monitor.snapshot(), url.to_string())?;
             Ok(())
@@ -294,21 +294,21 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
     let handlers = provider.cli();
     match command {
         ProviderGroup::Auth { command } => match command {
-            claude_code_proxy::provider::AuthCommand::Login => {
+            cc_proxy::provider::AuthCommand::Login => {
                 if let Err(err) = handlers.login() {
                     eprintln!("{err}");
                     std::process::exit(2);
                 }
                 Ok(())
             }
-            claude_code_proxy::provider::AuthCommand::Device => {
+            cc_proxy::provider::AuthCommand::Device => {
                 if let Err(err) = handlers.device() {
                     eprintln!("{err}");
                     std::process::exit(2);
                 }
                 Ok(())
             }
-            claude_code_proxy::provider::AuthCommand::Status => {
+            cc_proxy::provider::AuthCommand::Status => {
                 if let Err(err) = handlers.status() {
                     println!("{err}");
                     if err.to_string() == "Not authenticated" {
@@ -318,7 +318,7 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
                 }
                 Ok(())
             }
-            claude_code_proxy::provider::AuthCommand::Logout => {
+            cc_proxy::provider::AuthCommand::Logout => {
                 handlers.logout()?;
                 Ok(())
             }
@@ -359,7 +359,7 @@ fn compact_cursor_list(models: &[String]) -> String {
     if !dynamic.is_empty() {
         out.push_str(", example: cursor:gpt-5.5");
     }
-    out.push_str(" run `claude-code-proxy models --full` for all aliases");
+    out.push_str(" run `cc-proxy models --full` for all aliases");
     out
 }
 
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn demo_command_parses_without_server_options() {
-        let cli = Cli::try_parse_from(["claude-code-proxy", "demo"]).unwrap();
+        let cli = Cli::try_parse_from(["cc-proxy", "demo"]).unwrap();
 
         assert!(matches!(cli.command, Some(Commands::Demo)));
     }

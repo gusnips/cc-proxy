@@ -138,6 +138,23 @@ impl Registry {
 
     pub fn supported_models_for(&self, provider: &str) -> Vec<String> {
         let mut models = self.models.get(provider).cloned().unwrap_or_default();
+        if provider == "opencode" {
+            // Bare IDs owned by another provider's catalog stay with that
+            // provider; only the `opencode-go/` qualified form selects the
+            // OpenCode Go version. Filtering here instead of in the
+            // advertisement keeps the conflict policy automatic across
+            // catalog refreshes.
+            let claimed: HashSet<&str> = self
+                .models
+                .iter()
+                .filter(|(name, _)| name.as_str() != "opencode")
+                .flat_map(|(_, entries)| entries.iter().map(String::as_str))
+                .collect();
+            models.retain(|model| {
+                model.starts_with(crate::providers::opencode::model::MODEL_PREFIX)
+                    || !claimed.contains(model.as_str())
+            });
+        }
         if provider == self.alias_provider.as_str() {
             for alias in ANTHROPIC_STYLE_ALIASES {
                 if !models.iter().any(|value| value == alias) {
@@ -173,6 +190,13 @@ impl Registry {
         session_affinity: Option<&AliasProvider>,
     ) -> Option<Arc<dyn Provider>> {
         let normalized = normalize_incoming_model(raw_model);
+        // Any `opencode-go/` ID routes to OpenCode Go, registered or not.
+        // Unknown IDs are forwarded with an inferred wire protocol and
+        // OpenCode Go reports the ones it never heard of, so a catalog
+        // refresh on their side never breaks routing on ours.
+        if normalized.starts_with(crate::providers::opencode::model::MODEL_PREFIX) {
+            return self.handlers.get("opencode").cloned();
+        }
         if is_anthropic_alias(&normalized) {
             let target = session_affinity.unwrap_or(&self.alias_provider);
             return self.handlers.get(target.as_str()).cloned();
@@ -181,8 +205,16 @@ impl Registry {
             return self.handlers.get("cursor").cloned();
         }
 
-        for (name, models) in &self.models {
-            if models.iter().any(|candidate| candidate == &normalized) {
+        // Explicit priority, not map order: a bare ID owned by several
+        // catalogs stays with its native provider. The `opencode-go/`
+        // qualified form above is the only way to select the OpenCode Go
+        // version of a conflicting ID.
+        for name in ["codex", "kimi", "cursor", "grok", "opencode"] {
+            if self
+                .models
+                .get(name)
+                .is_some_and(|entries| entries.iter().any(|candidate| candidate == &normalized))
+            {
                 return self.handlers.get(name).cloned();
             }
         }
@@ -449,6 +481,21 @@ mod tests {
                 .name(),
             "opencode"
         );
+        // Refreshed catalog entries behave the same way.
+        assert_eq!(
+            registry
+                .provider_for_model("deepseek-v4.1-flash", None)
+                .unwrap()
+                .name(),
+            "opencode"
+        );
+        assert_eq!(
+            registry
+                .provider_for_model("space-bunny-free", None)
+                .unwrap()
+                .name(),
+            "opencode"
+        );
         assert_eq!(
             registry
                 .provider_for_model("kimi-k2.6", None)
@@ -458,8 +505,10 @@ mod tests {
         );
         for (model, owner) in [
             ("gpt-5.6-luna", "codex"),
+            ("gpt-6-luna", "codex"),
             ("grok-4.5", "grok"),
             ("grok-4.6", "grok"),
+            ("grok-4.7", "grok"),
             ("kimi-k3", "kimi"),
         ] {
             assert_eq!(
@@ -472,6 +521,62 @@ mod tests {
                     .unwrap()
                     .name(),
                 "opencode"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_prefix_routes_unknown_models_upstream() {
+        // IDs OpenCode Go adds on their side keep routing here even before
+        // the local catalog learns them; their API reports unknown IDs.
+        let registry = Registry::new(AliasProvider::Codex);
+        for model in [
+            "opencode-go/some-future-model",
+            "opencode-go/grok-5",
+            "opencode-go/qwen-next-max",
+            "opencode-go/minimax-next",
+            "opencode-go/gpt-6-sol[1m]",
+        ] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                "opencode",
+                "{model}"
+            );
+        }
+        // Bare unknown IDs still have no provider.
+        assert!(registry.provider_for_model("some-future-model", None).is_none());
+    }
+
+    #[test]
+    fn opencode_lists_only_unconflicted_bare_ids() {
+        let registry = Registry::new(AliasProvider::Codex);
+        let models = registry.supported_models_for("opencode");
+        for id in [
+            "gpt-5.6-luna",
+            "gpt-6-luna",
+            "grok-4.5",
+            "grok-4.6",
+            "grok-4.7",
+            "kimi-k3",
+            "kimi-k2.6",
+        ] {
+            assert!(
+                !models.iter().any(|model| model == id),
+                "bare {id} must stay with its native provider"
+            );
+            assert!(
+                models
+                    .iter()
+                    .any(|model| model == &format!("opencode-go/{id}")),
+                "qualified opencode-go/{id} must stay listed"
+            );
+        }
+        for id in ["glm-5.2", "deepseek-v4.1-flash", "space-bunny-free"] {
+            assert!(models.iter().any(|model| model == id));
+            assert!(
+                models
+                    .iter()
+                    .any(|model| model == &format!("opencode-go/{id}"))
             );
         }
     }

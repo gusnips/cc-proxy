@@ -48,7 +48,7 @@ install:
 
 # Install debug binary globally via symlink
 install-dev:
-    cargo build && ln -sf $(pwd)/target/debug/claude-code-proxy ~/.cargo/bin/claude-code-proxy
+    cargo build && ln -sf $(pwd)/target/debug/cc-proxy ~/.cargo/bin/cc-proxy
 
 # Run the application
 run *ARGS:

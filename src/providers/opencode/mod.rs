@@ -72,7 +72,7 @@ impl OpenCodeProvider {
             return unsupported_model(requested);
         };
         if let Some(monitor) = ctx.monitor.as_ref() {
-            monitor.model_resolved(&ctx.req_id, spec.id);
+            monitor.model_resolved(&ctx.req_id, spec.id.as_str());
         }
         let client = match self.client() {
             Ok(client) => client,
@@ -82,7 +82,7 @@ impl OpenCodeProvider {
 
         let value = match spec.endpoint {
             EndpointKind::ChatCompletions => {
-                let translated = match chat::prepare_request(&body, spec.id) {
+                let translated = match chat::prepare_request(&body, &spec.id) {
                     Ok(translated) => translated,
                     Err(error) => return invalid_request_response(error),
                 };
@@ -111,7 +111,7 @@ impl OpenCodeProvider {
                 }
             }
             EndpointKind::Messages => {
-                let translated = match messages::prepare_request(&body, spec.id) {
+                let translated = match messages::prepare_request(&body, &spec.id) {
                     Ok(translated) => translated,
                     Err(error) => return invalid_request_response(error),
                 };
@@ -141,7 +141,7 @@ impl OpenCodeProvider {
             }
             EndpointKind::Responses => {
                 let translated =
-                    match responses::prepare_request(&body, spec.id, ctx.session_id.clone()) {
+                    match responses::prepare_request(&body, &spec.id, ctx.session_id.clone()) {
                         Ok(translated) => translated,
                         Err(error) => return invalid_request_response(error),
                     };
@@ -219,7 +219,7 @@ impl Provider for OpenCodeProvider {
             return unsupported_model(requested);
         };
         if let Some(monitor) = ctx.monitor.as_ref() {
-            monitor.model_resolved(&ctx.req_id, spec.id);
+            monitor.model_resolved(&ctx.req_id, spec.id.as_str());
         }
         let tokens = count_tokens::count_tokens(&body);
         if let Some(monitor) = ctx.monitor.as_ref() {
@@ -257,13 +257,13 @@ impl Provider for OpenCodeProvider {
         })?;
 
         if let Some(monitor) = ctx.monitor.as_ref() {
-            monitor.model_resolved(&ctx.req_id, spec.id);
+            monitor.model_resolved(&ctx.req_id, spec.id.as_str());
             monitor.upstream_started(&ctx.req_id);
         }
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
         let body = match spec.endpoint {
             EndpointKind::ChatCompletions => {
-                let translated = chat::prepare_request(&body, spec.id)
+                let translated = chat::prepare_request(&body, &spec.id)
                     .map_err(invalid_request_provider_error)?;
                 let upstream = client
                     .post(
@@ -285,7 +285,7 @@ impl Provider for OpenCodeProvider {
                 )
             }
             EndpointKind::Messages => {
-                let translated = messages::prepare_request(&body, spec.id)
+                let translated = messages::prepare_request(&body, &spec.id)
                     .map_err(invalid_request_provider_error)?;
                 let upstream = client
                     .post(
@@ -305,7 +305,7 @@ impl Provider for OpenCodeProvider {
                 )
             }
             EndpointKind::Responses => {
-                let translated = responses::prepare_request(&body, spec.id, ctx.session_id.clone())
+                let translated = responses::prepare_request(&body, &spec.id, ctx.session_id.clone())
                     .map_err(invalid_request_provider_error)?;
                 let upstream = client
                     .post(
@@ -330,7 +330,7 @@ impl Provider for OpenCodeProvider {
 
         Ok(Generation {
             body: GenerationBody::LiveSse(body),
-            resolved_model: spec.id.to_string(),
+            resolved_model: spec.id,
         })
     }
 }

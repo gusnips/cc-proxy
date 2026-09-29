@@ -4,11 +4,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use claude_code_proxy::providers::codex::websocket::{
+use cc_proxy::providers::codex::websocket::{
     WEBSOCKET_PROTOCOL_HEADER, invalidate_codex_websocket_pool_owner,
 };
-use claude_code_proxy::request_identity::ConversationIdentity;
-use claude_code_proxy::server;
+use cc_proxy::request_identity::ConversationIdentity;
+use cc_proxy::server;
 use futures_util::{SinkExt, StreamExt};
 use http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};

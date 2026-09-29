@@ -3,7 +3,7 @@ title: Compatibility and limitations
 description: Canonical security, account, protocol, model, context, multimodal, reasoning, tool, session, rate-limit, and deployment boundaries.
 ---
 
-claude-code-proxy targets Claude Code's practical Anthropic API usage rather than complete protocol equivalence.
+cc-proxy targets Claude Code's practical Anthropic API usage rather than complete protocol equivalence.
 
 ## Accounts and provider policy
 

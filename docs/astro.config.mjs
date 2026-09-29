@@ -4,10 +4,10 @@ import starlight from '@astrojs/starlight';
 import starlightLlmsTxt from 'starlight-llms-txt';
 
 export default defineConfig({
-  site: 'https://claude-code-proxy.raine.dev',
+  site: 'https://github.com/gusnips/cc-proxy',
   integrations: [
     starlight({
-      title: 'claude-code-proxy',
+      title: 'cc-proxy',
       description: 'Run Claude Code with Codex, Kimi, Grok, OpenCode Go, or Cursor Agent.',
       plugins: [starlightLlmsTxt()],
       favicon: '/favicon.svg',
@@ -24,7 +24,7 @@ export default defineConfig({
         {
           icon: 'github',
           label: 'GitHub',
-          href: 'https://github.com/raine/claude-code-proxy',
+          href: 'https://github.com/gusnips/cc-proxy',
         },
       ],
       components: {
@@ -35,7 +35,7 @@ export default defineConfig({
         {
           label: 'Start here',
           items: [
-            { label: 'What is claude-code-proxy?', link: '/' },
+            { label: 'What is cc-proxy?', link: '/' },
             { label: 'Getting started', slug: 'getting-started' },
             { label: 'How it works', slug: 'how-it-works' },
           ],

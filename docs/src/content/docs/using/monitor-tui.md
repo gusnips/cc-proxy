@@ -1,25 +1,25 @@
 ---
 title: Monitor TUI
-description: Use the claude-code-proxy monitor to inspect sessions, active and recent requests, providers, errors, token usage, throughput, and setup.
+description: Use the cc-proxy monitor to inspect sessions, active and recent requests, providers, errors, token usage, throughput, and setup.
 ---
 
-`claude-code-proxy serve` opens the monitor when stdout is an interactive terminal. The same process runs the HTTP listener.
+`cc-proxy serve` opens the monitor when stdout is an interactive terminal. The same process runs the HTTP listener.
 
 To run the proxy as a service and attach the dashboard separately:
 
 ```sh
 # Run this under your service manager, or leave it in another terminal.
-claude-code-proxy serve --no-monitor
+cc-proxy serve --no-monitor
 
 # Attach from any terminal; repeat for additional dashboards.
-claude-code-proxy monitor
+cc-proxy monitor
 ```
 
-Use `claude-code-proxy monitor --url http://127.0.0.1:19999` for a different port. Without `--url`, the port follows the usual proxy configuration. The attached dashboard reads the running service's existing history; it does not start a proxy or need provider credentials.
+Use `cc-proxy monitor --url http://127.0.0.1:19999` for a different port. Without `--url`, the port follows the usual proxy configuration. The attached dashboard reads the running service's existing history; it does not start a proxy or need provider credentials.
 
 In an attached dashboard, `q` and `Ctrl-C` detach immediately and leave the service running. Multiple dashboards can attach independently. If the service becomes unavailable, the dashboard marks its last snapshot as stale and reconnects automatically. Network polling runs outside the terminal event loop.
 
-![claude-code-proxy monitor showing sessions, active requests, recent requests, and events](/monitor-tui.webp)
+![cc-proxy monitor showing sessions, active requests, recent requests, and events](/monitor-tui.webp)
 
 ## What the monitor shows
 
@@ -51,7 +51,7 @@ The request table changes columns as the terminal width changes.
 Use plain output when the process runs under a service manager, in CI, or through a pipe:
 
 ```sh
-claude-code-proxy serve --no-monitor
+cc-proxy serve --no-monitor
 ```
 
 Non-terminal stdout also selects plain mode. `CCP_LOG_STDERR=1` mirrors JSONL log events to stderr in plain mode.
@@ -63,7 +63,7 @@ Plain mode retains monitor accounting even with no dashboard attached. On Unix, 
 Explore the full interface without binding a port or using provider credentials:
 
 ```sh
-claude-code-proxy demo
+cc-proxy demo
 ```
 
 The deterministic simulation covers active, successful, and failed requests across providers, projects, throughput states, and responsive layouts.
@@ -73,11 +73,11 @@ The deterministic simulation covers active, successful, and failed requests acro
 A Homebrew installation can run at login:
 
 ```sh
-brew services start claude-code-proxy
+brew services start cc-proxy
 ```
 
-Service output lives in `~/.local/state/claude-code-proxy/service.log` on macOS and Linux. The structured `proxy.log` shares the state directory. Provider login remains an interactive one-time command.
+Service output lives in `~/.local/state/cc-proxy/service.log` on macOS and Linux. The structured `proxy.log` shares the state directory. Provider login remains an interactive one-time command.
 
-Run `claude-code-proxy monitor` to inspect that service. The monitor endpoint only accepts loopback connections, even if the inference listener binds a LAN address. For a service on another machine, forward its port with SSH and point `monitor --url` at the local end of the tunnel.
+Run `cc-proxy monitor` to inspect that service. The monitor endpoint only accepts loopback connections, even if the inference listener binds a LAN address. For a service on another machine, forward its port with SSH and point `monitor --url` at the local end of the tunnel.
 
 History remains in the proxy's memory and resets when the proxy restarts. The dashboard polls snapshots every 250 ms and displays server-computed durations and throughput. The attached setup overlay describes its connection; provider setup remains with the service and its built-in dashboard.

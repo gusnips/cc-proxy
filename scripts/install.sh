@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 #
-# claude-code-proxy installation script
-# Usage: curl -fsSL https://raw.githubusercontent.com/raine/claude-code-proxy/main/scripts/install.sh | bash
+# cc-proxy installation script
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/gusnips/cc-proxy/main/scripts/install.sh | bash
+#   ./scripts/install.sh --local [--release|--debug]   # build this checkout and install it
 #
 # Environment variables:
-#   CLAUDE_CODE_PROXY_VERSION      - Pin a specific version (e.g., v0.1.0)
-#   CLAUDE_CODE_PROXY_INSTALL_DIR  - Override install directory (default: /usr/local/bin or ~/.local/bin)
+#   CC_PROXY_VERSION      - Pin a specific version (e.g., v0.1.0)
+#   CC_PROXY_INSTALL_DIR  - Override install directory (default: /usr/local/bin or ~/.local/bin)
 #
 # Examples:
-#   CLAUDE_CODE_PROXY_VERSION=v0.1.0 bash install.sh
-#   CLAUDE_CODE_PROXY_INSTALL_DIR=/opt/bin bash install.sh
+#   CC_PROXY_VERSION=v0.1.0 bash install.sh
+#   CC_PROXY_INSTALL_DIR=/opt/bin bash install.sh
+#   ./scripts/install.sh --local
 #
 
 set -e
 
-BIN_NAME="claude-code-proxy"
-REPO="raine/claude-code-proxy"
+BIN_NAME="cc-proxy"
+REPO="gusnips/cc-proxy"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -38,8 +41,9 @@ detect_platform() {
 		log_error "Unsupported operating system: $(uname -s)"
 		echo ""
 		echo "${BIN_NAME} supports macOS and Linux."
-		echo "For other platforms, build from source with Bun:"
+		echo "For other platforms, build from source with Cargo:"
 		echo "  git clone https://github.com/${REPO}"
+		echo "  ./scripts/install.sh --local"
 		echo ""
 		exit 1
 		;;
@@ -52,8 +56,9 @@ detect_platform() {
 		log_error "Unsupported architecture: $(uname -m)"
 		echo ""
 		echo "${BIN_NAME} prebuilt binaries are available for amd64 and arm64."
-		echo "For other architectures, build from source with Bun:"
+		echo "For other architectures, build from source with Cargo:"
 		echo "  git clone https://github.com/${REPO}"
+		echo "  ./scripts/install.sh --local"
 		echo ""
 		exit 1
 		;;
@@ -70,7 +75,7 @@ install_from_release() {
 	tmp_dir=$(mktemp -d)
 	trap 'rm -rf "$tmp_dir"' EXIT
 
-	local version="${CLAUDE_CODE_PROXY_VERSION:-}"
+	local version="${CC_PROXY_VERSION:-${CLAUDE_CODE_PROXY_VERSION:-}}"
 
 	if [ -z "$version" ]; then
 		log_info "Fetching latest release..."
@@ -93,7 +98,7 @@ install_from_release() {
 			echo ""
 			echo "This might be due to network issues or GitHub API rate limits."
 			echo "You can specify a version manually:"
-			echo "  CLAUDE_CODE_PROXY_VERSION=v0.1.0 bash install.sh"
+			echo "  CC_PROXY_VERSION=v0.1.0 bash install.sh"
 			echo ""
 			exit 1
 		fi
@@ -166,7 +171,41 @@ install_from_release() {
 		exit 1
 	fi
 
-	local install_dir="${CLAUDE_CODE_PROXY_INSTALL_DIR:-}"
+	cd - >/dev/null || cd "$HOME"
+
+	install_built_binary "$tmp_dir/${BIN_NAME}" "$version"
+}
+
+install_from_source() {
+	local profile="$1"
+	local repo_root
+	repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+	if ! command -v cargo &>/dev/null; then
+		log_error "cargo not found. Install Rust first: https://rustup.rs/"
+		exit 1
+	fi
+
+	log_info "Building ${BIN_NAME} from $repo_root ($profile)..."
+	if [ "$profile" = "release" ]; then
+		(cd "$repo_root" && cargo build --release --locked)
+		install_built_binary "$repo_root/target/release/${BIN_NAME}" "local"
+	else
+		(cd "$repo_root" && cargo build --locked)
+		install_built_binary "$repo_root/target/debug/${BIN_NAME}" "local-debug"
+	fi
+}
+
+install_built_binary() {
+	local binary="$1"
+	local version="$2"
+
+	if [ ! -x "$binary" ]; then
+		log_error "Built binary not found or not executable: $binary"
+		exit 1
+	fi
+
+	local install_dir="${CC_PROXY_INSTALL_DIR:-${CLAUDE_CODE_PROXY_INSTALL_DIR:-}}"
 	if [ -z "$install_dir" ]; then
 		if [[ -w /usr/local/bin ]]; then
 			install_dir="/usr/local/bin"
@@ -187,11 +226,11 @@ install_from_release() {
 	local tmp_binary="$install_dir/${BIN_NAME}.tmp.$$"
 
 	if [[ -w "$install_dir" ]]; then
-		cp "${BIN_NAME}" "$tmp_binary"
+		cp "$binary" "$tmp_binary"
 		chmod +x "$tmp_binary"
 		mv -f "$tmp_binary" "$install_dir/${BIN_NAME}"
 	else
-		if ! sudo cp "${BIN_NAME}" "$tmp_binary"; then
+		if ! sudo cp "$binary" "$tmp_binary"; then
 			log_error "Failed to install to $install_dir (sudo required)"
 			exit 1
 		fi
@@ -218,8 +257,6 @@ install_from_release() {
 		echo "  export PATH=\"\$PATH:$install_dir\""
 		echo ""
 	fi
-
-	cd - >/dev/null || cd "$HOME"
 
 	INSTALL_DIR="$install_dir"
 }
@@ -256,12 +293,39 @@ main() {
 	echo "${BIN_NAME} installer"
 	echo ""
 
-	log_info "Detecting platform..."
-	local platform
-	platform=$(detect_platform)
-	log_info "Platform: $platform"
+	local profile="release"
+	local from_source=0
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--local) from_source=1 ;;
+		--debug) profile="debug"; from_source=1 ;;
+		--release) profile="release" ;;
+		-h | --help)
+			echo "Usage: install.sh [--local [--debug|--release]]"
+			echo ""
+			echo "  (no flags)  download the latest release from github.com/${REPO}"
+			echo "  --local     build this checkout with cargo and install it"
+			echo ""
+			return 0
+			;;
+		*)
+			log_error "Unknown argument: $1 (try --help)"
+			exit 1
+			;;
+		esac
+		shift
+	done
 
-	install_from_release "$platform"
+	if [[ "$from_source" -eq 1 ]]; then
+		install_from_source "$profile"
+	else
+		log_info "Detecting platform..."
+		local platform
+		platform=$(detect_platform)
+		log_info "Platform: $platform"
+
+		install_from_release "$platform"
+	fi
 
 	verify_installation "$INSTALL_DIR"
 }

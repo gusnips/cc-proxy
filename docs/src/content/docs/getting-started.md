@@ -1,42 +1,42 @@
 ---
 title: Getting started
-description: Install claude-code-proxy, authenticate with Codex, start the server, and open one working Claude Code session.
+description: Install cc-proxy, authenticate with Codex, start the server, and open one working Claude Code session.
 ---
 
 This path gets one Codex-backed Claude Code session working. See [Choosing a provider](/providers/choosing-a-provider/) for Kimi, Grok, OpenCode Go, and Cursor Agent.
 
 ## 1. Install
 
-On macOS or Linux with Homebrew:
+From a GitHub release:
 
 ```sh
-brew install raine/claude-code-proxy/claude-code-proxy
+curl -fsSL https://raw.githubusercontent.com/gusnips/cc-proxy/main/scripts/install.sh | bash
 ```
 
-Or use the release installer:
+Or from a local checkout:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/raine/claude-code-proxy/main/scripts/install.sh | bash
+./scripts/install.sh --local
 ```
 
-Windows archives and binaries for every supported platform are on the [GitHub releases page](https://github.com/raine/claude-code-proxy/releases).
+Windows archives and binaries for every supported platform are on the [GitHub releases page](https://github.com/gusnips/cc-proxy/releases).
 
 ## 2. Sign in to Codex
 
 Use a **ChatGPT Plus or Pro account**, not an OpenAI API account:
 
 ```sh
-claude-code-proxy codex auth login
+cc-proxy codex auth login
 ```
 
-For SSH or another headless environment, use `claude-code-proxy codex auth device` instead.
+For SSH or another headless environment, use `cc-proxy codex auth device` instead.
 
 ## 3. Start the proxy
 
 Keep this process running:
 
 ```sh
-claude-code-proxy serve
+cc-proxy serve
 ```
 
 It listens on `127.0.0.1:18765`. In an interactive terminal it opens the monitor TUI.

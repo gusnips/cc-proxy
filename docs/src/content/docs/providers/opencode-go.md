@@ -15,7 +15,7 @@ Subscribe to OpenCode Go, copy your API key, and provide it to the proxy:
 
 ```sh
 export OPENCODE_API_KEY=YOUR_OPENCODE_GO_API_KEY
-claude-code-proxy serve
+cc-proxy serve
 ```
 
 `CCP_OPENCODE_API_KEY` takes precedence over `OPENCODE_API_KEY`. The
@@ -24,7 +24,7 @@ implement an OpenCode login flow.
 
 ## Models
 
-Run `claude-code-proxy models` for the statically registered catalog. Every
+Run `cc-proxy models` for the statically registered catalog. Every
 registered model has a provider-qualified form. Bare IDs are also accepted when
 they do not belong to another provider:
 
@@ -34,9 +34,18 @@ ANTHROPIC_SMALL_FAST_MODEL=opencode-go/glm-5.2 \
   claude --model opencode-go/glm-5.2
 ```
 
-The bare IDs `gpt-5.6-luna`, `grok-4.5`, `grok-4.6`, `kimi-k3`, and `kimi-k2.6`
-remain owned by the existing Codex, Grok, or Kimi providers. Prefix those IDs
-with `opencode-go/` to select the OpenCode Go version.
+The bare IDs `gpt-5.6-luna`, `gpt-6-luna`, `grok-4.5`, `grok-4.6`, `grok-4.7`,
+`kimi-k3`, and `kimi-k2.6` remain owned by the existing Codex, Grok, or Kimi
+providers. Prefix those IDs with `opencode-go/` to select the OpenCode Go
+version.
+
+Any other `opencode-go/<model-id>` is forwarded to OpenCode Go even when the
+local catalog has never seen it, using the wire protocol inferred from the
+model family (minimax and qwen use messages, grok/gpt/muse-spark use
+responses, everything else uses chat completions). Refresh the catalog with
+`scripts/refresh-opencode-models.py` when new models appear so they resolve to
+their documented protocol instead of the inference. IDs OpenCode Go does not
+serve fail with its own upstream error.
 
 ## Tools and streaming
 
@@ -55,7 +64,10 @@ locally and does not send that request to OpenCode Go.
 - `CCP_OPENCODE_API_KEY`, `OPENCODE_API_KEY`, or `opencode.apiKey` supplies the key.
 - `CCP_OPENCODE_BASE_URL` or `opencode.baseUrl` changes the API base URL.
 
-OpenCode Go may expose additional model IDs through `/models`, but the proxy
-registers only models whose wire protocol is documented or has been verified
-against the live API. Unknown IDs are rejected locally. Access or usage-limit
-errors for registered models are surfaced from OpenCode.
+OpenCode Go adds and removes model IDs over time. Unknown `opencode-go/`
+IDs are forwarded upstream instead of being rejected locally, so a catalog
+change on their side never breaks routing here. Access, usage-limit, and
+unknown-model errors are surfaced from OpenCode Go.
+
+Run `scripts/refresh-opencode-models.py --help` to refresh the registered
+catalog from the live `/v1/models` endpoint.

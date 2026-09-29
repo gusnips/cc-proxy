@@ -1,6 +1,6 @@
 ---
 title: Choosing a provider
-description: Compare claude-code-proxy providers by account, protocol, models, reasoning, multimodal input, tools, and operational tradeoffs.
+description: Compare cc-proxy providers by account, protocol, models, reasoning, multimodal input, tools, and operational tradeoffs.
 ---
 
 One `serve` process supports every provider. Choose based on the account you have, model access, and the capabilities your work needs.
@@ -29,4 +29,4 @@ All providers route by model ID, use proxy-owned credentials, refresh tokens whe
 <strong>Account policy matters.</strong> Provider subscriptions, model access, regional availability, rate limits, and rules for unofficial clients can change. Review the terms for your account before using a provider through the proxy.
 </div>
 
-Use `claude-code-proxy models` for the current compact catalog and `claude-code-proxy models --full` for all advertised aliases. The [Models and routing](/using/models-and-routing/) page explains aliases and discovery.
+Use `cc-proxy models` for the current compact catalog and `cc-proxy models --full` for all advertised aliases. The [Models and routing](/using/models-and-routing/) page explains aliases and discovery.

@@ -10,8 +10,8 @@ Kimi uses the OpenAI-style chat completions endpoint at `https://api.kimi.com/co
 Use a **kimi.com account with Kimi Code access**. Authentication is an RFC 8628 device-code flow:
 
 ```sh
-claude-code-proxy kimi auth login
-claude-code-proxy kimi auth status
+cc-proxy kimi auth login
+cc-proxy kimi auth status
 ```
 
 The login prints a verification URL and user code, then polls until authorization completes. Access tokens have a short lifetime and are refreshed before expiry. A persistent device ID is created with the Kimi credential because it is bound into the issued token.

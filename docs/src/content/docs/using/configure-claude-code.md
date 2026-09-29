@@ -1,6 +1,6 @@
 ---
 title: Configure Claude Code
-description: Set Claude Code client variables for claude-code-proxy without mixing them with CCP proxy configuration.
+description: Set Claude Code client variables for cc-proxy without mixing them with CCP proxy configuration.
 ---
 
 Claude Code reads its API connection when the process starts. These variables belong to **Claude Code**, not to the proxy server.
@@ -63,6 +63,6 @@ Use process-level variables or a wrapper when you also launch Claude Code direct
 
 ## Proxy settings are separate
 
-`CCP_*`, `PORT`, and `config.json` configure the **claude-code-proxy server process**. They control the listener, provider endpoints, transport, credentials, and diagnostics. They do not belong in Claude Code's client environment unless the same shell also starts the proxy.
+`CCP_*`, `PORT`, and `config.json` configure the **cc-proxy server process**. They control the listener, provider endpoints, transport, credentials, and diagnostics. They do not belong in Claude Code's client environment unless the same shell also starts the proxy.
 
 See [Configuration](/reference/configuration/) for the canonical server setting table.

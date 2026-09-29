@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-build_root="${CUA_SANDBOX_BUILD_DIR:-$HOME/.cache/cua-sandbox/claude-code-proxy/arm64}"
+build_root="${CUA_SANDBOX_BUILD_DIR:-$HOME/.cache/cua-sandbox/cc-proxy/arm64}"
 rust_image="${CUA_SANDBOX_RUST_IMAGE:-rust:1.96-bookworm}"
 
 usage() {
@@ -84,16 +84,16 @@ docker run --rm \
   "$rust_image" \
   cargo build --locked
 
-remote_dir="/home/user/claude-code-proxy-run"
-docker cp "$build_root/target/debug/claude-code-proxy" \
-  "$container:/tmp/claude-code-proxy-built"
+remote_dir="/home/user/cc-proxy-run"
+docker cp "$build_root/target/debug/cc-proxy" \
+  "$container:/tmp/cc-proxy-built"
 docker exec -u user "$container" sh -lc "
   set -eu
   mkdir -p '$remote_dir/state'
-  cp /tmp/claude-code-proxy-built '$remote_dir/claude-code-proxy'
-  chmod 755 '$remote_dir/claude-code-proxy'
+  cp /tmp/cc-proxy-built '$remote_dir/cc-proxy'
+  chmod 755 '$remote_dir/cc-proxy'
 "
-docker exec -u root "$container" rm -f /tmp/claude-code-proxy-built
+docker exec -u root "$container" rm -f /tmp/cc-proxy-built
 
 docker exec -d -u user -e DISPLAY=:100 "$container" \
   kitty \
@@ -109,7 +109,7 @@ docker exec -d -u user -e DISPLAY=:100 "$container" \
   --override initial_window_height=650 \
   sh -lc "
     cd '$remote_dir'
-    XDG_STATE_HOME='$remote_dir/state' ./claude-code-proxy demo
+    XDG_STATE_HOME='$remote_dir/state' ./cc-proxy demo
   "
 
-echo "Opened claude-code-proxy demo in session: $session"
+echo "Opened cc-proxy demo in session: $session"
