@@ -1,7 +1,29 @@
 ---
 title: Changelog
-description: Release notes for claude-code-proxy.
+description: Release notes for cc-proxy.
 ---
+
+## Unreleased
+
+- Fork renamed to `cc-proxy` (`gusnips/cc-proxy`): binary, config and state
+  directories, install script, release archives, and docs. An existing
+  `claude-code-proxy` config is read as a fallback; macOS Keychain entries
+  are unchanged so logins survive the rename.
+- `opencode-go/<model>` IDs always route to OpenCode Go, even unknown ones;
+  new model families resolve to the right wire protocol until
+  `scripts/refresh-opencode-models.py` picks them up.
+- New GLM (z.ai) provider via `cc-proxy glm auth login`.
+- Codex quota handling: exhausted quota surfaces as a clean 429 with
+  `Retry-After` instead of a 502 retry storm, quota walls fast-fail without
+  backoff, and reasoning-token usage is reported.
+- Codex translation: `fullLane` escape for sol/terra, optional reasoning
+  signatures, compaction over HTTP, and a larger model allowlist from the
+  CLI cache.
+- Auth robustness: Kimi peer-rotated credentials, persistent browser login,
+  and `opencode usage` account limits.
+- `serve` now starts a background service tracked in a pidfile, with
+  `status`, `stop`, `restart`, and `reload`; `monitor` attaches to it.
+  `serve --monitor` / `--no-monitor` keep the foreground modes.
 
 ## v0.1.42 (2026-09-23)
 
