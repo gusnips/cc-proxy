@@ -53,3 +53,6 @@ tempfile = "3.14"
 assert_cmd = "2"
 predicates = "3"
 hex = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

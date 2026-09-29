@@ -57,15 +57,16 @@ Sign in with a **ChatGPT Plus or Pro account**, not an OpenAI API account:
 cc-proxy codex auth login
 ```
 
-Start the proxy in one terminal:
+Start the proxy (runs as a background service):
 
 ```sh
 cc-proxy serve
+cc-proxy status
 ```
 
-For a background service, use `cc-proxy serve --no-monitor` and attach
-from another terminal with `cc-proxy monitor`. Closing an attached
-dashboard leaves the proxy running.
+Attach the dashboard from any terminal with `cc-proxy monitor` — detaching
+leaves the proxy running. `cc-proxy stop` stops the service;
+`cc-proxy restart` and `cc-proxy reload` restart it and reload its config.
 
 Start Claude Code in another:
 

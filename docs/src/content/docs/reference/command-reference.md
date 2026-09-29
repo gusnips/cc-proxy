@@ -18,19 +18,48 @@ Each prints `cc-proxy <version>`.
 ## `serve`
 
 ```sh
-cc-proxy serve [--port <PORT>] [--no-monitor]
+cc-proxy serve [--port <PORT>] [--no-monitor | --monitor]
 ```
 
-Starts the local HTTP proxy and blocks until shutdown.
+Starts the proxy as a background service and exits once it answers health
+checks, printing its pid and listening address. A second `serve` reports the
+running pid instead of starting another copy. The service is tracked in a
+pidfile under the state directory; `status`, `stop`, `restart`, and `reload`
+all resolve through it.
 
 | Option | Behavior |
 | --- | --- |
 | `--port <PORT>` | Overrides `PORT`, `config.json`, and the default for this invocation. |
-| `--no-monitor` | Uses plain output even when stdout is a terminal. |
+| `--no-monitor` | Runs in the foreground with plain output instead of starting a service. |
+| `--monitor` | Runs in the foreground with the monitor dashboard attached. |
 
-The bind address comes from `CCP_BIND_ADDRESS` or `bindAddress`. Interactive stdout opens the monitor unless `--no-monitor` is present. Non-terminal stdout uses plain mode.
+The bind address comes from `CCP_BIND_ADDRESS` or `bindAddress`.
 
-Plain mode continues collecting monitor history and supports separate dashboards. SIGTERM (Unix) and Ctrl-C request graceful service shutdown.
+Foreground mode keeps running until SIGTERM (Unix) or Ctrl-C requests graceful
+shutdown, and continues collecting monitor history for separate dashboards.
+
+## `status`, `stop`, `restart`, `reload`
+
+```sh
+cc-proxy status
+cc-proxy stop
+cc-proxy restart [--port <PORT>]
+cc-proxy reload
+```
+
+`status` reports the running pid and listening address, or exits 1 when the
+service is down. `stop` shuts a running service down gracefully (exit 0 when
+there is nothing to stop). `restart` stops and starts again, keeping the
+previous port unless `--port` overrides it. `reload` validates `config.json`
+and asks a running service to re-read it; file-backed settings apply on the
+next request, while bind address, port, alias provider, and environment need
+`restart`. `reload` exits 1 when no service is running (after validating the
+config) and validates only on platforms without SIGHUP.
+
+When something answers on the configured port without a pidfile — a
+foreground or dashboard-attached proxy started separately, for example —
+`status` says so explicitly, and `stop`/`restart` refuse to touch a process
+they did not start.
 
 ## `monitor`
 

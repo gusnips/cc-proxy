@@ -23,7 +23,12 @@ Two files, both written outside the repo (see `install.sh` for the exact content
 
 Both drive the compiled binary at `~/.local/bin/cc-proxy` — the unit runs whatever is installed there, independent of the repo checkout. Rebuild/reinstall the binary (eg, `just install`, or copy a fresh build over it) and `ccp restart` picks it up.
 
-The unit runs `... serve` with no TUI (no TTY as a service) and `CCP_LOG_STDERR=1`, so systemd captures the logs for `ccp logs`. It restarts on failure and listens on the default `127.0.0.1:18765` — to change the port add `Environment=PORT=...` to the unit and `systemctl --user daemon-reload` (or just re-run the installer after editing it there).
+The unit runs `... serve --no-monitor` in the foreground (systemd needs a
+non-forking process, and there is no TTY as a service) with `CCP_LOG_STDERR=1`,
+so systemd captures the logs for `ccp logs`. It restarts on failure and listens
+on the default `127.0.0.1:18765` — to change the port add `Environment=PORT=...`
+to the unit and `systemctl --user daemon-reload` (or just re-run the installer
+after editing it there).
 
 ## Commands
 

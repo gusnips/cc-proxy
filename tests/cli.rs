@@ -52,12 +52,18 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
     let stdout = String::from_utf8(output.stdout)?;
     for description in [
         "Print version information",
-        "Start the proxy server and monitor",
+        "Start the proxy as a background service",
+        "Stop the background proxy service",
+        "Show whether the background proxy service is running",
+        "Restart the background proxy service",
+        "Validate the config file and ask a running service to reload it",
+        "Attach a read-only dashboard to a running proxy",
         "List supported provider models",
         "Manage Codex authentication",
         "Manage Kimi authentication",
         "Manage Cursor authentication",
         "Manage Grok authentication",
+        "Manage GLM authentication",
         "Inspect OpenCode Go account state",
     ] {
         assert!(stdout.contains(description), "missing: {description}");

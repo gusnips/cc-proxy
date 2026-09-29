@@ -33,13 +33,14 @@ For SSH or another headless environment, use `cc-proxy codex auth device` instea
 
 ## 3. Start the proxy
 
-Keep this process running:
-
 ```sh
 cc-proxy serve
 ```
 
-It listens on `127.0.0.1:18765`. In an interactive terminal it opens the monitor TUI.
+It starts in the background and prints its pid. Confirm it with
+`cc-proxy status`. It listens on `127.0.0.1:18765`. Attach the dashboard any
+time with `cc-proxy monitor`, or start foreground-with-dashboard mode with
+`cc-proxy serve --monitor`.
 
 ## 4. Start Claude Code
 

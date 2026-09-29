@@ -1,14 +1,13 @@
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use cc_proxy::{
-    config, logging,
+    config, daemon, logging,
     monitor::MonitorHandle,
     paths,
     registry::{ANTHROPIC_STYLE_ALIASES, Registry},
     server::{self, ServerConfig},
     tui::{self, MonitorExit, MonitorUiConfig},
 };
-use std::io::IsTerminal;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -31,13 +30,28 @@ struct Cli {
 enum Commands {
     /// Print version information
     Version,
-    /// Start the proxy server and monitor
+    /// Start the proxy as a background service (default)
     Serve {
         #[arg(long)]
         port: Option<u16>,
+        /// Run in the foreground without the monitor dashboard
         #[arg(long = "no-monitor", action = ArgAction::SetTrue)]
         no_monitor: bool,
+        /// Run in the foreground with the monitor dashboard attached
+        #[arg(long, conflicts_with = "no_monitor", action = ArgAction::SetTrue)]
+        monitor: bool,
     },
+    /// Stop the background proxy service
+    Stop,
+    /// Show whether the background proxy service is running
+    Status,
+    /// Restart the background proxy service
+    Restart {
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Validate the config file and ask a running service to reload it
+    Reload,
     /// Attach a read-only dashboard to a running proxy
     Monitor {
         #[arg(long)]
@@ -113,6 +127,7 @@ fn main() -> Result<()> {
     let commands = cli.command.unwrap_or(Commands::Serve {
         port: None,
         no_monitor: false,
+        monitor: false,
     });
 
     match commands {
@@ -120,15 +135,23 @@ fn main() -> Result<()> {
             println!("cc-proxy {}", VERSION);
             Ok(())
         }
-        Commands::Serve { port, no_monitor } => {
-            let bind_address = config::bind_address();
-            let effective_port = port.unwrap_or_else(config::port);
-            let registry = Registry::with_default_alias();
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            match select_serve_mode(std::io::stdout().is_terminal(), no_monitor) {
+        Commands::Serve {
+            port,
+            no_monitor,
+            monitor,
+        } => {
+            if daemon::is_daemon_child() {
+                return daemon::serve_daemon_child(port);
+            }
+            match select_serve_mode(no_monitor, monitor) {
+                ServeMode::Daemon => start_daemon(port),
                 ServeMode::Plain => {
+                    let bind_address = config::bind_address();
+                    let effective_port = port.unwrap_or_else(config::port);
+                    let registry = Registry::with_default_alias();
+                    let runtime = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()?;
                     print_server_banner(&bind_address, effective_port, &registry);
                     runtime
                         .block_on(run_service(ServerConfig {
@@ -139,6 +162,12 @@ fn main() -> Result<()> {
                         .map_err(|err| anyhow::anyhow!(err))
                 }
                 ServeMode::Monitor => {
+                    let bind_address = config::bind_address();
+                    let effective_port = port.unwrap_or_else(config::port);
+                    let registry = Registry::with_default_alias();
+                    let runtime = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()?;
                     let _stderr_guard = logging::suppress_stderr();
                     let monitor = MonitorHandle::default();
                     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -184,11 +213,18 @@ fn main() -> Result<()> {
             tui::run_mock_monitor(config::port(), &registry)
         }
         Commands::Monitor { url } => {
+            let from_flag = url.is_some();
             let url = url.unwrap_or_else(|| {
                 format!("http://127.0.0.1:{}", config::port())
                     .parse()
                     .expect("local proxy URL")
             });
+            if !from_flag && matches!(daemon::describe(), daemon::DaemonStatus::Stopped) {
+                anyhow::bail!(
+                    "proxy is not running. Start it with `cc-proxy serve`, \
+                     then attach with `cc-proxy monitor`."
+                );
+            }
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
@@ -207,6 +243,10 @@ fn main() -> Result<()> {
             print_models(&Registry::with_default_alias(), full);
             Ok(())
         }
+        Commands::Stop => stop_daemon(),
+        Commands::Status => daemon_status(),
+        Commands::Restart { port } => restart_daemon(port),
+        Commands::Reload => reload_daemon(),
         Commands::Codex { command } => run_provider_cli("codex", command),
         Commands::Kimi { command } => run_provider_cli("kimi", command),
         Commands::Cursor { command } => run_provider_cli("cursor", command),
@@ -299,15 +339,111 @@ impl ServiceShutdownSignals {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServeMode {
+    Daemon,
     Monitor,
     Plain,
 }
 
-fn select_serve_mode(stdout_is_tty: bool, no_monitor: bool) -> ServeMode {
-    if stdout_is_tty && !no_monitor {
+fn select_serve_mode(no_monitor: bool, monitor: bool) -> ServeMode {
+    if monitor {
         ServeMode::Monitor
-    } else {
+    } else if no_monitor {
         ServeMode::Plain
+    } else {
+        ServeMode::Daemon
+    }
+}
+
+fn start_daemon(port: Option<u16>) -> Result<()> {
+    match daemon::serve_background(port)? {
+        daemon::ServeOutcome::AlreadyRunning(info) => {
+            println!(
+                "proxy is already running (pid {}, {})",
+                info.pid,
+                info.listen_url()
+            );
+            match port {
+                Some(wanted) if wanted != info.port => println!(
+                    "it serves port {}, so `--port {wanted}` was ignored. Run a second \
+                     instance in the foreground with `cc-proxy serve --no-monitor`, \
+                     or `cc-proxy restart --port <PORT>` to move the service.",
+                    info.port,
+                ),
+                _ => println!("Use `cc-proxy restart` to restart it."),
+            }
+            Ok(())
+        }
+        daemon::ServeOutcome::Started(info) => {
+            println!("proxy started (pid {})", info.pid);
+            println!("listening on {}", info.listen_url());
+            println!("logs: {}", paths::log_file().display());
+            println!("status: cc-proxy status · stop: cc-proxy stop");
+            Ok(())
+        }
+    }
+}
+
+fn stop_daemon() -> Result<()> {
+    match daemon::stop_service()? {
+        daemon::StopOutcome::NotRunning => {
+            println!("proxy is not running.");
+            Ok(())
+        }
+        daemon::StopOutcome::Stopped { pid } => {
+            println!("proxy stopped (was pid {pid}).");
+            Ok(())
+        }
+    }
+}
+
+fn daemon_status() -> Result<()> {
+    match daemon::describe() {
+        daemon::DaemonStatus::Running(info) => {
+            println!(
+                "proxy is running (pid {}, {}, started {})",
+                info.pid,
+                info.listen_url(),
+                info.started_at
+            );
+            Ok(())
+        }
+        daemon::DaemonStatus::Unmanaged { port } => {
+            println!(
+                "a proxy answers on port {port} but has no pidfile: \
+                 it was not started by `cc-proxy serve`. Stop that process directly."
+            );
+            Ok(())
+        }
+        daemon::DaemonStatus::Stopped => {
+            println!("proxy is not running. Start it with `cc-proxy serve`.");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn restart_daemon(port: Option<u16>) -> Result<()> {
+    let info = daemon::restart_service(port)?;
+    println!("proxy restarted (pid {})", info.pid);
+    println!("listening on {}", info.listen_url());
+    Ok(())
+}
+
+fn reload_daemon() -> Result<()> {
+    match daemon::reload_service()? {
+        daemon::ReloadOutcome::Reloaded => {
+            println!("config reloaded. File-backed settings apply on the next request;");
+            println!("bind address, port, alias provider, and environment need `cc-proxy restart`.");
+            Ok(())
+        }
+        daemon::ReloadOutcome::ValidatedOnly => {
+            println!("config is valid. This platform cannot reload a running service;");
+            println!("run `cc-proxy restart` to apply changes.");
+            Ok(())
+        }
+        daemon::ReloadOutcome::NotRunning => {
+            println!("proxy is not running, but the config file is valid.");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -444,18 +580,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_serve_selects_monitor_on_tty() {
-        assert_eq!(select_serve_mode(true, false), ServeMode::Monitor);
+    fn default_serve_selects_daemon() {
+        assert_eq!(select_serve_mode(false, false), ServeMode::Daemon);
     }
 
     #[test]
     fn no_monitor_selects_plain_mode() {
-        assert_eq!(select_serve_mode(true, true), ServeMode::Plain);
+        assert_eq!(select_serve_mode(true, false), ServeMode::Plain);
     }
 
     #[test]
-    fn non_tty_stdout_selects_plain_mode() {
-        assert_eq!(select_serve_mode(false, false), ServeMode::Plain);
+    fn monitor_flag_selects_monitor_mode() {
+        assert_eq!(select_serve_mode(false, true), ServeMode::Monitor);
+    }
+
+    #[test]
+    fn lifecycle_commands_parse() {
+        for args in [
+            vec!["cc-proxy", "stop"],
+            vec!["cc-proxy", "status"],
+            vec!["cc-proxy", "reload"],
+            vec!["cc-proxy", "restart"],
+            vec!["cc-proxy", "restart", "--port", "18766"],
+            vec!["cc-proxy", "serve", "--monitor"],
+            vec!["cc-proxy", "serve", "--no-monitor"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
+        }
+        assert!(Cli::try_parse_from(["cc-proxy", "serve", "--monitor", "--no-monitor"]).is_err());
     }
 
     #[test]

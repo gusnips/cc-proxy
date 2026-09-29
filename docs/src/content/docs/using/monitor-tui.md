@@ -3,17 +3,21 @@ title: Monitor TUI
 description: Use the cc-proxy monitor to inspect sessions, active and recent requests, providers, errors, token usage, throughput, and setup.
 ---
 
-`cc-proxy serve` opens the monitor when stdout is an interactive terminal. The same process runs the HTTP listener.
-
-To run the proxy as a service and attach the dashboard separately:
+`cc-proxy serve` starts the proxy as a background service. The monitor is a
+separate view over that service — attaching or detaching never starts or
+stops the proxy.
 
 ```sh
-# Run this under your service manager, or leave it in another terminal.
-cc-proxy serve --no-monitor
+# Start the service (prints its pid).
+cc-proxy serve
 
 # Attach from any terminal; repeat for additional dashboards.
 cc-proxy monitor
 ```
+
+`cc-proxy serve --monitor` starts a foreground proxy with the dashboard
+attached in one process instead. `cc-proxy serve --no-monitor` runs a
+foreground proxy with plain output, which suits service managers.
 
 Use `cc-proxy monitor --url http://127.0.0.1:19999` for a different port. Without `--url`, the port follows the usual proxy configuration. The attached dashboard reads the running service's existing history; it does not start a proxy or need provider credentials.
 
@@ -54,7 +58,7 @@ Use plain output when the process runs under a service manager, in CI, or throug
 cc-proxy serve --no-monitor
 ```
 
-Non-terminal stdout also selects plain mode. `CCP_LOG_STDERR=1` mirrors JSONL log events to stderr in plain mode.
+`CCP_LOG_STDERR=1` mirrors JSONL log events to stderr in plain mode.
 
 Plain mode retains monitor accounting even with no dashboard attached. On Unix, SIGTERM starts graceful proxy shutdown; Ctrl-C does the same. The service manager owns the process lifetime.
 
