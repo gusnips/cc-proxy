@@ -11,16 +11,19 @@ or direct protocol verification against the API.
 
 ## Account and authentication
 
-Subscribe to OpenCode Go, copy your API key, and provide it to the proxy:
+Subscribe to OpenCode Go, copy your API key, and store it once (input is
+hidden, nothing lands in shell history):
 
 ```sh
-export OPENCODE_API_KEY=YOUR_OPENCODE_GO_API_KEY
-cc-proxy serve
+cc-proxy opencode auth login
 ```
 
-`CCP_OPENCODE_API_KEY` takes precedence over `OPENCODE_API_KEY`. The
-`opencode.apiKey` configuration key is also supported. The proxy does not
-implement an OpenCode login flow.
+The key lands in `opencode.apiKey` in config.json. Alternatives, in
+precedence order: `CCP_OPENCODE_API_KEY`, `OPENCODE_API_KEY`, then the
+config key. When none of ours is set, the proxy falls back to
+`OPENCODE_API_KEY` in Claude Code's `~/.claude/settings.json`, so a key
+already pasted there keeps working. The proxy does not implement an
+OpenCode login flow.
 
 To see the current percentage used and reset time for each account limit, run:
 

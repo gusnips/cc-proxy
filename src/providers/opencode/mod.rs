@@ -451,15 +451,75 @@ fn sse_response(body: GenerationBody) -> Response {
 
 struct OpenCodeCli;
 
+/// Read a line without echoing it, so a pasted API key never shows on
+/// screen. Uses termios on unix (already a dependency via libc); elsewhere
+/// falls back to a visible read with a warning.
+#[cfg(unix)]
+fn read_hidden_line(prompt: &str) -> std::io::Result<String> {
+    use std::io::Write;
+    use std::os::unix::io::AsRawFd;
+
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    let fd = std::io::stdin().as_raw_fd();
+    // SAFETY: tcgetattr/tcsetattr only touch the termios struct for our own
+    // stdin fd, and the original flags are restored before returning.
+    unsafe {
+        let mut original: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(fd, &mut original) != 0 {
+            // Not a TTY (piped stdin in tests and scripts): plain read.
+            return read_visible_line();
+        }
+        let mut hidden = original;
+        hidden.c_lflag &= !libc::ECHO;
+        if libc::tcsetattr(fd, libc::TCSANOW, &hidden) != 0 {
+            return read_visible_line();
+        }
+        let line = read_visible_line();
+        libc::tcsetattr(fd, libc::TCSANOW, &original);
+        println!();
+        line
+    }
+}
+
+#[cfg(not(unix))]
+fn read_hidden_line(prompt: &str) -> std::io::Result<String> {
+    eprintln!("warning: hidden input is not supported on this platform; the key will echo.");
+    print!("{prompt}");
+    read_visible_line()
+}
+
+fn read_visible_line() -> std::io::Result<String> {
+    use std::io::{BufRead, Write};
+    std::io::stdout().flush()?;
+    let mut buf = String::new();
+    std::io::stdin().lock().read_line(&mut buf)?;
+    Ok(buf.trim().to_string())
+}
+
 impl CliHandlers for OpenCodeCli {
     fn login(&self) -> anyhow::Result<()> {
-        anyhow::bail!(
-            "OpenCode Go uses an API key; set CCP_OPENCODE_API_KEY, OPENCODE_API_KEY, or opencode.apiKey in config.json"
-        )
+        println!("Paste your OpenCode Go API key (input is hidden) and press Enter:");
+        let key = read_hidden_line("API key: ")?;
+        if key.is_empty() {
+            anyhow::bail!("no API key provided");
+        }
+        let path = crate::config::save_opencode_api_key(&key)?;
+        println!("OpenCode API key saved to {}", path.display());
+        if crate::config::opencode_api_key_source().is_some_and(|source| source != "config.json") {
+            println!(
+                "Note: an environment key ({}) takes precedence; unset it to use the stored key.",
+                crate::config::opencode_api_key_source().unwrap_or("env")
+            );
+        }
+        println!("Verify it with `cc-proxy opencode usage`.");
+        Ok(())
     }
 
     fn device(&self) -> anyhow::Result<()> {
-        self.login()
+        anyhow::bail!(
+            "opencode: API-key provider — set CCP_OPENCODE_API_KEY / OPENCODE_API_KEY or run `cc-proxy opencode auth login`"
+        )
     }
 
     fn status(&self) -> anyhow::Result<()> {
@@ -473,9 +533,15 @@ impl CliHandlers for OpenCodeCli {
     }
 
     fn logout(&self) -> anyhow::Result<()> {
-        anyhow::bail!(
-            "OpenCode Go credentials are managed through environment variables or config.json"
-        )
+        if crate::config::clear_opencode_api_key()? {
+            println!("OpenCode stored key cleared.");
+        } else {
+            println!("No stored OpenCode key in config.json.");
+        }
+        println!(
+            "Unset CCP_OPENCODE_API_KEY / OPENCODE_API_KEY if using env auth; a key in Claude Code settings.json is used only as a last resort."
+        );
+        Ok(())
     }
 }
 

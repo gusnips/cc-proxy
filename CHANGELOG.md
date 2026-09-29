@@ -24,6 +24,12 @@ description: Release notes for cc-proxy.
 - `serve` now starts a background service tracked in a pidfile, with
   `status`, `stop`, `restart`, and `reload`; `monitor` attaches to it.
   `serve --monitor` / `--no-monitor` keep the foreground modes.
+- `cc-proxy update` replaces the installed binary with the latest release
+  (checksum-verified, service restarted when running).
+- `cc-proxy config get/set/list/edit` reads and writes config.json through
+  dotted keys, with secrets reported as set/unset only.
+- `cc-proxy opencode auth login` stores the API key with hidden input;
+  a key in Claude Code settings is used as a last resort.
 
 ## v0.1.42 (2026-09-23)
 

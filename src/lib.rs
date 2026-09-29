@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod auth;
 pub mod config;
+pub mod config_keys;
 pub mod daemon;
 pub mod logging;
 pub mod monitor;
@@ -16,6 +17,7 @@ pub mod server;
 pub mod session;
 pub mod traffic;
 pub mod tui;
+pub mod update;
 
 pub use crate::anthropic::error::{ErrorDetail, ErrorEnvelope, json_error};
 pub use crate::anthropic::schema::MessagesRequest;

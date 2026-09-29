@@ -21,6 +21,9 @@ Or from a local checkout:
 
 Windows archives and binaries for every supported platform are on the [GitHub releases page](https://github.com/gusnips/cc-proxy/releases).
 
+Update later with `cc-proxy update` (add `--check` to only report), or by
+re-running the install command and restarting the service.
+
 ## 2. Sign in to Codex
 
 Use a **ChatGPT Plus or Pro account**, not an OpenAI API account:

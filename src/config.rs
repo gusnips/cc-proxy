@@ -592,6 +592,8 @@ fn resolve_opencode_config(
         (Some(value.clone()), Some("OPENCODE_API_KEY"))
     } else if let Some(value) = file_key {
         (Some(value.clone()), Some("config.json"))
+    } else if let Some((value, source)) = claude_settings_opencode_key(env) {
+        (Some(value), Some(source))
     } else {
         (None, None)
     };
@@ -612,6 +614,120 @@ fn resolve_opencode_config(
         api_key_source,
         base_url,
     }
+}
+
+/// Last-resort OpenCode key: Claude Code's own settings files sometimes carry
+/// `OPENCODE_API_KEY` under their `env` block. Ours (env vars, then
+/// `config.json`) always wins; this only fills the gap when nothing of ours
+/// is set, so a key the user already pasted for Claude Code keeps working
+/// without pasting it a second time for the proxy.
+fn claude_settings_opencode_key(env: &HashMap<String, String>) -> Option<(String, &'static str)> {
+    let home = env
+        .get("HOME")
+        .or_else(|| env.get("USERPROFILE"))
+        .map(String::as_str)
+        .filter(|home| !home.is_empty())?;
+    for file in ["settings.json", ".claude.json"] {
+        let path = Path::new(home).join(".claude").join(file);
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let root: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(root) => root,
+            Err(_) => continue,
+        };
+        let key = root
+            .get("env")
+            .and_then(|env| env.get("OPENCODE_API_KEY"))
+            .and_then(|key| key.as_str())
+            .filter(|key| !key.is_empty());
+        if let Some(key) = key {
+            return Some((key.to_string(), "claude-settings"));
+        }
+    }
+    None
+}
+
+/// Persist an OpenCode API key to `opencode.apiKey` in config.json,
+/// preserving every other key in the file. Merges over the legacy config
+/// when no current file exists yet, so saving a key never shadows the rest
+/// of a pre-fork setup. Returns the file written.
+pub fn save_opencode_api_key(key: &str) -> anyhow::Result<PathBuf> {
+    let dir = paths::config_dir();
+    let mut root = if dir.join("config.json").exists() {
+        match read_config_json_at(&dir) {
+            Ok(root) if root.is_object() => root,
+            _ => serde_json::json!({}),
+        }
+    } else {
+        let legacy = paths::legacy_config_dir(&paths::DirResolverEnv::default());
+        let merged = if legacy != dir {
+            read_config_json_at(&legacy).unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+        if merged.is_object() {
+            merged
+        } else {
+            serde_json::json!({})
+        }
+    };
+    root["opencode"]["apiKey"] = serde_json::Value::String(key.to_string());
+    write_config_json_at(&dir, &root)
+}
+
+/// Remove `opencode.apiKey` from config.json. Returns true when a key was
+/// present. Environment-provided keys are untouched by design.
+pub fn clear_opencode_api_key() -> anyhow::Result<bool> {
+    let dir = paths::config_dir();
+    let root = match read_config_json_at(&dir) {
+        Ok(root) => root,
+        Err(_) => return Ok(false),
+    };
+    let mut root = match root {
+        serde_json::Value::Object(_) => root,
+        _ => return Ok(false),
+    };
+    let removed = root
+        .get("opencode")
+        .and_then(|opencode| opencode.get("apiKey"))
+        .is_some();
+    if removed
+        && let Some(opencode) = root.get_mut("opencode")
+        && let Some(map) = opencode.as_object_mut()
+    {
+        map.remove("apiKey");
+        if map.is_empty() {
+            root.as_object_mut().map(|root| root.remove("opencode"));
+        }
+        write_config_json_at(&dir, &root)?;
+    }
+    Ok(removed)
+}
+
+/// Read a config directory's config.json as an untyped document.
+/// A missing file reads as an empty object; a corrupt file is an error
+/// naming the path.
+pub(crate) fn read_config_json_at(dir: &Path) -> anyhow::Result<serde_json::Value> {
+    let path = dir.join("config.json");
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw)
+            .map_err(|err| anyhow::anyhow!("invalid config at {}: {err}", path.display())),
+        Err(_) => Ok(serde_json::json!({})),
+    }
+}
+
+/// Write an untyped document to a config directory's config.json,
+/// creating the directory. Returns the file written.
+pub(crate) fn write_config_json_at(
+    dir: &Path,
+    root: &serde_json::Value,
+) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("config.json");
+    std::fs::write(&path, serde_json::to_string_pretty(root)?)?;
+    Ok(path)
 }
 
 pub fn opencode_api_key() -> Option<String> {
@@ -1215,6 +1331,82 @@ mod tests {
         assert_eq!(resolved.api_key.as_deref(), Some("ccp-key"));
         assert_eq!(resolved.api_key_source, Some("CCP_OPENCODE_API_KEY"));
         assert_eq!(resolved.base_url, "https://env.example/v1");
+    }
+
+    #[test]
+    fn opencode_config_falls_back_to_claude_settings_key() {
+        let home = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/settings.json"),
+            r#"{"env":{"OPENCODE_API_KEY":"claude-key"}}"#,
+        )
+        .unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let mut env = HashMap::from([(
+            "HOME".to_string(),
+            home.path().to_string_lossy().into_owned(),
+        )]);
+
+        let resolved = resolve_opencode_config(&env, config.path());
+        assert_eq!(resolved.api_key.as_deref(), Some("claude-key"));
+        assert_eq!(resolved.api_key_source, Some("claude-settings"));
+
+        // Ours wins: env first, then config.json, then Claude settings.
+        env.insert("OPENCODE_API_KEY".into(), "standard-key".into());
+        let resolved = resolve_opencode_config(&env, config.path());
+        assert_eq!(resolved.api_key_source, Some("OPENCODE_API_KEY"));
+        env.remove("OPENCODE_API_KEY");
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"opencode":{"apiKey":"file-key"}}"#,
+        )
+        .unwrap();
+        let resolved = resolve_opencode_config(&env, config.path());
+        assert_eq!(resolved.api_key_source, Some("config.json"));
+
+        // Empty keys and missing files are skipped, not matched.
+        let home2 = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(home2.path().join(".claude")).unwrap();
+        std::fs::write(
+            home2.path().join(".claude/settings.json"),
+            r#"{"env":{"OPENCODE_API_KEY":""}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home2.path().join(".claude/.claude.json"),
+            r#"{"env":{"OPENCODE_API_KEY":"legacy-key"}}"#,
+        )
+        .unwrap();
+        let env2 = HashMap::from([(
+            "HOME".to_string(),
+            home2.path().to_string_lossy().into_owned(),
+        )]);
+        let empty_config = tempfile::TempDir::new().unwrap();
+        let resolved = resolve_opencode_config(&env2, empty_config.path());
+        assert_eq!(resolved.api_key.as_deref(), Some("legacy-key"));
+        assert_eq!(resolved.api_key_source, Some("claude-settings"));
+    }
+
+    #[test]
+    fn opencode_api_key_round_trips_through_config_file() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set("CCP_CONFIG_DIR", dir.path());
+        std::fs::write(dir.path().join("config.json"), r#"{"port":18766}"#).unwrap();
+
+        let path = save_opencode_api_key("saved-key").unwrap();
+        assert_eq!(path, dir.path().join("config.json"));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(root["opencode"]["apiKey"], "saved-key");
+        assert_eq!(root["port"], 18766, "unrelated keys must survive");
+
+        assert!(clear_opencode_api_key().unwrap());
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(root.get("opencode").is_none());
+        assert!(!clear_opencode_api_key().unwrap());
     }
 
     #[test]

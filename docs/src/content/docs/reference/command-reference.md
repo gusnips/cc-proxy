@@ -100,6 +100,7 @@ cc-proxy <provider> auth <action>
 | `grok` | Browser PKCE | Device code | Expiry and storage | Delete proxy credential |
 | `cursor` | Browser polling flow | Unsupported | Source, claims, expiry | Delete proxy credential |
 | `glm` | API key entry | Unsupported | Env and stored key presence | Delete proxy credential |
+| `opencode` | API key entry (hidden) | Unsupported | Key source and base URL | Delete stored key |
 
 Examples:
 
@@ -124,6 +125,45 @@ Fetches the account's rolling five-hour, weekly, and monthly usage directly
 from OpenCode Go. The default output is human-readable; `--json` prints the
 upstream response for scripts. The command uses the same API key and base URL
 as OpenCode model requests.
+
+Store the key once without echoing it:
+
+```sh
+cc-proxy opencode auth login
+```
+
+The key lands in `opencode.apiKey` in config.json. `opencode auth status`
+reports which source provides the key; `opencode auth logout` removes the
+stored key. When nothing of ours is set, the proxy falls back to
+`OPENCODE_API_KEY` in Claude Code's `~/.claude/settings.json`.
+
+## Configuration values
+
+```sh
+cc-proxy config get <key>
+cc-proxy config set <key> <value>
+cc-proxy config list
+cc-proxy config edit
+```
+
+Reads and writes config.json through dotted keys (`port`,
+`opencode.apiKey`, `codex.fullLane`). `get` prints one value, `set`
+validates and writes one, `list` shows every known key, and `edit` opens
+the file in `$VISUAL` or `$EDITOR`. Reads show the file value; when an
+environment variable overrides a key at runtime, the commands say so.
+Secret keys only ever report set or unset, never their value. Restart the
+service after changing bind settings.
+
+## Updating
+
+```sh
+cc-proxy update [--check] [--version <tag>]
+```
+
+Replaces the installed binary with a newer GitHub release: version check,
+HTTPS download, SHA-256 verification, atomic swap, and a service restart
+when one is running. `--check` only reports. Re-running the install
+script (`scripts/install.sh`) updates the same way.
 
 ## Development commands
 

@@ -65,6 +65,20 @@ enum Commands {
         #[arg(long)]
         full: bool,
     },
+    /// View or change config.json values
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Update the installed binary to the latest release
+    Update {
+        /// Only report whether an update is available
+        #[arg(long)]
+        check: bool,
+        /// Install a specific release tag instead of the latest
+        #[arg(long)]
+        version: Option<String>,
+    },
     /// Manage Codex authentication
     Codex {
         #[command(subcommand)]
@@ -107,7 +121,32 @@ enum ProviderGroup {
 }
 
 #[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Show one value from config.json
+    Get {
+        /// Dotted key, e.g. port or opencode.apiKey
+        key: String,
+    },
+    /// Write one value to config.json
+    Set {
+        /// Dotted key, e.g. port or codex.fullLane
+        key: String,
+        /// New value
+        value: String,
+    },
+    /// Show all known keys and their values
+    List,
+    /// Open config.json in $VISUAL or $EDITOR
+    Edit,
+}
+
+#[derive(Debug, Subcommand)]
 enum OpenCodeGroup {
+    /// Manage the OpenCode Go API key
+    Auth {
+        #[command(subcommand)]
+        command: cc_proxy::provider::AuthCommand,
+    },
     /// Show rolling, weekly, and monthly usage limits
     Usage {
         /// Print the upstream response as JSON
@@ -244,6 +283,17 @@ fn main() -> Result<()> {
             print_models(&Registry::with_default_alias(), full);
             Ok(())
         }
+        Commands::Config { command } => match command {
+            ConfigCommand::Get { key } => cc_proxy::config_keys::run_config_get(&key),
+            ConfigCommand::Set { key, value } => {
+                cc_proxy::config_keys::run_config_set(&key, &value)
+            }
+            ConfigCommand::List => cc_proxy::config_keys::run_config_list(),
+            ConfigCommand::Edit => cc_proxy::config_keys::run_config_edit(),
+        },
+        Commands::Update { check, version } => {
+            cc_proxy::update::run_update(check, version.as_deref())
+        }
         Commands::Stop => stop_daemon(),
         Commands::Status => daemon_status(),
         Commands::Restart { port } => restart_daemon(port),
@@ -254,6 +304,9 @@ fn main() -> Result<()> {
         Commands::Grok { command } => run_provider_cli("grok", command),
         Commands::Glm { command } => run_provider_cli("glm", command),
         Commands::OpenCode { command } => match command {
+            OpenCodeGroup::Auth { command } => {
+                run_provider_cli("opencode", ProviderGroup::Auth { command })
+            }
             OpenCodeGroup::Usage { json } => run_opencode_usage(json),
         },
     }

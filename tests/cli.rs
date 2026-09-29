@@ -79,6 +79,8 @@ fn opencode_usage_missing_key_is_actionable() -> Result<(), Box<dyn std::error::
     let mut cmd = Command::cargo_bin("cc-proxy")?;
     cmd.args(["opencode", "usage"])
         .env("CCP_CONFIG_DIR", temp.path())
+        .env("HOME", temp.path())
+        .env("USERPROFILE", temp.path())
         .env_remove("CCP_OPENCODE_API_KEY")
         .env_remove("OPENCODE_API_KEY")
         .assert()
@@ -276,5 +278,121 @@ fn kimi_auth_status_reads_stored_auth() -> Result<(), Box<dyn std::error::Error>
     cmd.args(["kimi", "auth", "status"]);
     cmd.env("CCP_CONFIG_DIR", temp.path());
     cmd.assert().success().stdout(contains("User: u"));
+    Ok(())
+}
+
+fn isolated_opencode_env(cmd: &mut Command, temp: &TempDir) {
+    cmd.env("CCP_CONFIG_DIR", temp.path().join("config"))
+        .env("HOME", temp.path())
+        .env("USERPROFILE", temp.path())
+        .env_remove("CCP_OPENCODE_API_KEY")
+        .env_remove("OPENCODE_API_KEY");
+}
+
+#[test]
+fn opencode_auth_status_reports_config_source() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    isolated_opencode_env(&mut cmd, &temp);
+    cmd.args(["opencode", "auth", "status"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(contains("Not authenticated"));
+
+    std::fs::create_dir_all(temp.path().join("config"))?;
+    std::fs::write(
+        temp.path().join("config/config.json"),
+        r#"{"opencode":{"apiKey":"file-key"}}"#,
+    )?;
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    isolated_opencode_env(&mut cmd, &temp);
+    cmd.args(["opencode", "auth", "status"])
+        .assert()
+        .success()
+        .stdout(contains("config.json"));
+    Ok(())
+}
+
+#[test]
+fn opencode_auth_login_stores_key_from_stdin() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    isolated_opencode_env(&mut cmd, &temp);
+    cmd.args(["opencode", "auth", "login"])
+        .write_stdin("login-key\n")
+        .assert()
+        .success()
+        .stdout(contains("saved"));
+    let raw = std::fs::read_to_string(temp.path().join("config/config.json"))?;
+    assert!(raw.contains("\"apiKey\""));
+    assert!(raw.contains("login-key"));
+    Ok(())
+}
+
+#[test]
+fn config_set_get_list_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.args(args).assert()
+    };
+
+    run(&["config", "set", "port", "18080"]).success();
+    run(&["config", "get", "port"])
+        .success()
+        .stdout(contains("18080"));
+    run(&["config", "set", "codex.fullLane", "true"]).success();
+    run(&["config", "list"])
+        .success()
+        .stdout(contains("port"))
+        .stdout(contains("18080"))
+        .stdout(contains("codex.fullLane"));
+
+    // Secrets never print.
+    run(&["config", "set", "opencode.apiKey", "shh"]).success();
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    isolated_opencode_env(&mut cmd, &temp);
+    let assert = cmd
+        .args(["config", "get", "opencode.apiKey"])
+        .assert()
+        .success();
+    let out = String::from_utf8(assert.get_output().stdout.clone())?;
+    assert!(out.contains("set") && !out.contains("shh"));
+
+    run(&["config", "set", "port", "abc"]).failure();
+    run(&["config", "set", "aliasProvider", "Muse"]).failure();
+    run(&["config", "set", "nope.x", "1"]).failure();
+    run(&["config", "get", "log.verbose"])
+        .success()
+        .stdout(contains("false"));
+    Ok(())
+}
+
+#[test]
+fn config_edit_uses_editor() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    isolated_opencode_env(&mut cmd, &temp);
+    cmd.env("EDITOR", "true").env_remove("VISUAL");
+    cmd.args(["config", "edit"]).assert().success();
+    Ok(())
+}
+
+#[test]
+fn update_check_with_pinned_version_is_offline() -> Result<(), Box<dyn std::error::Error>> {
+    let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    cmd.args(["update", "--check", "--version", &current])
+        .assert()
+        .success()
+        .stdout(contains("already up to date"));
+
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    cmd.args(["update", "--check", "--version", "v9.9.9"])
+        .assert()
+        .success()
+        .stdout(contains("available"));
     Ok(())
 }
