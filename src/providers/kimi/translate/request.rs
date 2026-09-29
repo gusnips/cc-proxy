@@ -649,8 +649,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(translated.model, "kimi-for-coding");
-        assert_eq!(translated.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(translated.model, KIMI_DEFAULT_MODEL);
+        assert_eq!(translated.reasoning_effort.as_deref(), Some("max"));
         assert_eq!(translated.prompt_cache_key.as_deref(), Some("sid"));
         assert_eq!(translated.max_tokens, 10);
     }

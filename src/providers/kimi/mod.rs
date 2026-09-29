@@ -18,7 +18,9 @@ use crate::provider::{
 };
 use crate::providers::kimi::auth::token_store::file_store;
 use crate::providers::kimi::translate::accumulate::accumulate_response;
-use crate::providers::kimi::translate::model_allowlist::{assert_allowed_model, resolve_model};
+use crate::providers::kimi::translate::model_allowlist::{
+    KIMI_DEFAULT_MODEL, assert_allowed_model, resolve_model,
+};
 use crate::providers::kimi::translate::request::{TranslateOptions, translate_request};
 use crate::providers::kimi::translate::stream::translate_stream_bytes;
 use crate::registry::KIMI_MODELS;
@@ -61,7 +63,7 @@ impl Provider for KimiProvider {
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let want_stream = body.stream;
-        let model = body.model.as_deref().unwrap_or("kimi-for-coding");
+        let model = body.model.as_deref().unwrap_or(KIMI_DEFAULT_MODEL);
         let resolved = resolve_model(model);
 
         if let Err(e) = assert_allowed_model(&resolved) {
@@ -171,7 +173,7 @@ impl Provider for KimiProvider {
     }
 
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
-        let model = body.model.as_deref().unwrap_or("kimi-for-coding");
+        let model = body.model.as_deref().unwrap_or(KIMI_DEFAULT_MODEL);
         let resolved = resolve_model(model);
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved);
@@ -198,7 +200,7 @@ impl Provider for KimiProvider {
         let requested = body
             .model
             .clone()
-            .unwrap_or_else(|| "kimi-for-coding".to_string());
+            .unwrap_or_else(|| KIMI_DEFAULT_MODEL.to_string());
         let resolved = resolve_model(&requested);
         assert_allowed_model(&resolved).map_err(|error| {
             ProviderError::new(
