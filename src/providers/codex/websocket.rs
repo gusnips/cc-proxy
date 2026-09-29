@@ -2227,15 +2227,21 @@ where
                 // A rate limit is authoritative: return it as a terminal 429
                 // now, so quota exhaustion is a clean 429 + Retry-After rather
                 // than a socket close misread as a retryable transport drop.
+                // This covers classified rate-limit error events as well as
+                // the bare `codex.rate_limits` snapshot with
+                // `limit_reached: true`, which carries no error object for
+                // the classifier.
                 if let Some(failure) = super::events::classify_event_failure(&parsed)
-                    && failure.kind == super::events::CodexFailureKind::RateLimit
+                    .filter(|failure| failure.kind == super::events::CodexFailureKind::RateLimit)
+                    .or_else(|| super::events::limit_reached_failure(&parsed))
                 {
-                    invalidate_pool_owner(pool_key, pool_entry);
+                    invalidate_pool_owner(pool_owner, pool_entry);
                     return Err(CodexError {
                         status: 429,
                         message: failure.message,
                         detail: Some("rate_limit_reached".to_string()),
                         retry_after: failure.retry_after,
+                        usage_limit: None,
                         origin: CodexErrorOrigin::WebSocket,
                     });
                 }
@@ -2418,27 +2424,6 @@ where
                 }
                 if parsed.get("type").and_then(|value| value.as_str()) == Some("error") {
                     status = event_error_status(&parsed).unwrap_or(500);
-                }
-
-                // A rate limit signalled mid-stream is authoritative: surface
-                // it as a terminal 429 immediately. Otherwise it is forwarded
-                // as an ordinary event that does not close the retry window,
-                // and the socket close that follows quota exhaustion is then
-                // misread as a retryable transport drop and re-driven into a
-                // 502 storm instead of a clean 429 + Retry-After.
-                if let Some(failure) = super::events::classify_event_failure(&parsed)
-                    && failure.kind == super::events::CodexFailureKind::RateLimit
-                {
-                    invalidate_pool_owner(pool_key, pool_entry);
-                    terminal_item = Some(Err(CodexError {
-                        status: 429,
-                        message: failure.message,
-                        detail: Some("rate_limit_reached".to_string()),
-                        retry_after: failure.retry_after,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::WebSocket,
-                    }));
-                    break;
                 }
 
                 if is_terminal_event(&parsed) {

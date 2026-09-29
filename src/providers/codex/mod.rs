@@ -2022,11 +2022,23 @@ mod tests {
     #[test]
     fn empty_completion_is_accepted_only_after_one_retry_and_only_with_the_tail() {
         // The discriminator: a glitch clears on one resend, a semantic empty repeats.
-        assert!(!accept_empty_completion(true, 0), "first empty must retry once");
-        assert!(accept_empty_completion(true, 1), "second consecutive empty is the turn's end");
+        assert!(
+            !accept_empty_completion(true, 0),
+            "first empty must retry once"
+        );
+        assert!(
+            accept_empty_completion(true, 1),
+            "second consecutive empty is the turn's end"
+        );
         assert!(accept_empty_completion(true, 2));
-        assert!(!accept_empty_completion(false, 0), "no tool tail: unchanged #70/#71 behavior");
-        assert!(!accept_empty_completion(false, 5), "no tool tail: never accepted");
+        assert!(
+            !accept_empty_completion(false, 0),
+            "no tool tail: unchanged #70/#71 behavior"
+        );
+        assert!(
+            !accept_empty_completion(false, 5),
+            "no tool tail: never accepted"
+        );
     }
 
     fn empty_terminal_fixture() -> (
@@ -2121,7 +2133,9 @@ mod tests {
         {
             LiveStreamStart::Response(response) => response,
             LiveStreamStart::Retry { error, .. } => {
-                panic!("accept flag set: the empty completion must be delivered, got retry: {error}")
+                panic!(
+                    "accept flag set: the empty completion must be delivered, got retry: {error}"
+                )
             }
         };
         let mut collected = Vec::new();

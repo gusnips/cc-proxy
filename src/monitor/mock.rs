@@ -94,9 +94,8 @@ fn mock_state_for_tick(
     streaming.stream_chunks = 96;
     streaming.input_tokens = Some(12_480);
     streaming.output_tokens = Some(420);
-    streaming.traffic_capture_path = Some(PathBuf::from(
-        "/tmp/cc-proxy-demo/traffic/req-active-codex",
-    ));
+    streaming.traffic_capture_path =
+        Some(PathBuf::from("/tmp/cc-proxy-demo/traffic/req-active-codex"));
     let simulated_elapsed = Duration::from_millis(tick.saturating_mul(TICK_MILLIS));
     streaming.started_at = now - Duration::from_secs(14) - simulated_elapsed;
     streaming.started_instant = instant_now - Duration::from_secs(14) - simulated_elapsed;

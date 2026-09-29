@@ -1335,9 +1335,7 @@ async fn non_codex_validation_uses_openai_errors_before_generation() {
     .unwrap();
     assert_eq!(value["error"]["param"], "temperature");
     assert_eq!(value["error"]["code"], "unsupported_parameter");
-    assert!(
-        cc_proxy::session::existing_session_now(Some("invalid-routed-request")).is_none()
-    );
+    assert!(cc_proxy::session::existing_session_now(Some("invalid-routed-request")).is_none());
     let snapshot = monitor.snapshot();
     assert_eq!(snapshot.recent[0].session_seq, None);
     assert_eq!(snapshot.recent[0].provider, None);

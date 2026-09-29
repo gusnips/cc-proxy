@@ -306,8 +306,9 @@ impl Provider for OpenCodeProvider {
                 )
             }
             EndpointKind::Responses => {
-                let translated = responses::prepare_request(&body, &spec.id, ctx.session_id.clone())
-                    .map_err(invalid_request_provider_error)?;
+                let translated =
+                    responses::prepare_request(&body, &spec.id, ctx.session_id.clone())
+                        .map_err(invalid_request_provider_error)?;
                 let upstream = client
                     .post(
                         spec.endpoint,

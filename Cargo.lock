@@ -279,6 +279,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-proxy"
+version = "0.1.42"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "async-trait",
+ "axum",
+ "base64",
+ "bytes",
+ "clap",
+ "crossterm",
+ "flate2",
+ "futures-core",
+ "futures-util",
+ "hex",
+ "hostname",
+ "http",
+ "http-body-util",
+ "hyper-util",
+ "jiff",
+ "libc",
+ "once_cell",
+ "predicates",
+ "prost",
+ "rand 0.8.6",
+ "ratatui",
+ "regex-lite",
+ "reqwest",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tiktoken-rs",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "webpki-roots",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -329,55 +378,6 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
-
-[[package]]
-name = "cc-proxy"
-version = "0.1.42"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "async-trait",
- "axum",
- "base64",
- "bytes",
- "clap",
- "crossterm",
- "flate2",
- "futures-core",
- "futures-util",
- "hex",
- "hostname",
- "http",
- "http-body-util",
- "hyper-util",
- "jiff",
- "libc",
- "once_cell",
- "predicates",
- "prost",
- "rand 0.8.6",
- "ratatui",
- "regex-lite",
- "reqwest",
- "rustls",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tiktoken-rs",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "tower",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "webpki-roots",
-]
 
 [[package]]
 name = "colorchoice"

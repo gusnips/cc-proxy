@@ -267,6 +267,55 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
     })
 }
 
+/// Authoritative quota exhaustion signalled as a `codex.rate_limits` event
+/// with `limit_reached: true`.
+///
+/// Unlike the error shapes `classify_event_failure` recognises, this event
+/// carries no error object — only the snapshot — so classification alone
+/// leaves it a non-terminal control event and the socket close that follows
+/// is misread as a retryable transport drop. Returns the terminal 429 with
+/// the reset clock from `reset_after_seconds` (primary window first, then
+/// secondary), so callers surface a clean 429 + Retry-After instead of
+/// re-driving the request into a 502 storm.
+///
+/// A snapshot covered by credits (`credits.has_credits` / `unlimited`) or
+/// explicitly allowed (`rate_limits.allowed`) is not exhaustion: the request
+/// proceeds and the event stays telemetry.
+pub(crate) fn limit_reached_failure(payload: &Value) -> Option<CodexEventFailure> {
+    if payload.get("type").and_then(Value::as_str) != Some("codex.rate_limits") {
+        return None;
+    }
+    let limits = payload.get("rate_limits")?;
+    if limits.get("limit_reached").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    if limits.get("allowed").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let credits = payload.get("credits");
+    if credits
+        .and_then(|credits| credits.get("has_credits"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        || credits
+            .and_then(|credits| credits.get("unlimited"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return None;
+    }
+    let retry_after = ["primary", "secondary"]
+        .into_iter()
+        .find_map(|window| scalar_string(limits.get(window)?.get("reset_after_seconds")));
+    Some(CodexEventFailure {
+        kind: CodexFailureKind::RateLimit,
+        explicit_status: Some(429),
+        status: 429,
+        message: "Codex usage limit reached".to_string(),
+        retry_after,
+    })
+}
+
 /// Which known upstream quota window ran out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexLimitWindow {
@@ -802,6 +851,73 @@ data: {"type":"response.completed","response":{"status":"completed"}}
                 "type": "codex.rate_limits",
                 "rate_limits": {"limit_reached": true},
                 "credits": {"has_credits": false, "unlimited": false}
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn limit_reached_snapshot_is_a_terminal_429() {
+        let failure = limit_reached_failure(&serde_json::json!({
+            "type": "codex.rate_limits",
+            "rate_limits": {
+                "limit_reached": true,
+                "primary": {"reset_after_seconds": 518773}
+            }
+        }))
+        .expect("limit_reached snapshot");
+        assert_eq!(failure.kind, CodexFailureKind::RateLimit);
+        assert_eq!(failure.status, 429);
+        assert_eq!(failure.retry_after.as_deref(), Some("518773"));
+    }
+
+    #[test]
+    fn limit_reached_snapshot_without_reset_has_no_retry_after() {
+        let failure = limit_reached_failure(&serde_json::json!({
+            "type": "codex.rate_limits",
+            "rate_limits": {"limit_reached": true}
+        }))
+        .expect("limit_reached snapshot");
+        assert_eq!(failure.status, 429);
+        assert_eq!(failure.retry_after, None);
+    }
+
+    #[test]
+    fn limit_reached_ignores_non_quota_snapshots() {
+        assert!(
+            limit_reached_failure(&serde_json::json!({
+                "type": "codex.rate_limits",
+                "rate_limits": {"limit_reached": false}
+            }))
+            .is_none()
+        );
+        assert!(
+            limit_reached_failure(&serde_json::json!({
+                "type": "response.output_text.delta",
+                "delta": "limit_reached"
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn limit_reached_snapshot_covered_by_credits_stays_telemetry() {
+        assert!(
+            limit_reached_failure(&serde_json::json!({
+                "type": "codex.rate_limits",
+                "rate_limits": {
+                    "allowed": false,
+                    "limit_reached": true,
+                    "primary": {"reset_after_seconds": 509821}
+                },
+                "credits": {"has_credits": true, "unlimited": false}
+            }))
+            .is_none()
+        );
+        assert!(
+            limit_reached_failure(&serde_json::json!({
+                "type": "codex.rate_limits",
+                "rate_limits": {"limit_reached": true, "allowed": true}
             }))
             .is_none()
         );

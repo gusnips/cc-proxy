@@ -261,9 +261,7 @@ fn cursor_error_display_works() {
 async fn cursor_client_sends_connect_proto_headers_and_run_request_frame() {
     use axum::{Router, routing::post};
     use cc_proxy::providers::cursor::client::CursorHttpClient;
-    use cc_proxy::providers::cursor::connect::{
-        ConnectFrameDecoder, encode_connect_frame,
-    };
+    use cc_proxy::providers::cursor::connect::{ConnectFrameDecoder, encode_connect_frame};
     use cc_proxy::providers::cursor::proto::*;
     use cc_proxy::providers::cursor::request::CursorSelectedImage;
     use prost::Message;
@@ -904,9 +902,7 @@ async fn cursor_provider_handle_messages_returns_anthropic_json() {
 #[allow(clippy::await_holding_lock)]
 async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
     use axum::{Router, routing::post};
-    use cc_proxy::providers::cursor::connect::{
-        ConnectFrameDecoder, encode_connect_frame,
-    };
+    use cc_proxy::providers::cursor::connect::{ConnectFrameDecoder, encode_connect_frame};
     use cc_proxy::providers::cursor::proto::*;
     use prost::Message;
     use std::sync::{Arc, Mutex};

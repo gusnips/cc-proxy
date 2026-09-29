@@ -44,7 +44,9 @@ pub enum DaemonStatus {
     Running(DaemonInfo),
     /// No pidfile, or the pidfile is stale. Some other process may still be
     /// answering on the port; see [`probe_port_health`].
-    Unmanaged { port: u16 },
+    Unmanaged {
+        port: u16,
+    },
     Stopped,
 }
 
@@ -292,9 +294,7 @@ pub fn probe_port_health(port: u16) -> bool {
     }
     let mut head = [0u8; 15];
     match stream.read_exact(&mut head) {
-        Ok(()) => {
-            head.starts_with(b"HTTP/1.0 200") || head.starts_with(b"HTTP/1.1 200")
-        }
+        Ok(()) => head.starts_with(b"HTTP/1.0 200") || head.starts_with(b"HTTP/1.1 200"),
         Err(_) => false,
     }
 }

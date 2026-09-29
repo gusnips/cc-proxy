@@ -5,10 +5,13 @@ use predicates::str::contains;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-fn isolated_env(cmd: &mut Command, temp: &TempDir) {
+fn isolated_env(cmd: &mut Command, temp: &TempDir, port: u16) {
     cmd.env("CCP_CONFIG_DIR", temp.path().join("config"));
     cmd.env("XDG_STATE_HOME", temp.path().join("state"));
     cmd.env("HOME", temp.path());
+    // Pin the probe port so status/stop/reload never touch the machine's
+    // real proxy port (or another test's) when no daemon is tracked.
+    cmd.env("PORT", port.to_string());
 }
 
 fn free_port() -> u16 {
@@ -26,7 +29,7 @@ struct DaemonGuard {
 }
 
 impl DaemonGuard {
-    fn new(temp: &TempDir) -> Self {
+    fn new(temp: &TempDir, port: u16) -> Self {
         let env = [
             (
                 "CCP_CONFIG_DIR".to_string(),
@@ -40,6 +43,7 @@ impl DaemonGuard {
                 "HOME".to_string(),
                 temp.path().to_string_lossy().into_owned(),
             ),
+            ("PORT".to_string(), port.to_string()),
         ]
         .into_iter()
         .collect();
@@ -61,10 +65,7 @@ impl Drop for DaemonGuard {
     }
 }
 
-fn wait_for_status(
-    guard: &DaemonGuard,
-    running: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn wait_for_status(guard: &DaemonGuard, running: bool) -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let mut cmd = Command::cargo_bin("cc-proxy")?;
@@ -90,7 +91,7 @@ fn wait_for_status(
 fn status_reports_not_running_without_daemon() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
     let mut cmd = Command::cargo_bin("cc-proxy")?;
-    isolated_env(&mut cmd, &temp);
+    isolated_env(&mut cmd, &temp, free_port());
     cmd.arg("status")
         .assert()
         .failure()
@@ -103,7 +104,7 @@ fn status_reports_not_running_without_daemon() -> Result<(), Box<dyn std::error:
 fn stop_without_daemon_is_success() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
     let mut cmd = Command::cargo_bin("cc-proxy")?;
-    isolated_env(&mut cmd, &temp);
+    isolated_env(&mut cmd, &temp, free_port());
     cmd.arg("stop")
         .assert()
         .success()
@@ -115,7 +116,7 @@ fn stop_without_daemon_is_success() -> Result<(), Box<dyn std::error::Error>> {
 fn reload_without_daemon_validates_config() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
     let mut cmd = Command::cargo_bin("cc-proxy")?;
-    isolated_env(&mut cmd, &temp);
+    isolated_env(&mut cmd, &temp, free_port());
     cmd.arg("reload")
         .assert()
         .failure()
@@ -130,7 +131,7 @@ fn reload_rejects_invalid_config() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&config_dir)?;
     std::fs::write(config_dir.join("config.json"), "{not json")?;
     let mut cmd = Command::cargo_bin("cc-proxy")?;
-    isolated_env(&mut cmd, &temp);
+    isolated_env(&mut cmd, &temp, free_port());
     cmd.arg("reload")
         .assert()
         .failure()
@@ -141,8 +142,8 @@ fn reload_rejects_invalid_config() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn serve_status_and_stop_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
-    let guard = DaemonGuard::new(&temp);
     let port = free_port();
+    let guard = DaemonGuard::new(&temp, port);
 
     let mut serve = Command::cargo_bin("cc-proxy")?;
     for (key, value) in &guard.env {
@@ -171,7 +172,10 @@ fn serve_status_and_stop_round_trip() -> Result<(), Box<dyn std::error::Error>> 
     for (key, value) in &guard.env {
         stop.env(key, value);
     }
-    stop.arg("stop").assert().success().stdout(contains("stopped"));
+    stop.arg("stop")
+        .assert()
+        .success()
+        .stdout(contains("stopped"));
 
     wait_for_status(&guard, false)?;
     Ok(())
@@ -180,8 +184,8 @@ fn serve_status_and_stop_round_trip() -> Result<(), Box<dyn std::error::Error>> 
 #[test]
 fn restart_keeps_serving() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
-    let guard = DaemonGuard::new(&temp);
     let port = free_port();
+    let guard = DaemonGuard::new(&temp, port);
 
     let mut serve = Command::cargo_bin("cc-proxy")?;
     for (key, value) in &guard.env {

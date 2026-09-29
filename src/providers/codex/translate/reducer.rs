@@ -57,8 +57,10 @@ pub struct CodexUsage {
     pub output_tokens_details_reasoning: Option<u64>,
     /// Latest `codex.rate_limits` snapshot seen on the stream that produced
     /// this usage. Codex sends it as its own event before any usage exists,
-    /// so the translator carries it here for the mapper.
-    pub rate_limits: Option<CodexRateLimits>,
+    /// so the translator carries it here for the mapper. Boxed: the snapshot
+    /// is present on a minority of responses, and `ReducerEvent::Finish`
+    /// carries `CodexUsage` by value.
+    pub rate_limits: Option<Box<CodexRateLimits>>,
 }
 
 /// Subscription meter summary from a `codex.rate_limits` stream event.
@@ -227,16 +229,15 @@ fn finalize_active_thinking(
     let replay = reasoning_by_output_index
         .remove(&active.output_index)
         .and_then(|pending| pending.replay());
-    if config::codex_reasoning_signatures_enabled() {
-        if let Some(replay) = replay
-            && let Some(signature) = encode_reasoning_signature(&replay)
-        {
-            out.push(ReducerEvent::ThinkingSignature {
-                index: active.anthropic_index,
-                signature,
-            });
-            output_items_by_index.insert(active.output_index, reasoning_input_item(replay));
-        }
+    if config::codex_reasoning_signatures_enabled()
+        && let Some(replay) = replay
+        && let Some(signature) = encode_reasoning_signature(&replay)
+    {
+        out.push(ReducerEvent::ThinkingSignature {
+            index: active.anthropic_index,
+            signature,
+        });
+        output_items_by_index.insert(active.output_index, reasoning_input_item(replay));
     }
     out.push(ReducerEvent::ThinkingStop {
         index: active.anthropic_index,
@@ -865,7 +866,7 @@ pub(crate) fn reduce_upstream_bytes_with_policy(
                 .map(|s| s.to_string());
             final_usage = p.get("response").map(parse_codex_usage);
             if let Some(usage) = final_usage.as_mut() {
-                usage.rate_limits = latest_rate_limits.clone();
+                usage.rate_limits = latest_rate_limits.clone().map(Box::new);
             }
             incomplete = response_is_incomplete_terminal(&p);
             continuation_eligible =
@@ -1108,7 +1109,7 @@ pub fn map_codex_usage_to_anthropic(
                 reasoning_tokens,
                 thinking_tokens: reasoning_tokens,
             }),
-        codex_rate_limits: usage.rate_limits.clone(),
+        codex_rate_limits: usage.rate_limits.as_deref().cloned(),
     };
 
     if let Some(requests) = web_search_requests
@@ -1723,7 +1724,7 @@ mod tests {
             output_tokens: Some(50),
             input_tokens_details_cached: None,
             output_tokens_details_reasoning: Some(30),
-            rate_limits: Some(CodexRateLimits {
+            rate_limits: Some(Box::new(CodexRateLimits {
                 plan_type: Some("prolite".into()),
                 limit_reached: Some(false),
                 primary: Some(CodexRateLimitWindow {
@@ -1732,7 +1733,7 @@ mod tests {
                     reset_at: Some(1_789_765_755),
                 }),
                 secondary: None,
-            }),
+            })),
         };
         let mapped = map_codex_usage_to_anthropic(&Some(usage), None);
         let details = mapped

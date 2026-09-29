@@ -1,5 +1,4 @@
 use anyhow::Result;
-use clap::{ArgAction, Parser, Subcommand};
 use cc_proxy::{
     config, daemon, logging,
     monitor::MonitorHandle,
@@ -8,6 +7,7 @@ use cc_proxy::{
     server::{self, ServerConfig},
     tui::{self, MonitorExit, MonitorUiConfig},
 };
+use clap::{ArgAction, Parser, Subcommand};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -233,9 +233,10 @@ fn main() -> Result<()> {
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(2))
                 .build()?;
-            let monitor = runtime.block_on(
-                cc_proxy::monitor::remote::RemoteMonitor::connect(client, url.clone()),
-            )?;
+            let monitor = runtime.block_on(cc_proxy::monitor::remote::RemoteMonitor::connect(
+                client,
+                url.clone(),
+            ))?;
             tui::run_attached_monitor(|| monitor.snapshot(), url.to_string())?;
             Ok(())
         }
@@ -432,7 +433,9 @@ fn reload_daemon() -> Result<()> {
     match daemon::reload_service()? {
         daemon::ReloadOutcome::Reloaded => {
             println!("config reloaded. File-backed settings apply on the next request;");
-            println!("bind address, port, alias provider, and environment need `cc-proxy restart`.");
+            println!(
+                "bind address, port, alias provider, and environment need `cc-proxy restart`."
+            );
             Ok(())
         }
         daemon::ReloadOutcome::ValidatedOnly => {
@@ -605,7 +608,7 @@ mod tests {
             vec!["cc-proxy", "serve", "--monitor"],
             vec!["cc-proxy", "serve", "--no-monitor"],
         ] {
-            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
+            assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
         }
         assert!(Cli::try_parse_from(["cc-proxy", "serve", "--monitor", "--no-monitor"]).is_err());
     }
@@ -630,8 +633,7 @@ mod tests {
 
     #[test]
     fn opencode_usage_command_parses_json_flag() {
-        let cli =
-            Cli::try_parse_from(["cc-proxy", "opencode", "usage", "--json"]).unwrap();
+        let cli = Cli::try_parse_from(["cc-proxy", "opencode", "usage", "--json"]).unwrap();
 
         assert!(matches!(
             cli.command,

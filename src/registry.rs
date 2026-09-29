@@ -559,7 +559,11 @@ mod tests {
             );
         }
         // Bare unknown IDs still have no provider.
-        assert!(registry.provider_for_model("some-future-model", None).is_none());
+        assert!(
+            registry
+                .provider_for_model("some-future-model", None)
+                .is_none()
+        );
     }
 
     #[test]

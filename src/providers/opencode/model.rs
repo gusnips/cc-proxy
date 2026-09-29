@@ -225,8 +225,7 @@ pub fn resolve(raw: &str) -> Option<ResolvedModel> {
 pub fn infer_endpoint(id: &str) -> EndpointKind {
     if id.starts_with("minimax-") || id.starts_with("qwen") {
         EndpointKind::Messages
-    } else if id.starts_with("grok-") || id.starts_with("gpt-") || id.starts_with("muse-spark-")
-    {
+    } else if id.starts_with("grok-") || id.starts_with("gpt-") || id.starts_with("muse-spark-") {
         EndpointKind::Responses
     } else {
         EndpointKind::ChatCompletions

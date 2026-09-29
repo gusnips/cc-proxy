@@ -82,6 +82,7 @@ pub(crate) fn quota_wall_error_from_file(path: &std::path::Path) -> Option<Codex
         ),
         detail: None,
         retry_after: Some(secs.to_string()),
+        usage_limit: None,
         origin: CodexErrorOrigin::Http,
     })
 }
@@ -5702,7 +5703,12 @@ mod quota_wall_tests {
 
     #[test]
     fn hot_5h_window_is_a_wall_with_retry_after() {
-        let f = state_file(&format!("100|{}|16|{}|{}", iso_in(7200), iso_in(600_000), now_epoch()));
+        let f = state_file(&format!(
+            "100|{}|16|{}|{}",
+            iso_in(7200),
+            iso_in(600_000),
+            now_epoch()
+        ));
         let err = quota_wall_error_from_file(f.path()).expect("wall");
         assert_eq!(err.status, 429);
         assert!(err.message.contains("5h window"), "{}", err.message);
@@ -5712,32 +5718,57 @@ mod quota_wall_tests {
 
     #[test]
     fn hot_weekly_wins_the_message_over_hot_5h() {
-        let f = state_file(&format!("100|{}|99|{}|{}", iso_in(7200), iso_in(600_000), now_epoch()));
+        let f = state_file(&format!(
+            "100|{}|99|{}|{}",
+            iso_in(7200),
+            iso_in(600_000),
+            now_epoch()
+        ));
         let err = quota_wall_error_from_file(f.path()).expect("wall");
         assert!(err.message.contains("weekly window"), "{}", err.message);
     }
 
     #[test]
     fn cold_windows_are_no_verdict() {
-        let f = state_file(&format!("30|{}|5|{}|{}", iso_in(7200), iso_in(600_000), now_epoch()));
+        let f = state_file(&format!(
+            "30|{}|5|{}|{}",
+            iso_in(7200),
+            iso_in(600_000),
+            now_epoch()
+        ));
         assert!(quota_wall_error_from_file(f.path()).is_none());
     }
 
     #[test]
     fn stale_sample_is_no_verdict_even_when_hot() {
-        let f = state_file(&format!("100|{}|100|{}|{}", iso_in(7200), iso_in(600_000), now_epoch() - 3600));
+        let f = state_file(&format!(
+            "100|{}|100|{}|{}",
+            iso_in(7200),
+            iso_in(600_000),
+            now_epoch() - 3600
+        ));
         assert!(quota_wall_error_from_file(f.path()).is_none());
     }
 
     #[test]
     fn future_dated_sample_is_no_verdict_even_when_hot() {
-        let f = state_file(&format!("100|{}|100|{}|{}", iso_in(7200), iso_in(600_000), now_epoch() + 3600));
+        let f = state_file(&format!(
+            "100|{}|100|{}|{}",
+            iso_in(7200),
+            iso_in(600_000),
+            now_epoch() + 3600
+        ));
         assert!(quota_wall_error_from_file(f.path()).is_none());
     }
 
     #[test]
     fn expired_reset_time_is_no_verdict_even_when_hot() {
-        let f = state_file(&format!("100|{}|16|{}|{}", iso_in(-120), iso_in(600_000), now_epoch()));
+        let f = state_file(&format!(
+            "100|{}|16|{}|{}",
+            iso_in(-120),
+            iso_in(600_000),
+            now_epoch()
+        ));
         assert!(quota_wall_error_from_file(f.path()).is_none());
     }
 
@@ -5751,7 +5782,12 @@ mod quota_wall_tests {
     #[test]
     fn empty_pct_field_is_no_verdict_not_a_wall() {
         // The sampler publishes an empty pct for an axis whose window failed sanity.
-        let f = state_file(&format!("|{}|16|{}|{}", iso_in(7200), iso_in(600_000), now_epoch()));
+        let f = state_file(&format!(
+            "|{}|16|{}|{}",
+            iso_in(7200),
+            iso_in(600_000),
+            now_epoch()
+        ));
         assert!(quota_wall_error_from_file(f.path()).is_none());
     }
 }

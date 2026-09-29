@@ -921,7 +921,7 @@ impl LiveStreamTranslator {
         self.ensure_message_start(traffic, out);
         let mut usage = payload.get("response").map(parse_codex_usage);
         if let Some(usage) = usage.as_mut() {
-            usage.rate_limits = self.rate_limits.clone();
+            usage.rate_limits = self.rate_limits.clone().map(Box::new);
         }
         let stop_reason = if self.incomplete_response_policy
             == IncompleteResponsePolicy::AllowMaxOutputTokens
@@ -1059,22 +1059,19 @@ impl LiveStreamTranslator {
             .reasoning_by_output_index
             .remove(&thinking.output_index)
             .and_then(|pending| pending.replay());
-        if config::codex_reasoning_signatures_enabled() {
-            if let Some(signature) = replay
-                .as_ref()
-                .and_then(|replay| encode_reasoning_signature(replay))
-            {
-                self.emit(
-                    traffic,
-                    out,
-                    "content_block_delta",
-                    &serde_json::json!({
-                        "type": "content_block_delta",
-                        "index": thinking.anthropic_index,
-                        "delta": {"type": "signature_delta", "signature": signature}
-                    }),
-                );
-            }
+        if config::codex_reasoning_signatures_enabled()
+            && let Some(signature) = replay.as_ref().and_then(encode_reasoning_signature)
+        {
+            self.emit(
+                traffic,
+                out,
+                "content_block_delta",
+                &serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": thinking.anthropic_index,
+                    "delta": {"type": "signature_delta", "signature": signature}
+                }),
+            );
         }
         self.emit(
             traffic,
