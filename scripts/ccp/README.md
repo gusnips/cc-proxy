@@ -1,6 +1,6 @@
 # The `ccp` helper: running the proxy as a background service
 
-`ccp` is a small wrapper that runs `claude-code-proxy` as a **systemd user service**, so the proxy stays up in the background (with auto-restart) instead of needing a terminal running `cargo run -- serve`. The installer writes the unit and the wrapper automatically.
+`ccp` is a small wrapper that runs `cc-proxy` as a **systemd user service**, so the proxy stays up in the background (with auto-restart) instead of needing a terminal running `cargo run -- serve`. The installer writes the unit and the wrapper automatically.
 
 > **Linux/WSL only — not macOS.** This uses a systemd `--user` service; macOS has no systemd — it would need a launchd agent instead. The installer refuses to run without systemd. It's an optional convenience helper, not part of what the proxy itself ships.
 
@@ -18,10 +18,10 @@ It's idempotent (safe to re-run), warns if the proxy binary isn't installed yet,
 
 Two files, both written outside the repo (see `install.sh` for the exact contents):
 
-1. **The systemd user unit** — `~/.config/systemd/user/claude-code-proxy.service`
+1. **The systemd user unit** — `~/.config/systemd/user/cc-proxy.service`
 2. **The `ccp` wrapper script** — `~/.local/bin/ccp` (must be on `PATH`)
 
-Both drive the compiled binary at `~/.local/bin/claude-code-proxy` — the unit runs whatever is installed there, independent of the repo checkout. Rebuild/reinstall the binary (eg, `just install`, or copy a fresh build over it) and `ccp restart` picks it up.
+Both drive the compiled binary at `~/.local/bin/cc-proxy` — the unit runs whatever is installed there, independent of the repo checkout. Rebuild/reinstall the binary (eg, `just install`, or copy a fresh build over it) and `ccp restart` picks it up.
 
 The unit runs `... serve` with no TUI (no TTY as a service) and `CCP_LOG_STDERR=1`, so systemd captures the logs for `ccp logs`. It restarts on failure and listens on the default `127.0.0.1:18765` — to change the port add `Environment=PORT=...` to the unit and `systemctl --user daemon-reload` (or just re-run the installer after editing it there).
 

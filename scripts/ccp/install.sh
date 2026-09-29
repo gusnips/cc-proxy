@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Install the `ccp` helper: a systemd user service for claude-code-proxy plus a wrapper script.
+# Install the `ccp` helper: a systemd user service for cc-proxy plus a wrapper script.
 # Linux/WSL only (needs systemd --user). Idempotent — safe to re-run; overwrites the unit and wrapper with these versions.
 # See README.md (in this dir) for details
 set -euo pipefail
 
-bin="$HOME/.local/bin/claude-code-proxy"
+bin="$HOME/.local/bin/cc-proxy"
 wrapper="$HOME/.local/bin/ccp"
-unit="$HOME/.config/systemd/user/claude-code-proxy.service"
+unit="$HOME/.config/systemd/user/cc-proxy.service"
 
 # --- sanity: systemd --user must be available (Linux/WSL only; not macOS) ---
 if ! systemctl --user show-environment >/dev/null 2>&1; then
@@ -31,7 +31,7 @@ Description=Claude Code Proxy for Codex
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/claude-code-proxy serve
+ExecStart=%h/.local/bin/cc-proxy serve
 Restart=on-failure
 RestartSec=2
 Environment=CCP_LOG_STDERR=1
@@ -46,7 +46,7 @@ cat > "$wrapper" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-svc="claude-code-proxy.service"
+svc="cc-proxy.service"
 
 case "${1:-status}" in
   start)
