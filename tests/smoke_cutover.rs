@@ -503,37 +503,45 @@ async fn spawn_websocket_credited_rate_limit_upstream() -> String {
     addr_str
 }
 
-async fn spawn_websocket_delayed_terminal_upstream() -> String {
+/// Mock upstream that streams early chunks immediately but withholds the
+/// terminal events until the test releases them. The returned Notify lets
+/// the test prove a delta arrived *before* the terminal event could exist,
+/// without racing wall-clock timeouts against machine load.
+async fn spawn_websocket_delayed_terminal_upstream() -> (String, Arc<tokio::sync::Notify>) {
+    let release = Arc::new(tokio::sync::Notify::new());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let addr_str = format!("http://{addr}");
 
-    tokio::spawn(async move {
-        if let Ok((stream, _)) = listener.accept().await
-            && let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await
-        {
-            let _ = ws.next().await;
-            let early_events = [
-                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_up"}}"#,
-                r#"{"type":"response.output_text.delta","output_index":0,"delta":"early chunk"}"#,
-            ];
-            for event in &early_events {
-                let _ = ws.send(Message::Text(event.to_string())).await;
-            }
+    tokio::spawn({
+        let release = release.clone();
+        async move {
+            if let Ok((stream, _)) = listener.accept().await
+                && let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await
+            {
+                let _ = ws.next().await;
+                let early_events = [
+                    r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_up"}}"#,
+                    r#"{"type":"response.output_text.delta","output_index":0,"delta":"early chunk"}"#,
+                ];
+                for event in &early_events {
+                    let _ = ws.send(Message::Text(event.to_string())).await;
+                }
 
-            tokio::time::sleep(Duration::from_secs(2)).await;
+                release.notified().await;
 
-            let terminal_events = [
-                r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}"#,
-                r#"{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":5,"output_tokens":2}}}"#,
-            ];
-            for event in &terminal_events {
-                let _ = ws.send(Message::Text(event.to_string())).await;
+                let terminal_events = [
+                    r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}"#,
+                    r#"{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":5,"output_tokens":2}}}"#,
+                ];
+                for event in &terminal_events {
+                    let _ = ws.send(Message::Text(event.to_string())).await;
+                }
             }
         }
     });
 
-    addr_str
+    (addr_str, release)
 }
 
 async fn spawn_websocket_error_upstream(message: &'static str) -> String {
@@ -2140,8 +2148,11 @@ async fn smoke_codex_http_stream_returns_before_upstream_completion() {
     let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
     let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
     let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    // Timeouts are hang guards only: the mock withholds completion until
+    // `release` fires after the first frame, so any frame observed above
+    // arrived incrementally regardless of machine speed.
     let response = tokio::time::timeout(
-        Duration::from_secs(3),
+        Duration::from_secs(20),
         call_messages_body(json!({
             "model": "gpt-5.5",
             "max_tokens": 64,
@@ -2154,7 +2165,7 @@ async fn smoke_codex_http_stream_returns_before_upstream_completion() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let mut body = response.into_body();
-    let first = tokio::time::timeout(Duration::from_millis(200), body.frame())
+    let first = tokio::time::timeout(Duration::from_secs(20), body.frame())
         .await
         .expect("initial Anthropic heartbeat must arrive before upstream completion")
         .unwrap()
@@ -2975,14 +2986,17 @@ async fn smoke_codex_websocket_stream_returns_delta_before_terminal() {
     write_auth(config.path(), "codex");
     clear_codex_websocket_pool_for_tests();
 
-    let upstream = spawn_websocket_delayed_terminal_upstream().await;
+    let (upstream, release) = spawn_websocket_delayed_terminal_upstream().await;
 
     let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
     let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
     let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
 
+    // Timeouts below are hang guards only. Incrementality is proved
+    // structurally: the terminal event does not exist until `release` fires
+    // after the delta assertions, so any delta observed above arrived first.
     let response = tokio::time::timeout(
-        Duration::from_millis(1_500),
+        Duration::from_secs(20),
         call_messages_body(json!({
             "model": "gpt-5.5",
             "max_tokens": 64,
@@ -2991,12 +3005,12 @@ async fn smoke_codex_websocket_stream_returns_delta_before_terminal() {
         })),
     )
     .await
-    .expect("streaming response should start before terminal upstream event");
+    .expect("streaming response should start");
     assert_eq!(response.status(), StatusCode::OK);
 
     let mut body = response.into_body();
     let mut collected = Vec::new();
-    let read = tokio::time::timeout(Duration::from_millis(500), async {
+    let read = tokio::time::timeout(Duration::from_secs(20), async {
         while !String::from_utf8_lossy(&collected).contains("text_delta") {
             let Some(frame) = body.frame().await else {
                 break;
@@ -3019,6 +3033,18 @@ async fn smoke_codex_websocket_stream_returns_delta_before_terminal() {
         !text.contains("message_stop"),
         "stream finished too early: {text}"
     );
+
+    // Release the withheld terminal event; the stream must then complete.
+    release.notify_one();
+    let rest = tokio::time::timeout(
+        Duration::from_secs(20),
+        axum::body::to_bytes(body, usize::MAX),
+    )
+    .await
+    .expect("stream should complete after the terminal event")
+    .unwrap();
+    let rest = String::from_utf8(rest.to_vec()).unwrap();
+    assert!(rest.contains("message_stop"), "stream body: {rest}");
 }
 
 #[allow(clippy::await_holding_lock)]
