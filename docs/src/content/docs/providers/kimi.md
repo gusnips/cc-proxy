@@ -18,11 +18,11 @@ The login prints a verification URL and user code, then polls until authorizatio
 
 ## Model selection
 
-The upstream wire model is `kimi-for-coding`, displayed by Kimi tooling as Kimi K2.6. The proxy also accepts `kimi-k2.6` and `k2.6` as aliases. Use `[1m]` as a Claude Code compaction hint only when the actual upstream context and your chosen threshold support it.
+The current model is Kimi K3: use `k3` (or `kimi-k3`), sent upstream as the `k3` wire model. The older `kimi-for-coding` ID still works as a legacy alias, alongside `kimi-k2.6` and `k2.6`. Use `[1m]` as a Claude Code compaction hint only when the actual upstream context and your chosen threshold support it.
 
 ```sh
-ANTHROPIC_MODEL=kimi-for-coding[1m]
-ANTHROPIC_SMALL_FAST_MODEL=kimi-for-coding[1m]
+ANTHROPIC_MODEL=k3[1m]
+ANTHROPIC_SMALL_FAST_MODEL=k3[1m]
 ```
 
 ## Reasoning

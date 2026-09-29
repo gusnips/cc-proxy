@@ -54,7 +54,7 @@ Toggle it with ordinary file operations:
 ```sh
 mkdir -p ~/.claude
 touch ~/.claude/cc-proxy-enabled
-printf '%s\n' 'kimi-for-coding[1m]' > ~/.claude/cc-proxy-model
+printf '%s\n' 'k3[1m]' > ~/.claude/cc-proxy-model
 # Disable for future sessions
 rm ~/.claude/cc-proxy-enabled
 ```
@@ -67,7 +67,7 @@ With the base URL already pointing to the proxy:
 
 ```text
 /model gpt-6-sol-fast[1m]
-/model kimi-for-coding[1m]
+/model k3[1m]
 /model grok-4.5
 /model cursor:gpt-5.5
 ```
