@@ -255,7 +255,9 @@ mod tests {
     fn supported_models_lists_known_glm_models() {
         let provider = GlmProvider::new();
         let models = provider.supported_models();
-        assert!(models.contains(&"glm-4.7".to_string()));
+        assert!(models.contains(&"glm-5.3".to_string()));
+        assert!(models.contains(&"glm-5.3-flash".to_string()));
         assert!(models.contains(&"glm-5.2".to_string()));
+        assert!(!models.contains(&"glm-4.7".to_string()));
     }
 }

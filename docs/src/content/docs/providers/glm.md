@@ -27,17 +27,19 @@ no environment key is set. The proxy does not implement a GLM login flow.
 
 ## Models
 
-Run `cc-proxy models` for the current catalog. GLM serves `glm-4.7` and
-`glm-5.2` under those bare IDs:
+Run `cc-proxy models` for the current catalog. GLM serves `glm-5.3` and
+`glm-5.3-flash` under those bare IDs:
 
 ```sh
-ANTHROPIC_MODEL=glm-5.2 \
-ANTHROPIC_SMALL_FAST_MODEL=glm-5.2 \
-  claude --model glm-5.2
+ANTHROPIC_MODEL=glm-5.3 \
+ANTHROPIC_SMALL_FAST_MODEL=glm-5.3-flash \
+  claude --model glm-5.3
 ```
 
-The bare ID `glm-5.2` is owned by the GLM provider. OpenCode Go serves its own
-`glm-5.2`; prefix the ID with `opencode-go/` to select that version.
+The bare ID `glm-5.3` is owned by the GLM provider. OpenCode Go serves its own
+`glm-5.3`; prefix the ID with `opencode-go/` to select that version.
+Legacy IDs such as `glm-5.2` and `glm-4.7` still route to the GLM provider;
+z.ai itself maps them onto the current models.
 
 ## Configuration
 

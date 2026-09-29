@@ -57,7 +57,8 @@ pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "kimi-
 pub(crate) const GROK_MODELS: &[&str] =
     &["grok-composer-2.5-fast", "grok-4.5", "grok-4.6", "grok-4.7"];
 
-pub(crate) const GLM_MODELS: &[&str] = &["glm-4.7", "glm-5.2"];
+pub(crate) const GLM_MODELS: &[&str] =
+    &["glm-5.3", "glm-5.3-flash", "glm-5.3-highspeed", "glm-5.2"];
 
 pub struct Registry {
     alias_provider: AliasProvider,
@@ -610,7 +611,7 @@ mod tests {
     #[test]
     fn glm_model_routes_to_glm_provider() {
         let registry = Registry::new(AliasProvider::Codex);
-        for model in ["glm-4.7", "glm-5.2"] {
+        for model in ["glm-5.3", "glm-5.3-flash", "glm-5.2"] {
             let p = registry.provider_for_model(model, None);
             assert!(p.is_some(), "{model} should route to a provider");
             assert_eq!(p.expect("provider").name(), "glm");
