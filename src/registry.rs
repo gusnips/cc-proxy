@@ -235,6 +235,18 @@ impl Registry {
         if normalized.starts_with("gpt-") {
             return self.handlers.get("codex").cloned();
         }
+        // Same raw-forward for the other prefixed namespaces. IDs the
+        // OpenCode Go catalog resells still match the loop above first, so
+        // only truly unlisted IDs fall through here.
+        if normalized.starts_with("kimi-") || normalized.starts_with("k2-") {
+            return self.handlers.get("kimi").cloned();
+        }
+        if normalized.starts_with("grok-") {
+            return self.handlers.get("grok").cloned();
+        }
+        if normalized.starts_with("glm-") {
+            return self.handlers.get("glm").cloned();
+        }
 
         None
     }
@@ -505,6 +517,26 @@ mod tests {
             registry
                 .provider_for_model("definitely-not-a-model", None)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn unlisted_prefixed_models_forward_to_native_providers() {
+        let registry = Registry::new(AliasProvider::Codex);
+        for (model, owner) in [("kimi-k9", "kimi"), ("grok-9", "grok"), ("glm-9", "glm")] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                owner,
+                "{model}"
+            );
+        }
+        // IDs the OpenCode Go catalog resells still match the loop first.
+        assert_eq!(
+            registry
+                .provider_for_model("kimi-k2.7-code", None)
+                .unwrap()
+                .name(),
+            "opencode"
         );
     }
 

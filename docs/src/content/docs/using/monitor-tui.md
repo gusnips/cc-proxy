@@ -23,8 +23,6 @@ Use `cc-proxy monitor --url http://127.0.0.1:19999` for a different port. Withou
 
 In an attached dashboard, `q` and `Ctrl-C` detach immediately and leave the service running. Multiple dashboards can attach independently. If the service becomes unavailable, the dashboard marks its last snapshot as stale and reconnects automatically. Network polling runs outside the terminal event loop.
 
-![cc-proxy monitor showing sessions, active requests, recent requests, and events](/monitor-tui.webp)
-
 ## What the monitor shows
 
 - Sessions grouped by Claude Code session ID and project

@@ -117,11 +117,11 @@ The opt-in Images API returns base64 image data and consumes the signed-in accou
 | Provider     | Account                        | Model selection                                 |
 | ------------ | ------------------------------ | ----------------------------------------------- |
 | Codex        | ChatGPT Plus or Pro            | Any `gpt-*` ID (unlisted ones forward raw; `-fast` = priority tier) |
-| Kimi         | kimi.com with Kimi Code access | `k3` and `kimi-k3` (legacy `kimi-for-coding` alias) |
-| Grok         | grok.com                       | Registered Grok models                          |
+| Kimi         | kimi.com with Kimi Code access | `k3`/`kimi-k3` (legacy `kimi-for-coding`); unlisted `kimi-*` forward raw |
+| Grok         | grok.com                       | `grok-*` IDs (unlisted ones forward raw)        |
 | OpenCode Go  | OpenCode Go subscription       | Non-conflicting IDs and `opencode-go/<model-id>` |
 | Cursor Agent | Cursor account                 | Cursor aliases and `cursor:<model-id>` prefixes |
-| GLM          | z.ai API key                   | `glm-5.3` and `glm-5.3-flash` (`glm-5.2` routes to 5.3 upstream) |
+| GLM          | z.ai API key                   | `glm-*` IDs (unlisted ones forward raw)         |
 
 Run `cc-proxy models` for the current catalog or
 `cc-proxy models --full` for every dynamic Cursor alias.

@@ -31,7 +31,7 @@ use crate::{registry::GROK_MODELS, traffic::StreamTrafficCapture};
 use self::auth::token_store::file_store;
 use self::translate::{
     accumulate::accumulate_response_with_traffic,
-    model_allowlist::{assert_allowed_model, resolve_model},
+    model_allowlist::{assert_routable_model, resolve_model},
     request::translate_request,
     stream::{SseDecoder, StreamTranslator, stream_error},
 };
@@ -82,7 +82,7 @@ impl Provider for GrokProvider {
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
         let requested = body.model.clone().unwrap_or_else(|| "grok-4.5".into());
         let resolved = resolve_model(&requested);
-        if let Err(error) = assert_allowed_model(&resolved) {
+        if let Err(error) = assert_routable_model(&resolved) {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -162,7 +162,7 @@ impl Provider for GrokProvider {
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
         let requested = body.model.clone().unwrap_or_else(|| "grok-4.5".into());
         let resolved = resolve_model(&requested);
-        if let Err(error) = assert_allowed_model(&resolved) {
+        if let Err(error) = assert_routable_model(&resolved) {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -200,7 +200,7 @@ impl Provider for GrokProvider {
         body.stream = true;
         let requested = body.model.clone().unwrap_or_else(|| "grok-4.5".into());
         let resolved = resolve_model(&requested);
-        assert_allowed_model(&resolved).map_err(|error| {
+        assert_routable_model(&resolved).map_err(|error| {
             ProviderError::new(
                 StatusCode::BAD_REQUEST,
                 ProviderErrorKind::InvalidRequest,

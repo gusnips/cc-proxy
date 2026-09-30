@@ -31,11 +31,17 @@ static ALIAS_TARGETS: once_cell::sync::Lazy<HashMap<&'static str, &'static str>>
 const ALLOWED_MODELS: &[&str] = &[KIMI_LEGACY_MODEL, KIMI_DEFAULT_MODEL];
 
 pub fn resolve_model(model: &str) -> String {
-    ALIAS_TARGETS
-        .get(model)
-        .copied()
-        .unwrap_or(KIMI_DEFAULT_MODEL)
-        .to_string()
+    if let Some(target) = ALIAS_TARGETS.get(model).copied() {
+        return target.to_string();
+    }
+    // Unlisted `kimi-*`/`k2-*` IDs forward verbatim instead of collapsing
+    // onto the default: silently serving k3 when the caller asked for a
+    // newer model would bill and behave as the wrong model. Kimi reports
+    // the IDs it never heard of.
+    if model.starts_with("kimi-") || model.starts_with("k2-") {
+        return model.to_string();
+    }
+    KIMI_DEFAULT_MODEL.to_string()
 }
 
 pub fn is_k3(model: &str) -> bool {
@@ -44,6 +50,19 @@ pub fn is_k3(model: &str) -> bool {
 
 pub fn assert_allowed_model(model: &str) -> Result<(), ModelNotAllowedError> {
     if ALLOWED_MODELS.contains(&model) {
+        Ok(())
+    } else {
+        Err(ModelNotAllowedError {
+            model: model.to_string(),
+        })
+    }
+}
+
+/// Routing gate: everything `assert_allowed_model` accepts, plus unlisted
+/// `kimi-*`/`k2-*` IDs, which forward verbatim on the legacy (non-k3)
+/// translation path. Same pattern as `opencode-go/` IDs for OpenCode Go.
+pub fn assert_routable_model(model: &str) -> Result<(), ModelNotAllowedError> {
+    if ALLOWED_MODELS.contains(&model) || model.starts_with("kimi-") || model.starts_with("k2-") {
         Ok(())
     } else {
         Err(ModelNotAllowedError {
@@ -130,5 +149,18 @@ mod tests {
     #[test]
     fn assert_allowed_rejects_other() {
         assert!(assert_allowed_model("kimi-k2.6").is_err());
+    }
+
+    #[test]
+    fn unlisted_kimi_ids_forward_verbatim_instead_of_collapsing_to_default() {
+        assert_eq!(resolve_model("kimi-k9"), "kimi-k9");
+        assert_eq!(resolve_model("k2-9"), "k2-9");
+        assert_eq!(resolve_model("something-else"), KIMI_DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn routable_accepts_unlisted_kimi_ids() {
+        assert!(assert_routable_model("kimi-k9").is_ok());
+        assert!(assert_routable_model("something-else").is_err());
     }
 }

@@ -19,7 +19,7 @@ use crate::provider::{
 use crate::providers::kimi::auth::token_store::file_store;
 use crate::providers::kimi::translate::accumulate::accumulate_response;
 use crate::providers::kimi::translate::model_allowlist::{
-    KIMI_DEFAULT_MODEL, assert_allowed_model, resolve_model,
+    KIMI_DEFAULT_MODEL, assert_routable_model, resolve_model,
 };
 use crate::providers::kimi::translate::request::{TranslateOptions, translate_request};
 use crate::providers::kimi::translate::stream::translate_stream_bytes;
@@ -66,7 +66,7 @@ impl Provider for KimiProvider {
         let model = body.model.as_deref().unwrap_or(KIMI_DEFAULT_MODEL);
         let resolved = resolve_model(model);
 
-        if let Err(e) = assert_allowed_model(&resolved) {
+        if let Err(e) = assert_routable_model(&resolved) {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -202,7 +202,7 @@ impl Provider for KimiProvider {
             .clone()
             .unwrap_or_else(|| KIMI_DEFAULT_MODEL.to_string());
         let resolved = resolve_model(&requested);
-        assert_allowed_model(&resolved).map_err(|error| {
+        assert_routable_model(&resolved).map_err(|error| {
             ProviderError::new(
                 StatusCode::BAD_REQUEST,
                 ProviderErrorKind::InvalidRequest,

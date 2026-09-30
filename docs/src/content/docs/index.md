@@ -33,8 +33,6 @@ cc-proxy lets you use Claude Code with Codex, Kimi, Grok, OpenCode Go, or Cursor
 - **Use Claude Code normally.** Tools and streaming are translated across providers; images and reasoning depend on the selected provider and model.
 - **See what is happening.** The monitor TUI shows sessions, requests, errors, models, token use, and throughput. Structured logs and optional traffic captures support deeper diagnosis.
 
-![Claude Code running through cc-proxy](/claude-code-screenshot.webp)
-
 ## Next steps
 
 Start with the [short Codex setup](/getting-started/), compare the [supported providers](/providers/choosing-a-provider/), or read [how requests flow](/how-it-works/).
