@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::model_allowlist::{KIMI_DEFAULT_MODEL, assert_allowed_model, is_k3, resolve_model};
+use super::model_allowlist::{KIMI_DEFAULT_MODEL, assert_routable_model, is_k3, resolve_model};
 use crate::anthropic::schema::MessagesRequest;
 use crate::providers::translate_shared::{
     ContentBlock, flatten_system_text, image_block_to_url, image_source_to_url, normalize_content,
@@ -134,7 +134,7 @@ pub fn translate_request(
 ) -> Result<KimiChatRequest, anyhow::Error> {
     let model = req.model.as_deref().unwrap_or(KIMI_DEFAULT_MODEL);
     let resolved = resolve_model(model);
-    assert_allowed_model(&resolved).map_err(|e| anyhow::anyhow!("{e}"))?;
+    assert_routable_model(&resolved).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let k3 = is_k3(&resolved);
     let messages = build_messages(req, &resolved)?;
