@@ -1362,7 +1362,7 @@ impl CodexHttpClient {
     ) -> Result<super::websocket::CodexWebSocketEventReceiver, CodexError> {
         let reservation =
             continuation.map(super::continuation::ContinuationReservation::from_public_candidate);
-        self.stream_codex_auto_events_for_owner(body, ctx, reservation.as_ref())
+        self.stream_codex_auto_events_for_owner(body, ctx, reservation.as_ref(), None)
             .await
             .map(super::websocket::CodexWebSocketEventStream::into_receiver)
     }
@@ -1372,11 +1372,17 @@ impl CodexHttpClient {
         body: &ResponsesRequest,
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationReservation>,
+        recovery_deadline: Option<tokio::time::Instant>,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
         let mut websocket = self
             .stream_codex_websocket_events_for_owner(body, ctx, continuation)
             .await?;
-        match websocket.recv().await {
+        // On a retry, a socket that accepts and then stays silent must not
+        // outlast the recovery budget.
+        let Ok(first) = super::await_recovery(websocket.recv(), recovery_deadline).await else {
+            return Err(super::recovery_timeout_error());
+        };
+        match first {
             Some(Err(err)) if should_fallback_to_http(&err) => {
                 self.stream_codex_http_events_for_owner(body, ctx).await
             }
@@ -1445,6 +1451,7 @@ impl CodexHttpClient {
                 let mut event_count = 0_u64;
                 let mut pending_events = PendingHttpEvents::default();
                 let mut provisional_tools = PendingHttpProvisionalTools::default();
+                let mut output_items = HttpOutputItems::default();
 
                 let mut retry_error = 'read_attempt: loop {
                     let chunk = tokio::select! {
@@ -1603,11 +1610,9 @@ impl CodexHttpClient {
                         if let PendingHttpProvisionalToolEvent::Provisional { stalled_read_call } =
                             provisional_event
                         {
-                            if !replay_committed
-                                && let Some(call) = stalled_read_call.and_then(|call_index| {
-                                    provisional_tools.take_stalled_read(call_index, &pending_events)
-                                })
-                            {
+                            if let Some(call) = stalled_read_call.and_then(|call_index| {
+                                provisional_tools.take_stalled_read(call_index, &output_items)
+                            }) {
                                 for pending in pending_events.take() {
                                     if tx.send(Ok(pending)).await.is_err() {
                                         return;
@@ -1645,6 +1650,7 @@ impl CodexHttpClient {
                             continue;
                         }
 
+                        output_items.observe(&payload);
                         let event_kind = super::events::classify_stream_event(&payload);
                         let failure = super::events::classify_event_failure(&payload);
                         if !replay_committed {
@@ -1699,6 +1705,18 @@ impl CodexHttpClient {
                                             return;
                                         }
                                     }
+                                }
+                                if !provisional_tools.calls.is_empty() {
+                                    log.warn(
+                                        "codex_http_provisional_tool_dropped",
+                                        Some(serde_json::Map::from_iter([
+                                            ("reqId".to_string(), serde_json::json!(&req_id)),
+                                            (
+                                                "calls".to_string(),
+                                                serde_json::json!(provisional_tools.calls.len()),
+                                            ),
+                                        ])),
+                                    );
                                 }
                                 provisional_tools.clear();
                                 for pending in pending_events.take() {
@@ -2845,31 +2863,44 @@ impl PendingHttpEvents {
         self.event_bytes = 0;
         std::mem::take(&mut self.events)
     }
+}
 
-    fn has_no_open_output_items(&self) -> bool {
-        let mut open_output_items = HashSet::new();
-        for payload in &self.events {
-            match payload.get("type").and_then(serde_json::Value::as_str) {
-                Some("response.output_item.added") => {
-                    let Some(output_index) = http_event_output_index(payload) else {
-                        return false;
-                    };
-                    if !open_output_items.insert(output_index) {
-                        return false;
-                    }
+/// Output items one HTTP attempt has buffered or forwarded, including those
+/// already sent after thinking. A stalled Read may finish the message only
+/// when it would be its sole open block and no earlier tool completed,
+/// matching the translator's own local-finish guard.
+#[derive(Default)]
+struct HttpOutputItems {
+    open: HashSet<usize>,
+    blocks_local_finish: bool,
+}
+
+impl HttpOutputItems {
+    fn observe(&mut self, payload: &serde_json::Value) {
+        let output_index = http_event_output_index(payload);
+        match payload.get("type").and_then(serde_json::Value::as_str) {
+            Some("response.output_item.added") => {
+                if !output_index.is_some_and(|index| self.open.insert(index)) {
+                    self.blocks_local_finish = true;
                 }
-                Some("response.output_item.done") => {
-                    let Some(output_index) = http_event_output_index(payload) else {
-                        return false;
-                    };
-                    if !open_output_items.remove(&output_index) {
-                        return false;
-                    }
-                }
-                _ => {}
             }
+            Some("response.output_item.done") => {
+                let completed_tool = matches!(
+                    payload
+                        .pointer("/item/type")
+                        .and_then(serde_json::Value::as_str),
+                    Some("function_call" | "web_search_call")
+                );
+                if !output_index.is_some_and(|index| self.open.remove(&index)) || completed_tool {
+                    self.blocks_local_finish = true;
+                }
+            }
+            _ => {}
         }
-        open_output_items.is_empty()
+    }
+
+    fn allow_local_finish(&self) -> bool {
+        !self.blocks_local_finish && self.open.is_empty()
     }
 }
 
@@ -3007,9 +3038,9 @@ impl PendingHttpProvisionalTools {
     fn take_stalled_read(
         &mut self,
         call_index: usize,
-        pending_events: &PendingHttpEvents,
+        output_items: &HttpOutputItems,
     ) -> Option<PendingHttpProvisionalFunctionCall> {
-        if self.calls.len() != 1 || !pending_events.has_no_open_output_items() {
+        if self.calls.len() != 1 || !output_items.allow_local_finish() {
             return None;
         }
         let call = self.calls.get(call_index)?;
@@ -4167,7 +4198,7 @@ mod tests {
 
         assert!(
             tools
-                .take_stalled_read(call_index, &PendingHttpEvents::default())
+                .take_stalled_read(call_index, &HttpOutputItems::default())
                 .is_none()
         );
         assert_eq!(tools.calls.len(), 1);
@@ -4365,6 +4396,84 @@ mod tests {
             Some("response.completed")
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_stream_finishes_stalled_read_after_committed_thinking() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let stalled_args = format!("{{\"file_path\":\"/tmp/a\"}}{}", " ".repeat(1_024));
+            for event in [
+                serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}),
+                serde_json::json!({"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"thinking"}),
+                serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}),
+                serde_json::json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_read","name":"Read"}}),
+                serde_json::json!({"type":"response.function_call_arguments.delta","output_index":1,"delta":stalled_args}),
+            ] {
+                write_http_chunk(&mut stream, format!("data: {event}\n\n").as_bytes()).await;
+            }
+            // Upstream keeps the body open, as a whitespace-stalled Read does.
+            let _ = release_rx.await;
+        });
+
+        let client = Arc::new(http_test_client(format!("http://{addr}/responses"), 5_000));
+        client.auth_manager().set_test_auth(http_test_auth());
+        let mut events = client
+            .stream_codex_http_events(&buffered_test_request(), &http_test_context())
+            .await
+            .unwrap();
+
+        let mut types = Vec::new();
+        let mut read_args = None;
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("stalled Read must finish locally instead of waiting for upstream")
+        {
+            let event = event.unwrap();
+            if event["type"] == "response.function_call_arguments.delta" {
+                read_args = event["delta"].as_str().map(str::to_owned);
+            }
+            types.push(event["type"].as_str().unwrap_or_default().to_owned());
+        }
+        assert!(types.contains(&"response.reasoning_summary_text.delta".to_owned()));
+        assert!(types.contains(&"response.output_item.added".to_owned()));
+        assert!(
+            read_args
+                .as_deref()
+                .is_some_and(|args| args.starts_with("{\"file_path\":\"/tmp/a\"}"))
+        );
+        drop(release_tx);
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn http_output_items_block_local_finish_while_open_or_after_a_completed_tool() {
+        let mut items = HttpOutputItems::default();
+        items.observe(&serde_json::json!({
+            "type":"response.output_item.added","output_index":0,"item":{"type":"message"}
+        }));
+        assert!(!items.allow_local_finish());
+        items.observe(&serde_json::json!({
+            "type":"response.output_item.done","output_index":0,"item":{"type":"message"}
+        }));
+        assert!(items.allow_local_finish());
+
+        items.observe(&serde_json::json!({
+            "type":"response.output_item.done",
+            "output_index":1,
+            "item":{"type":"function_call","call_id":"call_1","name":"Bash","arguments":"{}"}
+        }));
+        assert!(!items.allow_local_finish());
     }
 
     #[tokio::test]
@@ -5670,6 +5779,7 @@ mod tests {
                 &buffered_test_request(),
                 &http_test_context(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -5681,6 +5791,40 @@ mod tests {
         }
         assert!(saw_thinking);
         assert_eq!(stream.transport(), ActualTransport::Http);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_retry_stops_at_recovery_deadline_when_websocket_stays_silent() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            next_websocket_json(&mut websocket).await;
+            let _ = release_rx.await;
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+
+        let started = tokio::time::Instant::now();
+        let result = client
+            .stream_codex_auto_events_for_owner(
+                &buffered_test_request(),
+                &http_test_context(),
+                None,
+                Some(started + Duration::from_millis(200)),
+            )
+            .await;
+
+        let Err(error) = result else {
+            panic!("a silent retry socket must not outlast the recovery budget");
+        };
+        assert_eq!(error.status, 503);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(release_tx);
         server.await.unwrap();
     }
 

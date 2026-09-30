@@ -790,6 +790,7 @@ async fn live_stream_response(
                             &request_body,
                             &ctx,
                             continuation.as_ref(),
+                            retry_deadline,
                         )
                         .await
                 }
