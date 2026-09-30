@@ -920,6 +920,14 @@ async fn live_stream_response_once(
         let payload = match item {
             Ok(payload) => payload,
             Err(err) => {
+                if err.origin == client::CodexErrorOrigin::Http {
+                    abort_request_state(
+                        ctx.session_id.as_deref(),
+                        &request_continuation,
+                        compaction.attempt,
+                    );
+                    return LiveStreamStart::Response(map_codex_error_to_response(&err));
+                }
                 if retryable_live_start_codex_error(&err) {
                     return provider_retry(&upstream_events, err);
                 }
@@ -1479,6 +1487,10 @@ fn codex_event_failure_error(
 
 fn codex_stream_error_type(err: &client::CodexError) -> &'static str {
     match err.status {
+        400 | 422 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        413 => "request_too_large",
         429 => "rate_limit_error",
         529 => "overloaded_error",
         _ if codex_error_message(err)
@@ -1628,11 +1640,7 @@ fn map_codex_error_to_response(err: &client::CodexError) -> Response {
         status @ (400..=599) => {
             let response = json_error(
                 StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-                if status == 529 {
-                    "overloaded_error"
-                } else {
-                    "api_error"
-                },
+                codex_stream_error_type(err),
                 codex_error_message(err),
             );
             if let Some(retry_after) = err.retry_after.as_deref() {

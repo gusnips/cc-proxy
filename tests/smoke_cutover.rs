@@ -316,6 +316,45 @@ async fn spawn_retrying_truncated_http_upstream(
 }
 
 #[allow(clippy::await_holding_lock)]
+async fn collect_http_stream_after_truncated_attempt(
+    first_body: Vec<u8>,
+    success_body: Vec<u8>,
+) -> (usize, StatusCode, String) {
+    let _guard = env_lock();
+    clear_all_continuations_for_tests();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let upstream =
+        spawn_retrying_truncated_http_upstream(first_body, success_body, attempts.clone()).await;
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let response = call_messages_body(json!({
+        "model": "gpt-5.5",
+        "max_tokens": 64,
+        "stream": true,
+        "messages": [{"role":"user","content":"hello"}]
+    }))
+    .await;
+
+    let status = response.status();
+    let body = tokio::time::timeout(
+        Duration::from_secs(4),
+        axum::body::to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("retried stream must finish")
+    .unwrap();
+    (
+        attempts.load(Ordering::SeqCst),
+        status,
+        String::from_utf8(body.to_vec()).unwrap(),
+    )
+}
+
+#[allow(clippy::await_holding_lock)]
 async fn assert_codex_http_retries_structural_body_error(first_body: Vec<u8>) {
     let _guard = env_lock();
     clear_all_continuations_for_tests();
@@ -2269,6 +2308,199 @@ async fn smoke_codex_http_retries_body_error_after_structural_tool() {
         .to_vec(),
     )
     .await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_http_does_not_retry_after_reasoning_output() {
+    let first_body = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_reasoning_failed\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"reasoning_failed\"}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"reasoning before reset\"}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_part.added\",\"output_index\":0}\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let (attempts, status, text) =
+        collect_http_stream_after_truncated_attempt(first_body, Vec::new()).await;
+    assert_eq!(status, StatusCode::OK, "stream body: {text}");
+    assert_eq!(attempts, 1, "stream body: {text}");
+    assert!(
+        text.contains("reasoning before reset"),
+        "stream body: {text}"
+    );
+    assert!(
+        !text.contains("reasoning after retry"),
+        "stream body: {text}"
+    );
+    assert!(!text.contains("answer after retry"), "stream body: {text}");
+    assert!(text.contains("event: error"), "stream body: {text}");
+    assert_eq!(text.matches("event: message_start").count(), 1);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_http_preserves_cyber_policy_behind_open_tool_barrier() {
+    let first_body = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_policy_held\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_policy_open\",\"name\":\"Bash\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\\\"echo held\"}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"reasoning\",\"id\":\"reasoning_policy_held\"}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":1,\"delta\":\"reasoning before policy result\"}\n\n",
+        "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"cyber_policy\",\"message\":\"request rejected by policy\"}}}\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+
+    let (attempts, status, text) =
+        collect_http_stream_after_truncated_attempt(first_body, Vec::new()).await;
+    assert_eq!(attempts, 1, "response body: {text}");
+    assert_eq!(status, StatusCode::OK, "response body: {text}");
+    assert!(text.contains("reasoning before policy result"));
+    assert!(text.contains("request rejected by policy"));
+    assert!(text.contains("event: error"), "response body: {text}");
+    assert!(!text.contains("call_policy_open"), "response body: {text}");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_http_retries_body_error_mid_tool_arguments_without_leakage() {
+    let first_body = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool_failed\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_failed\",\"name\":\"Bash\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\\\"echo failed attempt\"}\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let success_body = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool_success\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_success\",\"name\":\"Bash\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\\\"echo successful attempt\\\"}\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_success\",\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"echo successful attempt\\\"}\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool_success\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":4}}}\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+
+    let (attempts, status, text) =
+        collect_http_stream_after_truncated_attempt(first_body, success_body).await;
+    assert_eq!(status, StatusCode::OK, "stream body: {text}");
+    assert_eq!(attempts, 2, "stream body: {text}");
+    assert!(!text.contains("event: error"), "stream body: {text}");
+    assert_eq!(text.matches("event: message_start").count(), 1);
+    assert_eq!(text.matches("event: message_stop").count(), 1);
+    assert_eq!(text.matches(r#""type":"tool_use""#).count(), 1);
+    assert!(text.contains("call_success"), "stream body: {text}");
+    assert!(
+        text.contains("echo successful attempt"),
+        "stream body: {text}"
+    );
+    assert!(!text.contains("call_failed"), "stream body: {text}");
+    assert!(!text.contains("echo failed attempt"), "stream body: {text}");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_http_emits_standalone_function_done_without_output_index() {
+    let _guard = env_lock();
+    clear_all_continuations_for_tests();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+
+    let upstream = spawn_http_upstream(|_body: Value| {
+        concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_standalone\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_standalone\",\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"echo standalone\\\"}\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_standalone\",\"status\":\"completed\",\"usage\":{}}}\n\n"
+        )
+        .as_bytes()
+        .to_vec()
+    })
+    .await;
+
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let response = call_messages_body(json!({
+        "model": "gpt-5.5",
+        "max_tokens": 64,
+        "stream": true,
+        "messages": [{"role":"user","content":"hello"}]
+    }))
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("call_standalone"), "stream body: {text}");
+    assert!(text.contains("echo standalone"), "stream body: {text}");
+    assert_eq!(text.matches(r#""type":"tool_use""#).count(), 1);
+    assert_eq!(text.matches("event: message_stop").count(), 1);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_http_keeps_completed_tool_when_another_provisional_tool_truncates() {
+    let first_body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_partial_a\",\"name\":\"Bash\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\\\"echo partial\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_done_b\",\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"echo done\\\"}\"}}\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+
+    let (attempts, status, text) =
+        collect_http_stream_after_truncated_attempt(first_body, Vec::new()).await;
+    assert_eq!(attempts, 1, "stream body: {text}");
+    assert_eq!(status, StatusCode::OK, "stream body: {text}");
+    assert!(text.contains("call_done_b"), "stream body: {text}");
+    assert!(!text.contains("call_partial_a"), "stream body: {text}");
+    assert!(text.contains("event: error"), "stream body: {text}");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_http_retries_parallel_partial_tools_in_output_order() {
+    let first_body = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_parallel_failed\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_failed_left\",\"name\":\"Bash\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_failed_right\",\"name\":\"Bash\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"command\\\":\\\"echo failed right\"}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\\\"echo failed left\"}\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let success_body = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_parallel_success\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_success_left\",\"name\":\"Bash\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_success_right\",\"name\":\"Bash\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"command\\\":\\\"echo right\\\"}\"}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\\\"echo left\\\"}\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_success_left\",\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"echo left\\\"}\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_success_right\",\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"echo right\\\"}\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_parallel_success\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":4}}}\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+
+    let (attempts, status, text) =
+        collect_http_stream_after_truncated_attempt(first_body, success_body).await;
+    assert_eq!(status, StatusCode::OK, "stream body: {text}");
+    assert_eq!(attempts, 2, "stream body: {text}");
+    assert!(!text.contains("event: error"), "stream body: {text}");
+    assert!(!text.contains("call_failed_left"), "stream body: {text}");
+    assert!(!text.contains("call_failed_right"), "stream body: {text}");
+    let left = text
+        .find("call_success_left")
+        .unwrap_or_else(|| panic!("left tool: {text}"));
+    let right = text
+        .find("call_success_right")
+        .unwrap_or_else(|| panic!("right tool: {text}"));
+    assert!(left < right, "stream body: {text}");
+    assert_eq!(text.matches(r#""type":"tool_use""#).count(), 2);
+    assert_eq!(text.matches("event: message_stop").count(), 1);
 }
 
 #[allow(clippy::await_holding_lock)]
