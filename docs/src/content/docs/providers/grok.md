@@ -41,8 +41,9 @@ The proxy translates Claude messages, function tools, tool results, thinking con
 Search reaches Grok-native tools when the caller asks for it:
 
 - Anthropic's `web_search_20250305` declaration maps to Grok hosted web search.
-  The Grok CLI endpoint accepts the minimal declaration without domain or
-  location constraints.
+  `allowed_domains` or `blocked_domains` maps to native filters, with up to five
+  domains in one list. Do not set both lists. `user_location` supports an
+  `approximate` location with `city`, `region`, `country`, and `timezone`.
 - A caller-managed search tool remains a function tool for the caller to run.
 - An X or Twitter query is additionally offered hosted `x_search`, which the
   model can use or ignore alongside the caller's tools.
@@ -90,9 +91,15 @@ See [Configuration](/reference/configuration/) for defaults.
 
 ## Limitations and troubleshooting
 
-The Grok CLI hosted web-search endpoint has no equivalent for Anthropic's
-`max_uses`, domain filters, or user location. The proxy accepts and omits a
-valid `max_uses` value, while non-null domain and location constraints return a
-request error rather than weakening the requested search scope.
+Hosted web search accepts at most five domains in `allowed_domains` or
+`blocked_domains`, not both. The proxy sends blocked domains as Grok's
+`excluded_domains` filter. Empty lists and null options add no constraints.
+Lists with more than five domains, invalid entries, and unsupported location
+fields return a request error. Shorten the list or fix the field named in the
+error; the proxy does not replace native filters with prompt instructions.
+
+Grok hosted web search has no equivalent for Anthropic's `max_uses`. The proxy
+accepts and omits a valid positive integer or null, so it does not limit how
+many hosted search calls the model can make.
 
 A successful login does not guarantee every model is enabled for the account or region. Model rejection and upstream errors are surfaced to Claude Code. Use `grok auth status` for token state, inspect the failed request in the monitor, and use the structured log or error capture for the full redacted response.

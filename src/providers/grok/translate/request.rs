@@ -82,6 +82,10 @@ pub struct GrokTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub filters: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_location: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_x_handles: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub excluded_x_handles: Option<Vec<String>>,
@@ -108,6 +112,8 @@ impl GrokTool {
             name: None,
             description: None,
             parameters: None,
+            filters: None,
+            user_location: None,
             allowed_x_handles: None,
             excluded_x_handles: None,
             from_date: None,
@@ -118,15 +124,10 @@ impl GrokTool {
 
     fn function(name: &str, description: Option<String>, parameters: Value) -> Self {
         Self {
-            kind: "function".into(),
             name: Some(name.into()),
             description,
             parameters: Some(parameters),
-            allowed_x_handles: None,
-            excluded_x_handles: None,
-            from_date: None,
-            to_date: None,
-            choice_name: Some(name.into()),
+            ..Self::hosted_named("function", name)
         }
     }
 }
@@ -190,7 +191,9 @@ pub fn translate_request_with_options(
         if force_x_search {
             tools = Some(vec![GrokTool::hosted("x_search")]);
         } else if force_web_search {
-            tools = Some(vec![GrokTool::hosted("web_search")]);
+            if let Some(tools) = tools.as_mut() {
+                tools.retain(|tool| tool.kind == "web_search");
+            }
         } else {
             let tools = tools.get_or_insert_default();
             if !tools.iter().any(|tool| tool.kind == "x_search") {
@@ -550,12 +553,78 @@ fn parse_tools(
             if kind != "web_search_20250305" || name != "web_search" {
                 anyhow::bail!("unsupported tool type: {kind}");
             }
-            for field in ["allowed_domains", "blocked_domains", "user_location"] {
-                if obj.get(field).is_some_and(|value| !value.is_null()) {
-                    anyhow::bail!("Grok hosted web search does not support {field}");
+            let mut search = GrokTool::hosted_named("web_search", name);
+            let mut filters = serde_json::Map::new();
+            for (field, native_field) in [
+                ("allowed_domains", "allowed_domains"),
+                ("blocked_domains", "excluded_domains"),
+            ] {
+                let Some(value) = obj.get(field).filter(|value| !value.is_null()) else {
+                    continue;
+                };
+                let domains = value.as_array().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Grok web search {field} must be an array of domain names or null. Use [\"example.com\"] or remove the field."
+                    )
+                })?;
+                for (index, domain) in domains.iter().enumerate() {
+                    if domain.as_str().is_none_or(|domain| {
+                        domain.is_empty() || domain.chars().any(char::is_whitespace)
+                    }) {
+                        anyhow::bail!(
+                            "Grok web search {field}[{index}] must be a nonempty domain name with no spaces. Use a string such as \"example.com\"."
+                        );
+                    }
+                }
+                if domains.len() > 5 {
+                    anyhow::bail!(
+                        "Grok web search {field} has {} domains; the limit is 5. Reduce the list to 5 domains or fewer.",
+                        domains.len()
+                    );
+                }
+                if !domains.is_empty() {
+                    filters.insert(native_field.into(), value.clone());
                 }
             }
-            out.push(GrokTool::hosted_named("web_search", name));
+            if filters.len() > 1 {
+                anyhow::bail!(
+                    "Grok web search cannot use allowed_domains and blocked_domains together. Remove one list or leave it empty."
+                );
+            }
+            search.filters = (!filters.is_empty()).then_some(Value::Object(filters));
+            if let Some(value) = obj.get("user_location").filter(|value| !value.is_null()) {
+                let location = value.as_object().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Grok web search user_location must be an approximate-location object or null. Use {{\"type\":\"approximate\",\"country\":\"GB\"}} or remove the field."
+                    )
+                })?;
+                for field in location.keys() {
+                    if !["type", "city", "region", "country", "timezone"].contains(&field.as_str())
+                    {
+                        anyhow::bail!(
+                            "Grok web search user_location does not support {field}. Remove it; supported fields are type, city, region, country, and timezone."
+                        );
+                    }
+                }
+                if location.get("type").and_then(Value::as_str) != Some("approximate") {
+                    anyhow::bail!(
+                        "Grok web search user_location.type must be \"approximate\". Set it to \"approximate\" or remove user_location."
+                    );
+                }
+                let mut native_location = serde_json::json!({"type":"approximate"});
+                for field in ["city", "region", "country", "timezone"] {
+                    if let Some(value) = location.get(field).filter(|value| !value.is_null()) {
+                        if value.as_str().is_none_or(|text| text.trim().is_empty()) {
+                            anyhow::bail!(
+                                "Grok web search user_location.{field} must be a nonempty string or null. Use a string or remove the field."
+                            );
+                        }
+                        native_location[field] = value.clone();
+                    }
+                }
+                search.user_location = Some(native_location);
+            }
+            out.push(search);
             continue;
         }
         for field in ["allowed_domains", "blocked_domains", "user_location"] {
@@ -1802,55 +1871,355 @@ mod tests {
     }
 
     #[test]
-    fn grok_translation_rejects_unsupported_hosted_web_search_options() {
-        for (field, value) in [
-            ("allowed_domains", serde_json::json!(["example.com"])),
-            ("blocked_domains", serde_json::json!(["example.com"])),
-            (
-                "user_location",
-                serde_json::json!({"type":"approximate","country":"GB"}),
-            ),
-        ] {
-            let request: MessagesRequest = serde_json::from_value(serde_json::json!({
-                "model":"grok-4.5",
-                "messages":[{"role":"user","content":"find it"}],
-                "tools":[{"type":"web_search_20250305","name":"web_search",(field):value}]
-            }))
-            .unwrap();
+    fn grok_translation_hosted_web_search_maps_filters_and_location() {
+        let location = serde_json::json!({
+            "type":"approximate",
+            "city":"London",
+            "region":"England",
+            "country":"GB",
+            "timezone":"Europe/London"
+        });
+        for hosted_search in [false, true] {
+            for (field, native_field) in [
+                ("allowed_domains", "allowed_domains"),
+                ("blocked_domains", "excluded_domains"),
+            ] {
+                let other_field = if field == "allowed_domains" {
+                    "blocked_domains"
+                } else {
+                    "allowed_domains"
+                };
+                for domains in [
+                    serde_json::json!(["example.com"]),
+                    serde_json::json!([
+                        "a.example",
+                        "b.example",
+                        "c.example",
+                        "d.example",
+                        "e.example"
+                    ]),
+                ] {
+                    let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                        "model":"grok-4.5",
+                        "messages":[{"role":"user","content":"find it"}],
+                        "tools":[
+                            {"type":"web_search_20250305","name":"web_search",(field):domains,(other_field):[],"user_location":location},
+                            {"name":"Bash","input_schema":{"type":"object"}}
+                        ],
+                        "tool_choice":{"type":"auto"}
+                    }))
+                    .unwrap();
+                    let translated = translate_search(&request, "grok-4.5", hosted_search);
+                    assert_eq!(
+                        translated["tools"][0],
+                        serde_json::json!({
+                            "type":"web_search",
+                            "filters":{(native_field):domains},
+                            "user_location":location
+                        })
+                    );
+                    assert_eq!(translated["tools"][1]["name"], "Bash");
+                    assert_eq!(translated["tool_choice"], "auto");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grok_translation_hosted_web_search_keeps_constraints_when_forced() {
+        for hosted_search in [false, true] {
+            for named_choice in [false, true] {
+                for (field, native_field) in [
+                    ("allowed_domains", "allowed_domains"),
+                    ("blocked_domains", "excluded_domains"),
+                ] {
+                    let choice = if named_choice {
+                        serde_json::json!({"type":"tool","name":"web_search"})
+                    } else {
+                        serde_json::json!({"type":"auto"})
+                    };
+                    let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                        "model":"grok-4.5",
+                        "messages":[{"role":"user","content":"search the web for the project"}],
+                        "tools":[
+                            {"name":"Bash","input_schema":{"type":"object"}},
+                            {"type":"web_search_20250305","name":"web_search",(field):["example.com"],"user_location":{"type":"approximate","country":"GB"}}
+                        ],
+                        "tool_choice":choice
+                    }))
+                    .unwrap();
+                    let translated = translate_search(&request, "grok-4.5", hosted_search);
+                    let tools = translated["tools"].as_array().unwrap();
+                    let search = tools
+                        .iter()
+                        .find(|tool| tool["type"] == "web_search")
+                        .unwrap();
+                    assert_eq!(
+                        search,
+                        &serde_json::json!({
+                            "type":"web_search",
+                            "filters":{(native_field):["example.com"]},
+                            "user_location":{"type":"approximate","country":"GB"}
+                        })
+                    );
+                    if hosted_search || named_choice {
+                        assert_eq!(tools.len(), 1);
+                        assert_eq!(translated["tool_choice"], "required");
+                    } else {
+                        assert_eq!(tools.len(), 2);
+                        assert_eq!(translated["tool_choice"], "auto");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grok_translation_hosted_web_search_rejects_more_than_five_domains() {
+        for hosted_search in [false, true] {
+            for field in ["allowed_domains", "blocked_domains"] {
+                let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                    "model":"grok-4.5",
+                    "messages":[{"role":"user","content":"search the web for the project"}],
+                    "tools":[{"type":"web_search_20250305","name":"web_search",(field):[
+                        "a.example", "b.example", "c.example", "d.example", "e.example", "f.example"
+                    ]}],
+                    "tool_choice":{"type":"tool","name":"web_search"}
+                }))
+                .unwrap();
+                let error = translate_request_with_options(
+                    &request,
+                    "grok-4.5".into(),
+                    GrokToolImageMode::Omit,
+                    hosted_search,
+                )
+                .unwrap_err()
+                .to_string();
+                assert_eq!(
+                    error,
+                    format!(
+                        "Grok web search {field} has 6 domains; the limit is 5. Reduce the list to 5 domains or fewer."
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grok_translation_hosted_web_search_rejects_nonarray_domain_lists() {
+        for hosted_search in [false, true] {
+            for field in ["allowed_domains", "blocked_domains"] {
+                for value in [
+                    serde_json::json!("example.com"),
+                    serde_json::json!(17),
+                    serde_json::json!(true),
+                    serde_json::json!({}),
+                ] {
+                    let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                        "model":"grok-4.5",
+                        "messages":[{"role":"user","content":"find it"}],
+                        "tools":[{"type":"web_search_20250305","name":"web_search",(field):value}]
+                    }))
+                    .unwrap();
+                    let error = translate_request_with_options(
+                        &request,
+                        "grok-4.5".into(),
+                        GrokToolImageMode::Omit,
+                        hosted_search,
+                    )
+                    .unwrap_err()
+                    .to_string();
+                    assert!(
+                        error.contains(&format!("{field} must be an array")),
+                        "{error}"
+                    );
+                    assert!(error.contains("remove the field"), "{error}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grok_translation_hosted_web_search_rejects_every_invalid_domain_entry() {
+        for hosted_search in [false, true] {
+            for field in ["allowed_domains", "blocked_domains"] {
+                for entry in [
+                    serde_json::json!(17),
+                    serde_json::json!(null),
+                    serde_json::json!(true),
+                    serde_json::json!({}),
+                    serde_json::json!([]),
+                    serde_json::json!(""),
+                    serde_json::json!(" "),
+                    serde_json::json!("example .com"),
+                ] {
+                    for (index, domains) in [
+                        (0, serde_json::json!([entry])),
+                        (
+                            5,
+                            serde_json::json!([
+                                "a.example",
+                                "b.example",
+                                "c.example",
+                                "d.example",
+                                "e.example",
+                                entry
+                            ]),
+                        ),
+                    ] {
+                        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                            "model":"grok-4.5",
+                            "messages":[{"role":"user","content":"find it"}],
+                            "tools":[{"type":"web_search_20250305","name":"web_search",(field):domains}]
+                        }))
+                        .unwrap();
+                        let error = translate_request_with_options(
+                            &request,
+                            "grok-4.5".into(),
+                            GrokToolImageMode::Omit,
+                            hosted_search,
+                        )
+                        .unwrap_err()
+                        .to_string();
+                        // Every entry is checked, including entries beyond the native limit.
+                        assert!(
+                            error.contains(&format!("{field}[{index}] must be")),
+                            "{error}"
+                        );
+                        assert!(error.contains("example.com"), "{error}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grok_translation_hosted_web_search_rejects_conflicting_domain_lists() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"find it"}],
+            "tools":[{
+                "type":"web_search_20250305","name":"web_search",
+                "allowed_domains":["example.com"],"blocked_domains":["other.example"]
+            }]
+        }))
+        .unwrap();
+        for hosted_search in [false, true] {
             let error = translate_request_with_options(
                 &request,
                 "grok-4.5".into(),
-                crate::config::GrokToolImageMode::Omit,
-                false,
+                GrokToolImageMode::Omit,
+                hosted_search,
             )
             .unwrap_err()
             .to_string();
             assert_eq!(
                 error,
-                format!("Grok hosted web search does not support {field}")
+                "Grok web search cannot use allowed_domains and blocked_domains together. Remove one list or leave it empty."
             );
         }
     }
 
     #[test]
-    fn grok_translation_accepts_null_hosted_web_search_options() {
+    fn grok_translation_hosted_web_search_rejects_invalid_location() {
+        let mut locations = vec![
+            serde_json::json!("London"),
+            serde_json::json!([]),
+            serde_json::json!(true),
+            serde_json::json!(17),
+            serde_json::json!({}),
+            serde_json::json!({"country":"GB"}),
+            serde_json::json!({"type":null}),
+            serde_json::json!({"type":17}),
+            serde_json::json!({"type":"exact"}),
+            serde_json::json!({"type":"approximate","unknown":"GB"}),
+        ];
+        for field in ["city", "region", "country", "timezone"] {
+            for value in [
+                serde_json::json!(17),
+                serde_json::json!(true),
+                serde_json::json!([]),
+                serde_json::json!({}),
+                serde_json::json!(""),
+                serde_json::json!(" "),
+            ] {
+                locations.push(serde_json::json!({"type":"approximate",(field):value}));
+            }
+        }
+        for hosted_search in [false, true] {
+            for location in &locations {
+                let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                    "model":"grok-4.5",
+                    "messages":[{"role":"user","content":"find it"}],
+                    "tools":[{"type":"web_search_20250305","name":"web_search","user_location":location}]
+                }))
+                .unwrap();
+                let error = translate_request_with_options(
+                    &request,
+                    "grok-4.5".into(),
+                    GrokToolImageMode::Omit,
+                    hosted_search,
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(error.contains("Grok web search user_location"), "{error}");
+                assert!(
+                    error.contains("remove") || error.contains("Remove"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grok_translation_hosted_web_search_omits_null_location_fields() {
         let request: MessagesRequest = serde_json::from_value(serde_json::json!({
             "model":"grok-4.5",
             "messages":[{"role":"user","content":"find it"}],
             "tools":[{
-                "type":"web_search_20250305",
-                "name":"web_search",
-                "allowed_domains":null,
-                "blocked_domains":null,
-                "user_location":null
+                "type":"web_search_20250305","name":"web_search",
+                "user_location":{"type":"approximate","city":null,"region":null,"country":null,"timezone":null}
             }]
         }))
         .unwrap();
-        let translated = translate_client_search(&request, "grok-4.5");
         assert_eq!(
-            translated["tools"],
-            serde_json::json!([{"type":"web_search"}])
+            translate_client_search(&request, "grok-4.5")["tools"],
+            serde_json::json!([
+                {"type":"web_search","user_location":{"type":"approximate"}}
+            ])
         );
+    }
+
+    #[test]
+    fn grok_translation_hosted_web_search_keeps_unfiltered_defaults() {
+        for hosted_search in [false, true] {
+            let mut request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "model":"grok-4.5",
+                "messages":[{"role":"user","content":"find it"}],
+                "tools":[{"type":"web_search_20250305","name":"web_search"}]
+            }))
+            .unwrap();
+            let default = translate_search(&request, "grok-4.5", hosted_search);
+            assert_eq!(
+                default["tools"][0],
+                serde_json::json!({"type":"web_search"})
+            );
+            for (allowed, blocked) in [
+                (serde_json::json!(null), serde_json::json!(null)),
+                (serde_json::json!([]), serde_json::json!([])),
+                (serde_json::json!([]), serde_json::json!(null)),
+                (serde_json::json!(null), serde_json::json!([])),
+            ] {
+                let tools = request.extra.get_mut("tools").unwrap();
+                tools[0]["allowed_domains"] = allowed;
+                tools[0]["blocked_domains"] = blocked;
+                tools[0]["user_location"] = Value::Null;
+                assert_eq!(
+                    translate_search(&request, "grok-4.5", hosted_search),
+                    default
+                );
+            }
+        }
     }
 
     #[test]
