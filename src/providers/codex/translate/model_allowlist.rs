@@ -78,41 +78,73 @@ pub fn listed_catalog_models() -> Vec<String> {
         .collect()
 }
 
+/// Baseline and listed API-supported CLI cache models, with local tier
+/// variants. Kept here so Registry and the provider advertise the same IDs.
+pub fn advertised_models() -> Vec<String> {
+    advertised_models_with_catalog(listed_catalog_models())
+}
+
+fn advertised_models_with_catalog(catalog: Vec<String>) -> Vec<String> {
+    let mut models = HashSet::new();
+    for model in ALLOWED_MODELS
+        .iter()
+        .map(|model| (*model).to_string())
+        .chain(catalog)
+    {
+        models.insert(model.clone());
+        models.extend(tier_model_variants(&model));
+    }
+    let mut models: Vec<String> = models.into_iter().collect();
+    models.sort_unstable();
+    models
+}
+
 pub fn allowed_models_display() -> String {
     allowed_models().join(", ")
 }
 
-fn fast_model_aliases() -> HashSet<String> {
-    allowed_models()
-        .iter()
-        .map(|m| format!("{m}-fast"))
-        .collect()
+/// Models with known ultrafast support. The current CLI cache has no tier
+/// metadata, so catalog discovery alone does not imply ultrafast support.
+pub const ULTRAFAST_MODELS: &[&str] = &["gpt-6-astra"];
+
+/// Local tier suffixes also apply to catalog models and unlisted `gpt-*`
+/// IDs. Strip once; the routing gate rejects any remaining local suffix.
+pub fn split_tier_suffix(model: &str) -> Option<(&str, ServiceTier)> {
+    let (base, tier) = if let Some(base) = model.strip_suffix("-ultrafast") {
+        (base, ServiceTier::Ultrafast)
+    } else {
+        (model.strip_suffix("-fast")?, ServiceTier::Priority)
+    };
+    (base.starts_with("gpt-") || is_allowed_model(base)).then_some((base, tier))
 }
 
-fn resolve_fast_model_alias(model: &str) -> ResolvedModel {
-    let fast_set = fast_model_aliases();
-    if fast_set.contains(model) {
-        let base = model.trim_end_matches("-fast");
-        ResolvedModel {
+pub fn tier_model_variants(model: &str) -> Vec<String> {
+    let mut variants = vec![format!("{model}-fast")];
+    if ULTRAFAST_MODELS.contains(&model) {
+        variants.push(format!("{model}-ultrafast"));
+    }
+    variants
+}
+
+/// Unknown tier support uses the existing priority tier, not a claim that
+/// every discovered or unlisted model supports ultrafast.
+pub fn service_tier_for_model(model: &str, tier: ServiceTier) -> ServiceTier {
+    match tier {
+        ServiceTier::Ultrafast if !ULTRAFAST_MODELS.contains(&model) => ServiceTier::Priority,
+        tier => tier,
+    }
+}
+
+fn resolve_tier_model_alias(model: &str) -> ResolvedModel {
+    match split_tier_suffix(model) {
+        Some((base, tier)) => ResolvedModel {
             model: base.to_string(),
-            service_tier: Some(ServiceTier::Priority),
-        }
-    } else if let Some(base) = model
-        .strip_suffix("-fast")
-        .filter(|base| base.starts_with("gpt-"))
-    {
-        // The `-fast` suffix is ours: an unlisted `gpt-9-x-fast` still means
-        // `gpt-9-x` at priority tier, and Codex reports the base ID itself
-        // when it never heard of it.
-        ResolvedModel {
-            model: base.to_string(),
-            service_tier: Some(ServiceTier::Priority),
-        }
-    } else {
-        ResolvedModel {
+            service_tier: Some(tier),
+        },
+        None => ResolvedModel {
             model: model.to_string(),
             service_tier: None,
-        }
+        },
     }
 }
 
@@ -124,29 +156,32 @@ pub fn resolve_model_request_with_config_override(
     model: &str,
     apply_config_override: bool,
 ) -> ResolvedModel {
+    let override_model = apply_config_override.then(config::codex_model).flatten();
+    resolve_with_model_override(model, override_model.as_deref())
+}
+
+fn resolve_with_model_override(model: &str, override_model: Option<&str>) -> ResolvedModel {
     let alias = MODEL_ALIASES
         .iter()
         .find(|(alias, _)| *alias == model)
         .map(|(_, target)| *target)
         .unwrap_or(model);
 
-    let requested = resolve_fast_model_alias(alias);
-
-    let override_model = apply_config_override.then(config::codex_model).flatten();
+    let requested = resolve_tier_model_alias(alias);
     let resolved = match override_model {
-        Some(ref val) if !val.is_empty() => resolve_fast_model_alias(val),
+        Some(val) if !val.is_empty() => resolve_tier_model_alias(val),
         _ => requested.clone(),
     };
+    // An override's own suffix wins. Otherwise keep the requested tier,
+    // narrowed against the final model rather than the original request.
+    let service_tier = resolved
+        .service_tier
+        .or(requested.service_tier)
+        .map(|tier| service_tier_for_model(&resolved.model, tier));
 
     ResolvedModel {
         model: resolved.model,
-        service_tier: if requested.service_tier == Some(ServiceTier::Priority)
-            || resolved.service_tier == Some(ServiceTier::Priority)
-        {
-            Some(ServiceTier::Priority)
-        } else {
-            resolved.service_tier
-        },
+        service_tier,
     }
 }
 
@@ -181,7 +216,12 @@ pub fn assert_allowed_model(model: &str) -> Result<(), ModelNotAllowedError> {
 /// model works before any proxy release lists it. Same pattern as
 /// `opencode-go/` IDs for OpenCode Go.
 pub fn assert_routable_model(model: &str) -> Result<(), ModelNotAllowedError> {
-    if is_allowed_model(model) || model.starts_with("gpt-") {
+    // Called after model resolution: a remaining suffix means the caller
+    // stacked local tier suffixes. Never forward those synthetic names.
+    if !model.ends_with("-fast")
+        && !model.ends_with("-ultrafast")
+        && (is_allowed_model(model) || model.starts_with("gpt-"))
+    {
         Ok(())
     } else {
         Err(ModelNotAllowedError {
@@ -235,8 +275,7 @@ pub fn is_valid_model_for_codex(model: &str) -> bool {
     if is_allowed_model(model) {
         return true;
     }
-    let fast_set = fast_model_aliases();
-    if fast_set.contains(model) {
+    if split_tier_suffix(model).is_some_and(|(base, _)| is_allowed_model(base)) {
         return true;
     }
     MODEL_ALIASES.iter().any(|(alias, _)| *alias == model)
@@ -245,6 +284,140 @@ pub fn is_valid_model_for_codex(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tier_listing_preserves_catalog_and_only_advertises_astra_ultrafast() {
+        let models = advertised_models_with_catalog(vec![
+            "gpt-9-catalog".to_string(),
+            "codex-cache-only".to_string(),
+            "gpt-6-astra".to_string(),
+        ]);
+        for model in ALLOWED_MODELS
+            .iter()
+            .copied()
+            .chain(["gpt-9-catalog", "codex-cache-only"])
+        {
+            assert!(models.contains(&model.to_string()), "{model}");
+            assert!(models.contains(&format!("{model}-fast")), "{model}");
+        }
+        assert!(models.contains(&"gpt-6-astra-ultrafast".to_string()));
+        assert!(!models.contains(&"gpt-6-sol-ultrafast".to_string()));
+        assert!(!models.contains(&"gpt-9-catalog-ultrafast".to_string()));
+        assert!(models.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn tier_suffixes_preserve_baseline_catalog_and_unlisted_fast_models() {
+        let catalog = super::super::model_catalog::parse_catalog(
+            br#"{"models":[{"slug":"gpt-9-catalog","use_responses_lite":true}]}"#,
+        )
+        .unwrap();
+        for model in ALLOWED_MODELS
+            .iter()
+            .copied()
+            .chain(catalog.iter().map(|entry| entry.slug.as_str()))
+            .chain(["gpt-9-unlisted"])
+        {
+            let base = resolve_with_model_override(model, None);
+            assert_eq!(base.model, model);
+            assert_eq!(base.service_tier, None);
+            let fast = resolve_with_model_override(&format!("{model}-fast"), None);
+            assert_eq!(fast.model, model);
+            assert_eq!(fast.service_tier, Some(ServiceTier::Priority));
+            assert!(assert_routable_model(&fast.model).is_ok());
+        }
+    }
+
+    #[test]
+    fn ultrafast_suffix_uses_astra_or_priority_fallback() {
+        for (model, tier) in [
+            ("gpt-6-astra", ServiceTier::Ultrafast),
+            ("gpt-6-sol", ServiceTier::Priority),
+            ("gpt-9-unlisted", ServiceTier::Priority),
+        ] {
+            let resolved = resolve_with_model_override(&format!("{model}-ultrafast"), None);
+            assert_eq!(resolved.model, model);
+            assert_eq!(resolved.service_tier, Some(tier));
+            assert!(assert_routable_model(&resolved.model).is_ok());
+        }
+    }
+
+    #[test]
+    fn model_override_tier_precedence_uses_final_model() {
+        for (requested, override_model, model, tier) in [
+            (
+                "gpt-6-sol-fast",
+                "gpt-6-astra-ultrafast",
+                "gpt-6-astra",
+                ServiceTier::Ultrafast,
+            ),
+            (
+                "gpt-6-astra-ultrafast",
+                "gpt-6-astra-fast",
+                "gpt-6-astra",
+                ServiceTier::Priority,
+            ),
+            (
+                "gpt-6-astra-ultrafast",
+                "gpt-6-sol",
+                "gpt-6-sol",
+                ServiceTier::Priority,
+            ),
+            (
+                "gpt-6-astra-ultrafast",
+                "gpt-6-astra",
+                "gpt-6-astra",
+                ServiceTier::Ultrafast,
+            ),
+            (
+                "gpt-9-unlisted-fast",
+                "gpt-6-astra",
+                "gpt-6-astra",
+                ServiceTier::Priority,
+            ),
+        ] {
+            let resolved = resolve_with_model_override(requested, Some(override_model));
+            assert_eq!(resolved.model, model);
+            assert_eq!(resolved.service_tier, Some(tier));
+        }
+        for (alias, model) in [
+            ("haiku", "gpt-6-luna"),
+            ("sonnet", "gpt-5.6-terra"),
+            ("fable", "gpt-6-sol"),
+        ] {
+            let resolved = resolve_with_model_override(alias, None);
+            assert_eq!(resolved.model, model);
+            assert_eq!(resolved.service_tier, None);
+        }
+    }
+
+    #[test]
+    fn tier_suffixes_strip_once_and_reject_stacked_names() {
+        for model in [
+            "gpt-6-astra-fast-fast",
+            "gpt-6-astra-ultrafast-fast",
+            "gpt-6-astra-fast-ultrafast",
+            "gpt-9-unlisted-ultrafast-ultrafast",
+        ] {
+            let resolved = resolve_with_model_override(model, None);
+            assert!(assert_routable_model(&resolved.model).is_err(), "{model}");
+        }
+        for model in ["-fast", "grok-9-fast", "kimi-k9-ultrafast"] {
+            assert_eq!(split_tier_suffix(model), None);
+            assert_eq!(resolve_with_model_override(model, None).model, model);
+        }
+    }
+
+    #[test]
+    fn tier_model_variants_advertise_ultrafast_only_for_astra() {
+        assert_eq!(
+            tier_model_variants("gpt-6-astra"),
+            ["gpt-6-astra-fast", "gpt-6-astra-ultrafast"]
+        );
+        for model in ["gpt-6-sol", "gpt-9-catalog"] {
+            assert_eq!(tier_model_variants(model), [format!("{model}-fast")]);
+        }
+    }
 
     #[test]
     fn haiku_resolves_to_luna() {

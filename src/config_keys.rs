@@ -19,6 +19,8 @@ enum ConfigKind {
     Bool,
     /// One of a fixed set.
     Provider,
+    /// Codex tier, validated by the request translator.
+    ServiceTier,
     /// Like Str, but get/list only ever print `set`/`unset`.
     Secret,
 }
@@ -98,6 +100,13 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         env: &["CCP_CODEX_BASE_URL"],
         default: None,
         blurb: "Codex API base URL override",
+    },
+    ConfigKey {
+        path: "codex.serviceTier",
+        kind: ConfigKind::ServiceTier,
+        env: &["CCP_CODEX_SERVICE_TIER"],
+        default: None,
+        blurb: "Codex Messages tier (fast|priority|ultrafast|flex)",
     },
     ConfigKey {
         path: "codex.fullLane",
@@ -183,6 +192,11 @@ fn parse_value(key: &ConfigKey, raw: &str) -> Result<serde_json::Value> {
             Ok(serde_json::Value::from(port))
         }
         ConfigKind::Bool => Ok(serde_json::Value::from(parse_bool(raw)?)),
+        ConfigKind::ServiceTier => {
+            let value = raw.trim();
+            crate::providers::codex::translate::request::normalize_service_tier(value)?;
+            Ok(serde_json::Value::String(value.to_string()))
+        }
         ConfigKind::Provider => {
             let value = raw.trim().to_string();
             if !PROVIDERS.contains(&value.as_str()) {
@@ -410,6 +424,18 @@ mod tests {
             get_dotted(&root, "log.verbose").and_then(scalar_text),
             Some("true".to_string())
         );
+    }
+
+    #[test]
+    fn service_tier_config_key_reuses_wire_validation() {
+        let key = find_key("codex.serviceTier").unwrap();
+        assert_eq!(key.env, &["CCP_CODEX_SERVICE_TIER"]);
+        for value in ["fast", "priority", "ultrafast", "flex"] {
+            assert_eq!(parse_value(key, value).unwrap(), serde_json::json!(value));
+        }
+        for value in ["", "turbo", "Ultrafast"] {
+            assert!(parse_value(key, value).is_err());
+        }
     }
 
     #[test]

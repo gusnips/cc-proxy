@@ -2,6 +2,7 @@ use crate::{
     anthropic::{json_error, schema::MessagesRequest},
     config::AliasProvider,
     provider::{CliHandlers, Provider, RequestContext},
+    providers::codex::translate::model_allowlist::advertised_models,
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -70,7 +71,7 @@ pub struct Registry {
 impl Registry {
     pub fn new(alias_provider: AliasProvider) -> Self {
         let mut models: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        models.insert("codex".into(), expand_codex_models());
+        models.insert("codex".into(), advertised_models());
         models.insert(
             "kimi".into(),
             KIMI_MODELS.iter().map(|m| (*m).to_string()).collect(),
@@ -380,29 +381,6 @@ const CODEX_CLI: PlaceholderCli = PlaceholderCli { provider: "codex" };
 const KIMI_CLI: PlaceholderCli = PlaceholderCli { provider: "kimi" };
 const CURSOR_CLI: PlaceholderCli = PlaceholderCli { provider: "cursor" };
 const GROK_CLI: PlaceholderCli = PlaceholderCli { provider: "grok" };
-fn expand_codex_models() -> Vec<String> {
-    let mut set = HashSet::new();
-    let mut out = Vec::new();
-    // Baseline ∪ models the Codex CLI advertises in its own model cache, so a
-    // model OpenAI ships to Codex routes here before a proxy release lists it.
-    let catalog = crate::providers::codex::translate::model_allowlist::listed_catalog_models();
-    for model in CODEX_MODELS
-        .iter()
-        .map(|model| (*model).to_string())
-        .chain(catalog)
-    {
-        if set.insert(model.clone()) {
-            out.push(model.clone());
-        }
-        let fast = format!("{model}-fast");
-        if set.insert(fast.clone()) {
-            out.push(fast);
-        }
-    }
-    out.sort_unstable();
-    out
-}
-
 fn build_cursor_models() -> Vec<String> {
     let mut out: Vec<String> = CURSOR_LEGACY_MODELS
         .iter()
@@ -415,6 +393,33 @@ fn build_cursor_models() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_tier_routing_does_not_change_other_providers() {
+        let registry = Registry::new(AliasProvider::Kimi);
+        for model in [
+            "gpt-6-astra-ultrafast",
+            "gpt-6-astra-ultrafast[1m]",
+            "gpt-9-unlisted-ultrafast",
+        ] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                "codex"
+            );
+        }
+        for (model, provider) in [
+            ("haiku", "kimi"),
+            ("grok-9-ultrafast", "grok"),
+            ("kimi-k9-fast", "kimi"),
+            ("cursor:gpt-6-astra-ultrafast", "cursor"),
+            ("opencode-go/gpt-6-astra-ultrafast", "opencode"),
+        ] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                provider
+            );
+        }
+    }
 
     #[test]
     fn normalize_model_trims_hint() {

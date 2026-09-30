@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 
 use crate::anthropic::sse::parse_sse_events;
 use crate::provider::RequestContext;
+use crate::registry::normalize_incoming_model;
 use crate::traffic::{
     MAX_SSE_CAPTURE_BYTES, MAX_STREAM_CAPTURE_EVENT_BYTES, MAX_STREAM_CAPTURE_EVENTS,
     MAX_STREAM_CAPTURE_FRAME_BYTES,
@@ -19,8 +20,8 @@ use crate::traffic::{
 
 use super::client::{CodexError, CodexHttpClient};
 use super::translate::model_allowlist::{
-    MODEL_ALIASES, allowed_models_display, assert_routable_model, full_lane_web_search_model,
-    is_allowed_model, uses_responses_lite,
+    allowed_models_display, assert_routable_model, full_lane_web_search_model,
+    resolve_model_request_with_config_override, service_tier_for_model, uses_responses_lite,
 };
 
 pub struct CodexNativeBackend {
@@ -94,8 +95,9 @@ pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
                 None,
             )
         })?;
-    let (resolved, _) = resolve_native_model(&requested);
-    if let Err(error) = assert_routable_model(&resolved) {
+    let resolved =
+        resolve_model_request_with_config_override(&normalize_incoming_model(&requested), false);
+    if let Err(error) = assert_routable_model(&resolved.model) {
         return Err(openai_error(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
@@ -118,15 +120,22 @@ fn shape_native_request(body: &mut Value) -> Result<NativeResolved, Response> {
         .as_object_mut()
         .expect("validated native Responses body must be an object");
 
-    let (mut model, priority) = resolve_native_model(&requested);
+    let resolved =
+        resolve_model_request_with_config_override(&normalize_incoming_model(&requested), false);
+    let mut model = resolved.model;
 
     let hosted_web_search = has_native_hosted_web_search(object);
     if hosted_web_search {
         model = full_lane_web_search_model(&model).to_string();
     }
     object.insert("model".to_string(), Value::String(model.clone()));
-    if priority && !object.contains_key("service_tier") {
-        object.insert("service_tier".to_string(), json!("priority"));
+    if let Some(tier) = resolved.service_tier
+        && !object.contains_key("service_tier")
+    {
+        object.insert(
+            "service_tier".to_string(),
+            json!(service_tier_for_model(&model, tier)),
+        );
     }
 
     Ok(NativeResolved {
@@ -137,19 +146,6 @@ fn shape_native_request(body: &mut Value) -> Result<NativeResolved, Response> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
     })
-}
-
-fn resolve_native_model(requested: &str) -> (String, bool) {
-    let (requested, priority) = match requested.strip_suffix("-fast") {
-        Some(base) if is_allowed_model(base) => (base, true),
-        _ => (requested, false),
-    };
-    let model = MODEL_ALIASES
-        .iter()
-        .find(|(alias, _)| *alias == requested)
-        .map(|(_, target)| *target)
-        .unwrap_or(requested);
-    (model.to_string(), priority)
 }
 
 fn has_native_hosted_web_search(object: &Map<String, Value>) -> bool {
@@ -713,6 +709,49 @@ mod tests {
             }));
             shape_native_request(&mut body).unwrap();
             assert_eq!(body["parallel_tool_calls"], parallel);
+        }
+    }
+
+    #[test]
+    fn native_tier_suffixes_strip_known_and_unlisted_gpt_names() {
+        for (requested, model, tier) in [
+            ("gpt-6-astra-ultrafast", "gpt-6-astra", "ultrafast"),
+            ("gpt-6-astra-ultrafast[1m]", "gpt-6-astra", "ultrafast"),
+            ("gpt-6-sol-ultrafast", "gpt-6-sol", "priority"),
+            ("gpt-9-unlisted-fast", "gpt-9-unlisted", "priority"),
+            ("gpt-9-unlisted-fast[1m]", "gpt-9-unlisted", "priority"),
+            ("gpt-9-unlisted-ultrafast", "gpt-9-unlisted", "priority"),
+        ] {
+            let mut body = json!({"model":requested,"input":[]});
+            let resolved = shape_native_request(&mut body).unwrap();
+            assert_eq!(resolved.model, model);
+            assert_eq!(body["model"], model);
+            assert_eq!(body["service_tier"], tier);
+        }
+        for requested in ["gpt-6-astra-fast-ultrafast", "gpt-9-unlisted-fast-fast"] {
+            let mut body = json!({"model":requested,"input":[]});
+            assert_eq!(
+                shape_native_request(&mut body).err().unwrap().status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    #[test]
+    fn native_ultrafast_preserves_explicit_tier_and_reasoning() {
+        for tier in [json!("flex"), json!("ultrafast"), Value::Null] {
+            let mut body = json!({
+                "model":"gpt-6-sol-ultrafast",
+                "service_tier":tier,
+                "reasoning":{"effort":"high"},
+                "prompt_cache_key":"native-cache",
+                "input":[]
+            });
+            shape_native_request(&mut body).unwrap();
+            assert_eq!(body["model"], "gpt-6-sol");
+            assert_eq!(body["service_tier"], tier);
+            assert_eq!(body["reasoning"], json!({"effort":"high"}));
+            assert_eq!(body["prompt_cache_key"], "native-cache");
         }
     }
 

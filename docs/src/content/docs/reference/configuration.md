@@ -107,7 +107,7 @@ Proxy URLs may use `http`, `https`, `socks4`, `socks4a`, `socks5`, or `socks5h`.
 | `CCP_COMPACT_EFFORT` | none | `low` | Caps Codex reasoning effort for Claude Code summary compaction requests. `off` disables the cap and `none` removes reasoning. |
 | `CCP_CODEX_REASONING_SUMMARY` | `codex.reasoningSummary` | unset | Overrides summary mode. `off` and `none` suppress summaries. |
 | `CCP_CODEX_REASONING_SIGNATURES` | `codex.reasoningSignatures` | `on` | Preserves Codex encrypted reasoning continuation in Anthropic thinking signatures; `off`, `none`, `false`, and `0` suppress signature storage. |
-| `CCP_CODEX_SERVICE_TIER` | `codex.serviceTier` | unset | Forces `fast` or `priority`, or `flex`. Fast is sent as `priority`. |
+| `CCP_CODEX_SERVICE_TIER` | `codex.serviceTier` | unset | Requests `fast`, `priority`, `ultrafast`, or `flex` on Codex Messages requests. `fast` sends `priority`. Ultrafast sends `priority` unless the final model is `gpt-6-astra`. |
 | `CCP_CODEX_BASE_URL` | `codex.baseUrl` | ChatGPT Codex Responses URL | Changes the Codex endpoint. |
 | `CCP_CODEX_TRANSPORT` | `codex.transport` | `websocket` | Selects `websocket`, `http`, or `auto`. |
 | `CCP_CODEX_HEADER_TIMEOUT_MS` | `codex.headerTimeoutMs` | `300000` | Sets how long an HTTP-transport request waits for the Codex response headers. Values below `1000` are ignored. |

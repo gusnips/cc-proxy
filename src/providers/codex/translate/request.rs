@@ -11,6 +11,7 @@ use crate::providers::translate_shared::{
     read_effort,
 };
 
+use super::model_allowlist::service_tier_for_model;
 use super::read_rewrite::{ReadOffsetRewrite, read_offset_rewrite};
 use super::reasoning_signature::decode_reasoning_signature;
 
@@ -46,6 +47,7 @@ impl std::fmt::Display for Effort {
 #[serde(rename_all = "snake_case")]
 pub enum ServiceTier {
     Priority,
+    Ultrafast,
     Flex,
 }
 
@@ -391,29 +393,37 @@ fn compact_effort_cap_from(raw: Option<&str>) -> Option<Effort> {
     }
 }
 
-const VALID_SERVICE_TIERS: &[&str] = &["fast", "priority", "flex"];
+const VALID_SERVICE_TIERS: &[&str] = &["fast", "priority", "ultrafast", "flex"];
 
-fn normalize_service_tier(tier: &str) -> Result<ServiceTier, anyhow::Error> {
-    if !VALID_SERVICE_TIERS.contains(&tier) {
-        anyhow::bail!(
-            "Invalid service tier override: \"{tier}\". Must be one of: {}",
-            VALID_SERVICE_TIERS.join(", ")
-        );
-    }
+pub(crate) fn normalize_service_tier(tier: &str) -> Result<ServiceTier, anyhow::Error> {
     match tier {
+        "fast" | "priority" => Ok(ServiceTier::Priority),
+        "ultrafast" => Ok(ServiceTier::Ultrafast),
         "flex" => Ok(ServiceTier::Flex),
-        _ => Ok(ServiceTier::Priority),
+        _ => anyhow::bail!(
+            "Invalid service tier override: \"{tier}\". Use one of: {}",
+            VALID_SERVICE_TIERS.join(", ")
+        ),
     }
 }
 
 fn resolve_service_tier(
     model_tier: Option<ServiceTier>,
+    model: &str,
 ) -> Result<Option<ServiceTier>, anyhow::Error> {
-    let tier = config::codex_service_tier();
-    match tier {
-        Some(ref val) => Ok(Some(normalize_service_tier(val)?)),
-        None => Ok(model_tier),
-    }
+    pick_service_tier(config::codex_service_tier().as_deref(), model_tier, model)
+}
+
+fn pick_service_tier(
+    override_tier: Option<&str>,
+    model_tier: Option<ServiceTier>,
+    model: &str,
+) -> Result<Option<ServiceTier>, anyhow::Error> {
+    let tier = match override_tier {
+        Some(value) => Some(normalize_service_tier(value)?),
+        None => model_tier,
+    };
+    Ok(tier.map(|tier| service_tier_for_model(model, tier)))
 }
 
 pub fn normalize_strict_json_schema(schema: &Value) -> Value {
@@ -575,10 +585,7 @@ fn translate_request_inner(
     }
 
     if apply_codex_config {
-        let service_tier = resolve_service_tier(opts.service_tier)?;
-        if let Some(ref tier) = service_tier {
-            out.service_tier = Some(tier.clone());
-        }
+        out.service_tier = resolve_service_tier(opts.service_tier, &out.model)?;
     }
 
     let effort = read_effort(req)?;
@@ -1216,6 +1223,147 @@ mod tests {
             service_tier: None,
             model: "gpt-5.5".to_string(),
             use_responses_lite: false,
+        }
+    }
+
+    #[test]
+    fn service_tier_override_values_normalize_to_wire_tiers() {
+        for (value, tier, wire) in [
+            ("fast", ServiceTier::Priority, "priority"),
+            ("priority", ServiceTier::Priority, "priority"),
+            ("ultrafast", ServiceTier::Ultrafast, "ultrafast"),
+            ("flex", ServiceTier::Flex, "flex"),
+        ] {
+            let normalized = normalize_service_tier(value).unwrap();
+            assert_eq!(normalized, tier);
+            assert_eq!(serde_json::to_value(normalized).unwrap(), json!(wire));
+        }
+        for value in ["", "default", "Ultrafast", "ultra-fast", "turbo"] {
+            let error = normalize_service_tier(value).unwrap_err().to_string();
+            assert!(error.contains("ultrafast"), "{error}");
+        }
+    }
+
+    #[test]
+    fn service_tier_override_wins_and_uses_final_model() {
+        for (override_tier, model_tier, model, expected) in [
+            (None, None, "gpt-6-astra", None),
+            (
+                None,
+                Some(ServiceTier::Ultrafast),
+                "gpt-6-astra",
+                Some(ServiceTier::Ultrafast),
+            ),
+            (
+                None,
+                Some(ServiceTier::Ultrafast),
+                "gpt-6-sol",
+                Some(ServiceTier::Priority),
+            ),
+            (
+                Some("ultrafast"),
+                Some(ServiceTier::Priority),
+                "gpt-6-astra",
+                Some(ServiceTier::Ultrafast),
+            ),
+            (
+                Some("ultrafast"),
+                None,
+                "gpt-9-unlisted",
+                Some(ServiceTier::Priority),
+            ),
+            (
+                Some("fast"),
+                Some(ServiceTier::Ultrafast),
+                "gpt-6-astra",
+                Some(ServiceTier::Priority),
+            ),
+            (
+                Some("flex"),
+                Some(ServiceTier::Ultrafast),
+                "gpt-6-astra",
+                Some(ServiceTier::Flex),
+            ),
+        ] {
+            assert_eq!(
+                pick_service_tier(override_tier, model_tier, model).unwrap(),
+                expected
+            );
+        }
+        assert!(
+            pick_service_tier(Some("turbo"), Some(ServiceTier::Ultrafast), "gpt-6-astra").is_err()
+        );
+    }
+
+    #[test]
+    fn ultrafast_translation_preserves_prompt_cache_and_lite_lane() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model":"gpt-6-astra-ultrafast",
+            "messages":[{"role":"user","content":"hello"}]
+        }))
+        .unwrap();
+        let out = translate_request(
+            &req,
+            TranslateOptions {
+                model: "gpt-6-astra".to_string(),
+                service_tier: Some(ServiceTier::Ultrafast),
+                session_id: Some("cache-session".to_string()),
+                use_responses_lite: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(out.model, "gpt-6-astra");
+        assert_eq!(
+            serde_json::to_value(&out).unwrap()["service_tier"],
+            "ultrafast"
+        );
+        assert_eq!(out.prompt_cache_key.as_deref(), Some("cache-session"));
+        assert!(!out.parallel_tool_calls);
+        assert!(out.client_metadata.is_some());
+        assert_eq!(out.reasoning.unwrap().context.as_deref(), Some("all_turns"));
+    }
+
+    #[test]
+    fn openai_compatible_translation_ignores_codex_tiers() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model":"foreign-model",
+            "messages":[{"role":"user","content":"hello"}],
+            "output_config":{"effort":"high"}
+        }))
+        .unwrap();
+        let out = translate_request_inner(
+            &req,
+            TranslateOptions {
+                model: "foreign-model".to_string(),
+                service_tier: Some(ServiceTier::Ultrafast),
+                session_id: Some("cache-session".to_string()),
+                ..opts()
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(out.model, "foreign-model");
+        assert_eq!(out.service_tier, None);
+        assert_eq!(out.reasoning.unwrap().effort, Some(Effort::High));
+        assert_eq!(out.prompt_cache_key.as_deref(), Some("cache-session"));
+    }
+
+    #[test]
+    fn chat_completions_uses_shared_ultrafast_suffix_resolution() {
+        for (requested, tier) in [
+            ("gpt-6-astra-fast", "priority"),
+            ("gpt-6-astra-ultrafast[1m]", "ultrafast"),
+            ("gpt-6-sol-ultrafast", "priority"),
+        ] {
+            let translated =
+                crate::providers::codex::chat_completions::request::translate_request(json!({
+                    "model":requested,
+                    "messages":[{"role":"user","content":"hello"}]
+                }))
+                .unwrap();
+            assert!(!translated.model.ends_with("-fast"));
+            assert!(!translated.model.ends_with("-ultrafast"));
+            assert_eq!(translated.upstream["service_tier"], tier);
         }
     }
 

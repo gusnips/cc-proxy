@@ -9,7 +9,7 @@ The model ID in each request selects its provider. One proxy listener can serve 
 
 | Pattern | Provider |
 | --- | --- |
-| Any `gpt-*` ID and its `-fast` form (unlisted IDs forward to Codex raw; Codex reports unknown ones) | Codex |
+| Any `gpt-*` ID and its local tier forms (`-fast` or `-ultrafast`; unlisted base IDs forward to Codex) | Codex |
 | `k3`, `kimi-k3`, `kimi-k2.6`, `k2.6` (legacy `kimi-for-coding`); unlisted `kimi-*`/`k2-*` forward raw | Kimi |
 | `grok-composer-2.5-fast`, `grok-4.5`, `grok-4.6`, `grok-4.7`; unlisted `grok-*` forward raw | Grok |
 | Non-conflicting OpenCode Go IDs and **every** `opencode-go/<model-id>`, registered or not | OpenCode Go |
@@ -17,11 +17,7 @@ The model ID in each request selects its provider. One proxy listener can serve 
 | `cursor`, Cursor legacy aliases, `cursor:<id>`, `cursor-plan:<id>`, `cursor-ask:<id>` | Cursor Agent |
 | Anthropic-style aliases such as `haiku`, `sonnet`, `opus`, `fable`, and registered `claude-*` aliases | The `aliasProvider`, Codex by default |
 
-An unknown ID returns HTTP 400 with the supported provider catalog. The one
-exception is the `opencode-go/` prefix: any ID with that prefix is forwarded
-to OpenCode Go with an inferred wire protocol, and OpenCode Go itself reports
-the IDs it does not serve. There is no other implicit fallback for arbitrary
-model names.
+Other unknown IDs return HTTP 400 with the supported provider catalog. Unlisted provider-prefixed IDs go to their named provider, which reports unknown models. The `opencode-go/` prefix also forwards any ID to OpenCode Go with an inferred wire protocol. Arbitrary model names have no implicit fallback.
 
 ## Prefer the live catalog
 
@@ -40,9 +36,13 @@ The HTTP equivalent is:
 curl http://127.0.0.1:18765/v1/models
 ```
 
-## Codex fast mode
+## Codex service tiers
 
-Every registered Codex model also has a local `-fast` form. The proxy removes `-fast` from the upstream model and requests the priority service tier. A configured `codex.serviceTier` or `CCP_CODEX_SERVICE_TIER` override wins.
+Codex models have a local `-fast` form. The proxy removes the suffix and requests `service_tier: "priority"`. This also works for models discovered in the Codex CLI cache and unlisted `gpt-*` IDs.
+
+`gpt-6-astra-ultrafast` requests `service_tier: "ultrafast"`. Astra is the only model with known ultrafast support in the proxy's tier list; catalog discovery does not add tier support. On other Codex models, including unlisted `gpt-*` IDs, `-ultrafast` is removed and requests priority instead. Use one suffix; repeated or mixed suffixes are rejected.
+
+On `/v1/messages`, `codex.serviceTier` or `CCP_CODEX_SERVICE_TIER` wins over either suffix. Ultrafast falls back to priority when the final model is not Astra. The OpenAI-compatible routes use the suffix without the global service-tier override, and `/v1/responses` forwards an explicit `service_tier` unchanged.
 
 ## The `[1m]` hint
 

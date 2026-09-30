@@ -24,13 +24,17 @@ cc-proxy codex auth status
 
 The proxy owns its tokens and does not read native Codex CLI credentials. It refreshes expiring access tokens with a single-flight guard. See [Files and storage](/reference/files-and-storage/) for credential locations.
 
-## Models and fast mode
+## Models and service tiers
 
 Use `cc-proxy models` as the current catalog. Model access depends on your ChatGPT account. A model rejected by the subscription produces the upstream error verbatim.
 
 Claude-style aliases map to Codex models: `haiku` and `claude-haiku-*` to `gpt-6-luna`, `sonnet` and `claude-sonnet-*` to `gpt-5.6-terra`, and `opus`, `fable`, `claude-opus-*` (including `claude-opus-5-5`), and `claude-fable-*` to `gpt-6-sol`.
 
-Append `-fast` to any registered Codex model to request `service_tier: "priority"`. For example, `gpt-6-sol-fast` selects `gpt-6-sol` with fast service. `CCP_CODEX_SERVICE_TIER` or `codex.serviceTier` takes precedence.
+Append `-fast` to a Codex model to request `service_tier: "priority"`. For example, `gpt-6-sol-fast` sends `gpt-6-sol` with the priority tier. Models discovered in the Codex CLI cache and unlisted `gpt-*` IDs keep this behavior.
+
+Use `gpt-6-astra-ultrafast` to request `service_tier: "ultrafast"`. Astra is the only model with known ultrafast support in the proxy's tier list. The CLI cache does not report tier support. An `-ultrafast` suffix on another Codex model is removed and requests priority instead, including unlisted `gpt-*` IDs. Use one suffix; names such as `gpt-6-astra-fast-ultrafast` are rejected.
+
+On `/v1/messages`, `CCP_CODEX_SERVICE_TIER` or `codex.serviceTier` wins over the suffix. A model override's own suffix wins over the requested model's suffix. Ultrafast falls back to priority when the final model is not Astra. The OpenAI-compatible routes ignore the global service-tier setting: they use the model suffix, and an explicit `/v1/responses` `service_tier` is forwarded unchanged.
 
 ## Reasoning
 
