@@ -1681,6 +1681,7 @@ async fn smoke_codex_http_empty_completions_exhaust_to_service_unavailable() {
     let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
 
     let response = call_messages("gpt-5.5").await;
+    assert_eq!(response.headers()["x-should-retry"], "false");
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -1699,8 +1700,8 @@ async fn smoke_codex_http_empty_completions_exhaust_to_service_unavailable() {
     // Initial attempt plus MAX_EMPTY_COMPLETION_RETRIES retries.
     assert_eq!(
         attempts.load(std::sync::atomic::Ordering::SeqCst),
-        11,
-        "retry loop must stay bounded"
+        3,
+        "empty responses must stop after two retries"
     );
 }
 
@@ -3634,6 +3635,7 @@ async fn smoke_codex_websocket_empty_completions_exhaust_to_service_unavailable(
         "messages": [{"role":"user","content":"one"}]
     }))
     .await;
+    assert_eq!(response.headers()["x-should-retry"], "false");
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -3649,11 +3651,11 @@ async fn smoke_codex_websocket_empty_completions_exhaust_to_service_unavailable(
         body_text.contains("Codex completed without producing output"),
         "unexpected exhaustion body: {body_text}"
     );
-    // Initial attempt plus MAX_RETRYABLE_LIVE_STREAM_RETRIES full-context retries.
+    // Initial attempt plus two empty-completion retries.
     assert_eq!(
         request_count.load(std::sync::atomic::Ordering::SeqCst),
-        11,
-        "retry loop must stay bounded"
+        3,
+        "empty responses must stop after two retries"
     );
 
     clear_all_continuations_for_tests();

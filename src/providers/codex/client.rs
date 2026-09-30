@@ -453,6 +453,7 @@ struct HttpEventStreamState {
     auth_refresh_attempted: bool,
     use_responses_lite: bool,
     retries: u32,
+    retry_deadline: Option<tokio::time::Instant>,
 }
 
 impl HttpSseDecoder {
@@ -1248,7 +1249,13 @@ impl CodexHttpClient {
         let mut auth_refresh_attempted = false;
         let use_responses_lite = body.client_metadata.is_some();
         let mut retries = 0_u32;
+        let mut retry_deadline = None;
         let (resp, response_headers, started_at) = loop {
+            if retry_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                let mut error = super::recovery_timeout_error();
+                error.origin = CodexErrorOrigin::Http;
+                return Err(error);
+            }
             match self
                 .start_http_event_attempt(
                     &mut auth,
@@ -1261,15 +1268,17 @@ impl CodexHttpClient {
             {
                 Ok(attempt) => break attempt,
                 Err(error) if retryable_http_stream_error(&error) => {
-                    if retries >= MAX_BUFFERED_TRANSPORT_RETRIES {
-                        return Err(error);
-                    }
-                    let delay = compute_backoff_delay(retries, error.retry_after.as_deref());
-                    if delay.exceeds_budget {
+                    if !super::wait_for_recovery_retry(
+                        retries,
+                        MAX_BUFFERED_TRANSPORT_RETRIES,
+                        &mut retry_deadline,
+                        error.retry_after.as_deref(),
+                    )
+                    .await
+                    {
                         return Err(error);
                     }
                     retries += 1;
-                    sleep(delay.wait_ms).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -1285,6 +1294,7 @@ impl CodexHttpClient {
                 auth_refresh_attempted,
                 use_responses_lite,
                 retries,
+                retry_deadline,
             },
             ctx.clone(),
         ))
@@ -1297,7 +1307,7 @@ impl CodexHttpClient {
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
         let receiver = self.stream_codex_http_events(body, ctx).await?;
         let (stream, _) = super::websocket::CodexWebSocketEventStream::pending(receiver);
-        Ok(stream)
+        Ok(stream.with_transport(ActualTransport::Http))
     }
 
     async fn start_http_event_attempt(
@@ -1405,6 +1415,7 @@ impl CodexHttpClient {
             mut auth_refresh_attempted,
             use_responses_lite,
             mut retries,
+            mut retry_deadline,
         } = state;
         let client = self.clone();
         let body_idle_timeout_ms = self.body_idle_timeout_ms;
@@ -1437,6 +1448,7 @@ impl CodexHttpClient {
 
                 let mut retry_error = 'read_attempt: loop {
                     let chunk = tokio::select! {
+                        biased;
                         _ = tx.closed() => {
                             log_http_stream_end(
                                 &log,
@@ -1746,22 +1758,28 @@ impl CodexHttpClient {
                 };
 
                 loop {
-                    if retries >= MAX_BUFFERED_TRANSPORT_RETRIES {
-                        let _ = tx.send(Err(retry_error)).await;
-                        return;
-                    }
-                    let delay = compute_backoff_delay(retries, retry_error.retry_after.as_deref());
-                    if delay.exceeds_budget {
+                    let can_retry = tokio::select! {
+                        biased;
+                        _ = tx.closed() => return,
+                        ready = super::wait_for_recovery_retry(retries, MAX_BUFFERED_TRANSPORT_RETRIES, &mut retry_deadline, retry_error.retry_after.as_deref()) => ready,
+                    };
+                    if !can_retry {
                         let _ = tx.send(Err(retry_error)).await;
                         return;
                     }
                     retries += 1;
-                    tokio::select! {
-                        _ = tx.closed() => return,
-                        _ = sleep(delay.wait_ms) => {}
+                    if tx.is_closed()
+                        || retry_deadline
+                            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                    {
+                        if !tx.is_closed() {
+                            let _ = tx.send(Err(retry_error)).await;
+                        }
+                        return;
                     }
 
                     let next_attempt = tokio::select! {
+                        biased;
                         _ = tx.closed() => return,
                         result = client.start_http_event_attempt(
                             &mut auth,
@@ -2770,7 +2788,15 @@ async fn forward_codex_events(
     mut source: tokio::sync::mpsc::Receiver<Result<serde_json::Value, CodexError>>,
     tx: tokio::sync::mpsc::Sender<Result<serde_json::Value, CodexError>>,
 ) {
-    while let Some(item) = source.recv().await {
+    loop {
+        let item = tokio::select! {
+            biased;
+            _ = tx.closed() => return,
+            item = source.recv() => item,
+        };
+        let Some(item) = item else {
+            return;
+        };
         if tx.send(item).await.is_err() {
             return;
         }
@@ -5602,6 +5628,57 @@ mod tests {
         server.await.unwrap();
         assert_eq!(response.output, "search output");
         assert_eq!(response.results.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_fallback_event_stream_keeps_http_transport_after_thinking() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut websocket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut websocket).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("GET "));
+            websocket
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            drop(websocket);
+            let (mut http, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut http).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("POST "));
+            let body = concat!(
+                "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"committed HTTP thinking\"}\n\n",
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\",\"retry_after\":0}}}\n\n"
+            );
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            http.write_all(headers.as_bytes()).await.unwrap();
+            http.write_all(body.as_bytes()).await.unwrap();
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let mut stream = client
+            .stream_codex_auto_events_for_owner(
+                &buffered_test_request(),
+                &http_test_context(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream.transport(), ActualTransport::Http);
+        let mut saw_thinking = false;
+        while let Some(event) = stream.recv().await {
+            let event = event.unwrap();
+            saw_thinking |= event["type"] == "response.reasoning_summary_text.delta";
+        }
+        assert!(saw_thinking);
+        assert_eq!(stream.transport(), ActualTransport::Http);
+        server.await.unwrap();
     }
 
     #[tokio::test]

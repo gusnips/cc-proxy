@@ -67,6 +67,7 @@ pub type CodexWebSocketEventReceiver =
 
 pub(crate) struct CodexWebSocketEventStream {
     receiver: CodexWebSocketEventReceiver,
+    transport: ActualTransport,
     socket_id: Arc<AtomicU64>,
     full_context_retry: Arc<AtomicBool>,
     provider_retry_handoff: Arc<AtomicBool>,
@@ -89,6 +90,7 @@ impl CodexWebSocketEventStream {
         (
             Self {
                 receiver,
+                transport: ActualTransport::WebSocket,
                 socket_id: socket_id.clone(),
                 full_context_retry: full_context_retry.clone(),
                 provider_retry_handoff: provider_retry_handoff.clone(),
@@ -99,6 +101,15 @@ impl CodexWebSocketEventStream {
                 provider_retry_handoff,
             },
         )
+    }
+
+    pub(crate) fn with_transport(mut self, transport: ActualTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    pub(crate) fn transport(&self) -> ActualTransport {
+        self.transport
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Result<serde_json::Value, CodexError>> {
@@ -2588,6 +2599,23 @@ mod tests {
                 error.detail.as_deref(),
                 Some(WEBSOCKET_QUOTA_REACHED_DETAIL)
             );
+            assert!(!super::super::retryable_live_start_codex_error(&error));
+        }
+    }
+
+    #[tokio::test]
+    async fn quota_snapshot_without_reset_is_429_in_both_readers() {
+        for live in [false, true] {
+            let error = quota_reader_case(
+                live,
+                vec![serde_json::json!({
+                    "type":"codex.rate_limits", "rate_limits":{"limit_reached":true}
+                })],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status, 429);
+            assert_eq!(error.retry_after, None);
             assert!(!super::super::retryable_live_start_codex_error(&error));
         }
     }

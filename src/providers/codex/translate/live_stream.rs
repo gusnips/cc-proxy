@@ -157,6 +157,7 @@ pub struct LiveStreamTranslator {
     web_search_results: Vec<LiveWebSearchResult>,
     deferred_text: Vec<(usize, String)>,
     semantic_output_started: bool,
+    text_output_started: bool,
     // Seeds Claude Code's live subagent counter until the provider returns
     // authoritative usage in the terminal message_delta.
     estimated_input_tokens: u64,
@@ -193,6 +194,7 @@ impl LiveStreamTranslator {
             web_search_results: Vec::new(),
             deferred_text: Vec::new(),
             semantic_output_started: false,
+            text_output_started: false,
             estimated_input_tokens,
             incomplete_response_policy: IncompleteResponsePolicy::Error,
             finished: false,
@@ -272,7 +274,7 @@ impl LiveStreamTranslator {
                 self.tool_delta(payload, traffic, &mut out)?;
             }
             "response.function_call_arguments.done" => {
-                self.tool_arguments_done(payload);
+                self.tool_arguments_done(payload)?;
             }
             "response.output_item.done" => {
                 self.output_item_done(payload, traffic, &mut out)?;
@@ -306,6 +308,28 @@ impl LiveStreamTranslator {
 
     pub fn has_semantic_output(&self) -> bool {
         self.semantic_output_started
+    }
+
+    /// Only thinking may be continued. A consumer can already have acted on
+    /// text or a tool block, including hosted tools waiting for their result.
+    pub(crate) fn can_reconnect(&self) -> bool {
+        !self.finished
+            && !self.text_output_started
+            && !self.saw_tool_use
+            && self.web_search_requests == 0
+            && self.web_searches.is_empty()
+            && self.deferred_text.is_empty()
+            && self.blocks_by_output_index.is_empty()
+    }
+
+    pub(crate) fn prepare_reconnect(&mut self, traffic: Option<&TrafficCapture>) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.close_thinking(traffic, &mut out);
+        self.reasoning_by_output_index.clear();
+        self.item_id_to_output_index.clear();
+        // Preserve the downstream message and next block index. New upstream
+        // indices belong to a new attempt, never to a block already sent.
+        out
     }
 
     pub fn ping_chunk(&mut self, traffic: Option<&TrafficCapture>) -> Vec<u8> {
@@ -570,6 +594,7 @@ impl LiveStreamTranslator {
             return;
         }
         self.semantic_output_started = true;
+        self.text_output_started = true;
 
         let output_index = payload
             .get("output_index")
@@ -734,29 +759,36 @@ impl LiveStreamTranslator {
         Ok(())
     }
 
-    fn tool_arguments_done(&mut self, payload: &serde_json::Value) {
+    fn tool_arguments_done(&mut self, payload: &serde_json::Value) -> Result<(), String> {
         let Some(output_index) = payload
             .get("output_index")
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
         else {
-            return;
+            return Ok(());
         };
         let Some(args) = payload.get("arguments").and_then(|v| v.as_str()) else {
-            return;
+            return Ok(());
         };
         let Some(LiveBlock::Tool {
+            name,
             args_accum,
             buffer_until_done,
             emitted_args,
             ..
         }) = self.blocks_by_output_index.get_mut(&output_index)
         else {
-            return;
+            return Ok(());
         };
+        if args.len() > BUFFERED_TOOL_MAX_ARGS_BYTES {
+            return Err(format!(
+                "Buffered {name} tool arguments exceeded safe limits"
+            ));
+        }
         if *buffer_until_done || !*emitted_args {
             *args_accum = args.to_string();
         }
+        Ok(())
     }
 
     fn output_item_done(
@@ -2158,6 +2190,96 @@ mod tests {
         let second = String::from_utf8(translator.ping_chunk(None)).unwrap();
         assert!(!second.contains("event: message_start"));
         assert_eq!(second.matches("event: ping").count(), 1);
+    }
+
+    #[test]
+    fn arguments_done_rejects_oversized_buffer_before_retaining_it() {
+        let mut translator = LiveStreamTranslator::new("msg_limit", "gpt-5.6-sol");
+        translator.accept(&json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"read-limit","name":"Read"}}), None).unwrap();
+        let error = translator.accept(&json!({"type":"response.function_call_arguments.done","output_index":0,"arguments":"x".repeat(BUFFERED_TOOL_MAX_ARGS_BYTES + 1)}), None).unwrap_err();
+        assert_eq!(error, "Buffered Read tool arguments exceeded safe limits");
+        assert!(
+            matches!(translator.blocks_by_output_index.get(&0), Some(LiveBlock::Tool {args_accum,..}) if args_accum.is_empty())
+        );
+    }
+
+    #[test]
+    fn thinking_reconnect_preserves_signatures_and_monotonic_block_indices() {
+        let mut translator = LiveStreamTranslator::new("message", "gpt-5.6-sol");
+        let mut out = Vec::new();
+        for (id, encrypted) in [("rs_first", "opaque_first"), ("rs_second", "opaque_second")] {
+            out.extend(translator.accept(&json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":id,"encrypted_content":encrypted}}), None).unwrap());
+            out.extend(translator.accept(&json!({"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"thinking"}), None).unwrap());
+            assert!(translator.can_reconnect());
+            out.extend(translator.prepare_reconnect(None));
+        }
+        out.extend(
+            translator
+                .accept(
+                    &json!({"type":"response.output_text.delta","output_index":0,"delta":"answer"}),
+                    None,
+                )
+                .unwrap(),
+        );
+        assert!(!translator.can_reconnect());
+        out.extend(translator.accept(&json!({"type":"response.completed","response":{"status":"completed","usage":{}}}), None).unwrap());
+        let events: Vec<serde_json::Value> = parse_sse_events(&out)
+            .into_iter()
+            .map(|event| serde_json::from_str(&event.data).unwrap())
+            .collect();
+        let indices: Vec<u64> = events
+            .iter()
+            .filter(|event| event["type"] == "content_block_start")
+            .map(|event| event["index"].as_u64().unwrap())
+            .collect();
+        assert_eq!(indices, [0, 1, 2]);
+        let signatures: Vec<_> = events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .pointer("/delta/signature")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(|signature| {
+                super::super::reasoning_signature::decode_reasoning_signature(signature).unwrap()
+            })
+            .collect();
+        assert_eq!(signatures.len(), 2);
+        assert_eq!(signatures[0].id, "rs_first");
+        assert_eq!(signatures[0].encrypted_content, "opaque_first");
+        assert_eq!(signatures[1].id, "rs_second");
+        assert_eq!(signatures[1].encrypted_content, "opaque_second");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "message_start")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn reconnect_rejects_open_text_function_and_hosted_tool_blocks() {
+        for item in [
+            json!({"type":"message","id":"text"}),
+            json!({"type":"function_call","call_id":"call","name":"Bash"}),
+            json!({"type":"web_search_call","id":"search"}),
+        ] {
+            let mut translator = LiveStreamTranslator::new("message", "gpt-5.6-sol");
+            translator
+                .accept(
+                    &json!({"type":"response.output_item.added","output_index":0,"item":item}),
+                    None,
+                )
+                .unwrap();
+            assert!(!translator.can_reconnect());
+        }
+        let mut translator = LiveStreamTranslator::new("message", "gpt-5.6-sol");
+        translator.accept(&json!({"type":"response.output_item.done","item":{"type":"web_search_call","id":"search","action":{"query":"test"}}}), None).unwrap();
+        assert!(
+            !translator.can_reconnect(),
+            "standalone hosted-tool done is committed too"
+        );
     }
 
     #[test]
