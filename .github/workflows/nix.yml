@@ -11,9 +11,14 @@ permissions:
 jobs:
   flake:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v31
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
       - name: Build package
         run: |
           for attempt in 1 2 3 4 5; do
