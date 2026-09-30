@@ -1,13 +1,13 @@
 ---
 title: Grok
-description: Configure grok.com authentication, Grok models, reasoning, function tools, hosted web and X search, citations, and provider overrides.
+description: Sign in to Grok and use its models and search tools in Claude Code.
 ---
 
 Grok uses the Responses endpoint at `https://cli-chat-proxy.grok.com/v1/responses`.
 
 ## Account and authentication
 
-Use a **grok.com account**. Browser login uses S256 PKCE through `auth.x.ai` and an ephemeral loopback callback:
+Sign in with your **grok.com account** in a browser:
 
 ```sh
 cc-proxy grok auth login
@@ -24,7 +24,7 @@ The proxy owns and refreshes its Grok tokens. It does not read `~/.grok/auth.jso
 
 ## Models
 
-The registered IDs are `grok-composer-2.5-fast`, `grok-4.5`, and `grok-4.6`. Account and regional access can vary. Use the same concrete Grok ID for `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL`.
+The catalog includes `grok-composer-2.5-fast`, `grok-4.5`, `grok-4.6`, and `grok-4.7`. Run `cc-proxy models` for the current list. Access depends on your account and region. Set `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` to the same Grok ID.
 
 ```sh
 ANTHROPIC_MODEL=grok-4.6 \
@@ -38,18 +38,19 @@ Grok 4.5 and Grok 4.6 have a 500,000 token context window. Claude Code treats un
 
 The proxy translates Claude messages, function tools, tool results, thinking controls, token usage, and streaming events. Grok reasoning text appears as Claude Code thinking blocks. Grok supports `none`, `low`, `medium`, and `high` effort levels. `xhigh` is forwarded for `grok-4.6`; higher compatibility levels are mapped to the highest supported Grok level for other registered models.
 
-Search reaches Grok-native tools when the caller asks for it:
+Grok can run web and X searches:
 
-- Anthropic's `web_search_20250305` declaration maps to Grok hosted web search.
-  `allowed_domains` or `blocked_domains` maps to native filters, with up to five
-  domains in one list. Do not set both lists. `user_location` supports an
+- `web_search_20250305` uses Grok's web search. The proxy sends
+  `allowed_domains` or `blocked_domains` as native filters, with up to five
+  domains in one list. Do not set both lists. `user_location` accepts an
   `approximate` location with `city`, `region`, `country`, and `timezone`.
-- A caller-managed search tool remains a function tool for the caller to run.
-- An X or Twitter query is additionally offered hosted `x_search`, which the
-  model can use or ignore alongside the caller's tools.
-- Citations and search usage return in Anthropic-compatible usage fields.
-- `CCP_GROK_HOSTED_SEARCH=1` enables a policy where hosted tools replace caller
-  search tools and explicit search turns require a tool call.
+- A normal search function stays in your app. Grok returns the function call;
+  your app runs it.
+- For X or Twitter requests, the proxy also offers Grok's `x_search`. The model
+  can use it or your app's tools.
+- The proxy includes citations and search counts in the response usage.
+- `CCP_GROK_HOSTED_SEARCH=1` uses Grok's search tools instead of your app's search
+  functions. Explicit search requests require a tool call.
 
 A hosted search is reported as a text block naming the query.
 `CCP_GROK_SEARCH_BLOCKS=native` preserves `server_tool_use` plus
@@ -102,4 +103,7 @@ Grok hosted web search has no equivalent for Anthropic's `max_uses`. The proxy
 accepts and omits a valid positive integer or null, so it does not limit how
 many hosted search calls the model can make.
 
-A successful login does not guarantee every model is enabled for the account or region. Model rejection and upstream errors are surfaced to Claude Code. Use `grok auth status` for token state, inspect the failed request in the monitor, and use the structured log or error capture for the full redacted response.
+Signing in does not mean every model is available. If Grok rejects a request,
+Claude Code shows the error. Run `cc-proxy grok auth status` to check your login,
+then inspect the failed request in the monitor. Use the log and error capture
+for response details. The proxy hides known credential fields.
