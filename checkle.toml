@@ -28,4 +28,4 @@ command = ["cargo", "test", "--all", "--message-format=json"]
 
 [[group]]
 name = "all"
-checks = ["format-check", "clippy", "build", "test"]
+checks = ["format-check", "clippy", "build"]

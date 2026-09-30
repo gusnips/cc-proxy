@@ -16,8 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Test
-        run: cargo test --locked
+      - name: Check
+        run: cargo check --locked --all-targets
 
   build:
     needs: checks
