@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+build_root="${CUA_SANDBOX_BUILD_DIR:-$HOME/.cache/cua-sandbox/cc-proxy/arm64}"
+rust_image="${CUA_SANDBOX_RUST_IMAGE:-rust:1.96-bookworm}"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/cua-monitor-demo <session>
+
+Build the current working tree for ARM64 Linux, deploy it to a running CuaBot
+session, and open the proxy demo in Kitty.
+USAGE
+}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'missing required command: %s\n' "$1" >&2
+    exit 1
+  fi
+}
+
+materialize_worktree() {
+  local destination="$1"
+  git -C "$repo_root" archive HEAD | tar -x -C "$destination"
+
+  while IFS= read -r -d '' path; do
+    rm -rf "${destination:?}/$path"
+  done < <(git -C "$repo_root" diff HEAD --name-only --diff-filter=D -z)
+
+  while IFS= read -r -d '' path; do
+    if [[ -f "$repo_root/$path" ]]; then
+      mkdir -p "$destination/$(dirname "$path")"
+      cp -p "$repo_root/$path" "$destination/$path"
+    fi
+  done < <(
+    {
+      git -C "$repo_root" diff HEAD --name-only --diff-filter=ACMRTUXB -z
+      git -C "$repo_root" ls-files --others --exclude-standard -z
+    }
+  )
+}
+
+if [[ "${1:-}" == "help" || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+if [[ "$#" -ne 1 ]]; then
+  usage >&2
+  exit 1
+fi
+
+session="$1"
+if [[ ! "$session" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+  echo "invalid session name: $session" >&2
+  exit 1
+fi
+
+require_command cua-sandbox
+require_command docker
+require_command git
+require_command tar
+
+container="$(cua-sandbox container "$session")"
+if [[ "$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)" != "running" ]]; then
+  echo "sandbox container is not running: $container" >&2
+  echo "Start it in another terminal with: cua-sandbox start $session" >&2
+  exit 1
+fi
+
+source_dir="$(mktemp -d)"
+trap 'rm -rf "$source_dir"' EXIT
+materialize_worktree "$source_dir"
+mkdir -p "$build_root/target" "$build_root/cargo-registry" "$build_root/cargo-git"
+
+docker run --rm \
+  --platform linux/arm64 \
+  -v "$source_dir:/src" \
+  -v "$build_root/target:/src/target" \
+  -v "$build_root/cargo-registry:/usr/local/cargo/registry" \
+  -v "$build_root/cargo-git:/usr/local/cargo/git" \
+  -w /src \
+  "$rust_image" \
+  cargo build --locked
+
+remote_dir="/home/user/cc-proxy-run"
+docker cp "$build_root/target/debug/cc-proxy" \
+  "$container:/tmp/cc-proxy-built"
+docker exec -u user "$container" sh -lc "
+  set -eu
+  mkdir -p '$remote_dir/state'
+  cp /tmp/cc-proxy-built '$remote_dir/cc-proxy'
+  chmod 755 '$remote_dir/cc-proxy'
+"
+docker exec -u root "$container" rm -f /tmp/cc-proxy-built
+
+docker exec -d -u user -e DISPLAY=:100 "$container" \
+  kitty \
+  --title 'Claude Code Proxy Demo' \
+  --override 'font_family=JetBrainsMono Nerd Font Mono' \
+  --override font_size=11 \
+  --override background='#0b0f14' \
+  --override foreground='#d8dee9' \
+  --override cursor='#88c0d0' \
+  --override selection_background='#434c5e' \
+  --override remember_window_size=no \
+  --override initial_window_width=1200 \
+  --override initial_window_height=650 \
+  sh -lc "
+    cd '$remote_dir'
+    XDG_STATE_HOME='$remote_dir/state' ./cc-proxy demo
+  "
+
+echo "Opened cc-proxy demo in session: $session"

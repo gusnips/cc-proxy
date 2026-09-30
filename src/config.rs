@@ -1,0 +1,2084 @@
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::paths;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AliasProvider {
+    Codex,
+    Kimi,
+}
+
+impl AliasProvider {
+    pub fn as_str(&self) -> &str {
+        match self {
+            AliasProvider::Codex => "codex",
+            AliasProvider::Kimi => "kimi",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedConfig {
+    pub bind_address: String,
+    pub port: u16,
+    pub alias_provider: AliasProvider,
+    pub log_verbose: bool,
+    pub log_stderr: bool,
+    pub config_dir: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct FileConfig {
+    #[serde(rename = "bindAddress")]
+    pub bind_address: Option<String>,
+    pub port: Option<u16>,
+    #[serde(rename = "aliasProvider")]
+    pub alias_provider: Option<String>,
+    #[serde(rename = "autoReviewModel")]
+    pub auto_review_model: Option<String>,
+    #[serde(rename = "autoReviewEffort")]
+    pub auto_review_effort: Option<String>,
+    pub log: Option<FileLog>,
+    pub kimi: Option<KimiConfig>,
+    pub codex: Option<CodexConfig>,
+    pub cursor: Option<CursorConfig>,
+    pub grok: Option<GrokConfig>,
+    pub opencode: Option<OpenCodeConfig>,
+    pub glm: Option<GlmConfig>,
+}
+
+#[derive(Deserialize, Clone)]
+struct CodexConfig {
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+    #[serde(rename = "originator")]
+    pub originator: Option<String>,
+    #[serde(rename = "userAgent")]
+    pub user_agent: Option<String>,
+    #[serde(rename = "previousResponseId")]
+    pub previous_response_id: Option<bool>,
+    #[serde(rename = "fullLane")]
+    pub full_lane: Option<bool>,
+    #[serde(rename = "serverCompaction")]
+    pub server_compaction: Option<bool>,
+    #[serde(rename = "responsesApi")]
+    pub responses_api: Option<bool>,
+    #[serde(rename = "imagesApi")]
+    pub images_api: Option<bool>,
+    #[serde(rename = "imagesBaseUrl")]
+    pub images_base_url: Option<String>,
+    #[serde(rename = "transcriptionsApi")]
+    pub transcriptions_api: Option<bool>,
+    #[serde(rename = "serviceTier")]
+    pub service_tier: Option<String>,
+    #[serde(rename = "reasoningSummary")]
+    pub reasoning_summary: Option<String>,
+    #[serde(rename = "reasoningSignatures")]
+    pub reasoning_signatures: Option<String>,
+    #[serde(rename = "effort")]
+    pub effort: Option<String>,
+    #[serde(rename = "model")]
+    pub model: Option<String>,
+    pub transport: Option<String>,
+    #[serde(rename = "headerTimeoutMs")]
+    pub header_timeout_ms: Option<u64>,
+    #[serde(rename = "websocketConnectSpacingMs")]
+    pub websocket_connect_spacing_ms: Option<u64>,
+}
+
+#[derive(Deserialize, Clone)]
+struct CursorConfig {
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+    #[serde(rename = "clientVersion")]
+    pub client_version: Option<String>,
+    #[serde(rename = "agentBundle")]
+    pub agent_bundle: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct KimiConfig {
+    #[serde(rename = "userAgent")]
+    pub user_agent: Option<String>,
+    #[serde(rename = "oauthHost")]
+    pub oauth_host: Option<String>,
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct GrokConfig {
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+    #[serde(rename = "clientVersion")]
+    pub client_version: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct OpenCodeConfig {
+    #[serde(rename = "apiKey")]
+    pub api_key: Option<String>,
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct GlmConfig {
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FileLog {
+    pub verbose: Option<bool>,
+    pub stderr: Option<bool>,
+}
+
+fn parse_alias(raw: &str) -> Option<AliasProvider> {
+    match raw {
+        "codex" => Some(AliasProvider::Codex),
+        "kimi" => Some(AliasProvider::Kimi),
+        _ => None,
+    }
+}
+
+fn read_file_config(config_dir: &Path) -> Option<FileConfig> {
+    read_file_config_with_legacy(
+        config_dir,
+        &paths::legacy_config_dir(&paths::DirResolverEnv::default()),
+    )
+}
+
+fn read_file_config_with_legacy(config_dir: &Path, legacy_dir: &Path) -> Option<FileConfig> {
+    if let Ok(raw) = fs::read_to_string(config_dir.join("config.json"))
+        && let Ok(parsed) = serde_json::from_str(&raw)
+    {
+        return Some(parsed);
+    }
+    // Fallback to the pre-fork config dir so existing checkouts keep working.
+    if legacy_dir != config_dir {
+        let raw = fs::read_to_string(legacy_dir.join("config.json")).ok()?;
+        return serde_json::from_str(&raw).ok();
+    }
+    None
+}
+
+pub fn load_config() -> LoadedConfig {
+    let env = paths::DirResolverEnv::default();
+    let config_dir = paths::resolve_config_dir(&env);
+    load_config_from_env(&env.env, config_dir)
+}
+
+pub fn load_config_for_env(env: &HashMap<String, String>) -> LoadedConfig {
+    let home = env
+        .get("HOME")
+        .or_else(|| env.get("USERPROFILE"))
+        .cloned()
+        .unwrap_or_else(|| "/".to_string());
+    let resolver_env = paths::DirResolverEnv {
+        platform: std::env::consts::OS.to_string(),
+        env: env.clone(),
+        home,
+    };
+    let config_dir = paths::resolve_config_dir(&resolver_env);
+    load_config_from_env(env, config_dir)
+}
+
+fn load_config_from_env(env: &HashMap<String, String>, config_dir: PathBuf) -> LoadedConfig {
+    let file = read_file_config_with_legacy(&config_dir, &legacy_dir_for_env(env));
+
+    let mut out = LoadedConfig {
+        bind_address: "127.0.0.1".to_string(),
+        port: 18765,
+        alias_provider: AliasProvider::Codex,
+        log_verbose: false,
+        log_stderr: false,
+        config_dir: config_dir.clone(),
+    };
+
+    if let Some(raw) = env.get("CCP_BIND_ADDRESS") {
+        out.bind_address = raw.clone();
+    } else if let Some(bind_address) = file.as_ref().and_then(|f| f.bind_address.clone()) {
+        out.bind_address = bind_address;
+    }
+
+    if let Some(raw) = env.get("CCP_ALIAS_PROVIDER") {
+        if let Some(alias) = parse_alias(raw) {
+            out.alias_provider = alias;
+        }
+    } else if let Some(alias_provider) = file
+        .as_ref()
+        .and_then(|f| f.alias_provider.as_deref())
+        .and_then(parse_alias)
+    {
+        out.alias_provider = alias_provider;
+    }
+
+    if let Some(raw) = env.get("PORT") {
+        if let Ok(port) = raw.parse::<u16>() {
+            out.port = port;
+        }
+    } else if let Some(port) = file.as_ref().and_then(|f| f.port) {
+        out.port = port;
+    }
+
+    if env.contains_key("CCP_LOG_VERBOSE") {
+        out.log_verbose = true;
+    } else if let Some(value) = file
+        .as_ref()
+        .and_then(|f| f.log.as_ref().and_then(|v| v.verbose))
+    {
+        out.log_verbose = value;
+    }
+
+    if env.contains_key("CCP_LOG_STDERR") {
+        out.log_stderr = true;
+    } else if let Some(value) = file
+        .as_ref()
+        .and_then(|f| f.log.as_ref().and_then(|v| v.stderr))
+    {
+        out.log_stderr = value;
+    }
+
+    out
+}
+
+fn legacy_dir_for_env(env: &HashMap<String, String>) -> PathBuf {
+    let home = env
+        .get("HOME")
+        .or_else(|| env.get("USERPROFILE"))
+        .map(String::as_str)
+        .unwrap_or("/");
+    paths::legacy_config_dir_for_home(home)
+}
+
+pub fn config_path() -> PathBuf {
+    paths::config_dir().join("config.json")
+}
+
+pub fn port() -> u16 {
+    load_config().port
+}
+
+pub fn bind_address() -> String {
+    load_config().bind_address
+}
+
+pub fn alias_provider() -> AliasProvider {
+    load_config().alias_provider
+}
+
+pub fn log_verbose() -> bool {
+    load_config().log_verbose
+}
+
+pub fn log_stderr() -> bool {
+    load_config().log_stderr
+}
+
+pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
+    let file = read_file_config(&cfg.config_dir);
+    let env: HashMap<_, _> = std::env::vars().collect();
+    let mut out = Vec::new();
+    if env.contains_key("CCP_BIND_ADDRESS") {
+        out.push("bindAddress (env)".to_string());
+    }
+    if env.contains_key("PORT") {
+        out.push("port (env)".to_string());
+    }
+    if env.contains_key("CCP_ALIAS_PROVIDER") {
+        out.push("aliasProvider (env)".to_string());
+    }
+    if env.contains_key("CCP_LOG_VERBOSE") {
+        out.push("log.verbose (env)".to_string());
+    }
+    if env.contains_key("CCP_LOG_STDERR") {
+        out.push("log.stderr (env)".to_string());
+    }
+    if env.contains_key("CCP_CODEX_RESPONSES_API") {
+        out.push("codex.responsesApi (env)".to_string());
+    }
+    if env.contains_key("CCP_CODEX_IMAGES_API") {
+        out.push("codex.imagesApi (env)".to_string());
+    }
+    if env.contains_key("CCP_CODEX_IMAGES_BASE_URL") {
+        out.push("codex.imagesBaseUrl (env)".to_string());
+    }
+    if env.contains_key("CCP_CODEX_TRANSCRIPTIONS_API") {
+        out.push("codex.transcriptionsApi (env)".to_string());
+    }
+    if env.contains_key("CCP_KIMI_OAUTH_HOST") {
+        out.push("kimi.oauthHost (env)".to_string());
+    }
+    if env.contains_key("CCP_KIMI_BASE_URL") {
+        out.push("kimi.baseUrl (env)".to_string());
+    }
+    if env.contains_key("CCP_GLM_BASE_URL") {
+        out.push("glm.baseUrl (env)".to_string());
+    }
+    if env.contains_key("CCP_CURSOR_BASE_URL") {
+        out.push("cursor.baseUrl (env)".to_string());
+    }
+    if env.contains_key("CCP_CURSOR_CLIENT_VERSION") {
+        out.push("cursor.clientVersion (env)".to_string());
+    }
+    if env.contains_key("CCP_KIMI_USER_AGENT") {
+        out.push("kimi.userAgent (env)".to_string());
+    }
+    if env.contains_key("CCP_GROK_BASE_URL") {
+        out.push("grok.baseUrl (env)".to_string());
+    }
+    if env.contains_key("CCP_GROK_CLIENT_VERSION") {
+        out.push("grok.clientVersion (env)".to_string());
+    }
+    if env.contains_key("CCP_OPENCODE_API_KEY") {
+        out.push("opencode.apiKey (env)".to_string());
+    } else if env.contains_key("OPENCODE_API_KEY") {
+        out.push("opencode.apiKey (OpenCode env)".to_string());
+    }
+    if env.contains_key("CCP_OPENCODE_BASE_URL") {
+        out.push("opencode.baseUrl (env)".to_string());
+    }
+    if env
+        .get("CCP_CODEX_REASONING_SUMMARY")
+        .is_some_and(|raw| !raw.is_empty())
+    {
+        out.push("CCP_CODEX_REASONING_SUMMARY (env)".to_string());
+    }
+    if env.contains_key("CCP_CODEX_SERVER_COMPACTION") {
+        out.push("CCP_CODEX_SERVER_COMPACTION (env)".to_string());
+    }
+    if env
+        .get("CCP_AUTO_REVIEW_MODEL")
+        .is_some_and(|raw| !raw.is_empty())
+    {
+        out.push("CCP_AUTO_REVIEW_MODEL (env)".to_string());
+    }
+    if env
+        .get("CCP_AUTO_REVIEW_EFFORT")
+        .is_some_and(|raw| !raw.is_empty())
+    {
+        out.push("CCP_AUTO_REVIEW_EFFORT (env)".to_string());
+    }
+    if env
+        .get("CCP_CODEX_REASONING_SIGNATURES")
+        .is_some_and(|raw| !raw.is_empty())
+    {
+        out.push("CCP_CODEX_REASONING_SIGNATURES (env)".to_string());
+    }
+    if let Some(file_cfg) = file {
+        if let Some(bind_address) = file_cfg.bind_address {
+            out.push(format!("bindAddress: {bind_address}"));
+        }
+        if let Some(p) = file_cfg.port {
+            out.push(format!("port: {p}"));
+        }
+        if let Some(alias) = file_cfg.alias_provider {
+            out.push(format!("aliasProvider: {alias}"));
+        }
+        if file_cfg
+            .auto_review_model
+            .is_some_and(|model| !model.is_empty())
+        {
+            out.push("autoReviewModel (config)".to_string());
+        }
+        if file_cfg
+            .auto_review_effort
+            .is_some_and(|effort| !effort.is_empty())
+        {
+            out.push("autoReviewEffort (config)".to_string());
+        }
+        if let Some(log) = file_cfg.log {
+            if let Some(v) = log.verbose {
+                out.push(format!("log.verbose: {v}"));
+            }
+            if let Some(v) = log.stderr {
+                out.push(format!("log.stderr: {v}"));
+            }
+        }
+        if let Some(opencode) = file_cfg.opencode {
+            if opencode.api_key.is_some_and(|raw| !raw.is_empty()) {
+                out.push("opencode.apiKey (config)".to_string());
+            }
+            if let Some(url) = opencode.base_url.filter(|raw| !raw.is_empty()) {
+                out.push(format!("opencode.baseUrl: {url}"));
+            }
+        }
+        if let Some(codex) = file_cfg.codex {
+            if codex
+                .reasoning_summary
+                .is_some_and(|value| !value.is_empty())
+            {
+                out.push("codex.reasoningSummary (config)".to_string());
+            }
+            if codex
+                .reasoning_signatures
+                .is_some_and(|value| !value.is_empty())
+            {
+                out.push("codex.reasoningSignatures (config)".to_string());
+            }
+            if let Some(enabled) = codex.server_compaction {
+                out.push(format!("codex.serverCompaction: {enabled}"));
+            }
+            if codex.responses_api == Some(true) {
+                out.push("codex.responsesApi: true".to_string());
+            }
+            if codex.images_api == Some(true) {
+                out.push("codex.imagesApi: true".to_string());
+            }
+            if codex.images_base_url.is_some() {
+                out.push("codex.imagesBaseUrl (config)".to_string());
+            }
+            if codex.transcriptions_api == Some(true) {
+                out.push("codex.transcriptionsApi: true".to_string());
+            }
+            if let Some(ms) = codex.header_timeout_ms {
+                out.push(format!("codex.headerTimeoutMs: {ms}"));
+            }
+        }
+    }
+    out
+}
+
+pub fn grok_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_GROK_BASE_URL") {
+        return raw.clone();
+    }
+    if let Some(grok) = read_file_config(&paths::config_dir()).and_then(|f| f.grok)
+        && let Some(url) = grok.base_url
+    {
+        return url;
+    }
+    "https://cli-chat-proxy.grok.com/v1".to_string()
+}
+
+pub fn grok_client_version() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_GROK_CLIENT_VERSION") {
+        return raw.clone();
+    }
+    if let Some(grok) = read_file_config(&paths::config_dir()).and_then(|f| f.grok)
+        && let Some(version) = grok.client_version
+    {
+        return version;
+    }
+    "0.2.93".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Grok tool-image policy (CCP_GROK_TOOL_IMAGE)
+// ---------------------------------------------------------------------------
+
+/// How the Grok translator treats Anthropic `image` blocks (tool results and
+/// top-level user messages). `omit` is the safe default: degrade to the L1
+/// placeholder string. `reattach` keeps the placeholder in the tool output and
+/// additionally appends a user message carrying the images as `input_image`
+/// data URLs. `inline` sends the tool output itself as an array of
+/// `input_text` + `input_image` parts (string-only outputs still serialize as
+/// plain strings). `reject` restores the pre-L1 hard error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrokToolImageMode {
+    Omit,
+    Reattach,
+    Inline,
+    Reject,
+}
+
+pub fn parse_grok_tool_image_mode(raw: Option<&str>) -> GrokToolImageMode {
+    match raw.map(str::trim) {
+        Some("reattach") => GrokToolImageMode::Reattach,
+        Some("inline") => GrokToolImageMode::Inline,
+        Some("reject") => GrokToolImageMode::Reject,
+        // Any unknown/empty value degrades to the safe default.
+        _ => GrokToolImageMode::Omit,
+    }
+}
+
+pub fn grok_tool_image_mode() -> GrokToolImageMode {
+    parse_grok_tool_image_mode(std::env::var("CCP_GROK_TOOL_IMAGE").ok().as_deref())
+}
+
+/// Warn once at startup when an unknown mode was requested. Called from the
+/// Grok provider constructor rather than per request.
+pub fn warn_grok_tool_image_mode_once(log: &crate::logging::Logger) {
+    match std::env::var("CCP_GROK_TOOL_IMAGE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(other) if !matches!(other, "" | "omit" | "reattach" | "inline" | "reject") => {
+            let mut fields = serde_json::Map::new();
+            fields.insert(
+                "value".to_string(),
+                serde_json::Value::String(other.to_string()),
+            );
+            log.warn(
+                "unrecognized CCP_GROK_TOOL_IMAGE value; falling back to omit",
+                Some(fields),
+            );
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Grok hosted-search policy (CCP_GROK_HOSTED_SEARCH)
+// ---------------------------------------------------------------------------
+
+/// Whether the Grok translator replaces caller search tools with xAI-hosted
+/// search and requires hosted tool use on explicit search turns.
+///
+/// The disabled policy preserves caller tools, instructions, and tool choice.
+/// It adds `x_search` only to X-specific turns because the caller has no
+/// equivalent access to xAI's X index.
+///
+/// The enabled policy favors xAI-hosted search and citations. Hosted tools
+/// replace caller search implementations, matching turns receive search
+/// guidance, and explicit search turns use `tool_choice: required`.
+///
+/// Set `CCP_GROK_HOSTED_SEARCH` to `1`, `on`, or `true` to enable this policy.
+pub fn parse_grok_hosted_search(raw: Option<&str>) -> bool {
+    matches!(raw.map(str::trim), Some("1" | "on" | "true"))
+}
+
+pub fn grok_hosted_search() -> bool {
+    parse_grok_hosted_search(std::env::var("CCP_GROK_HOSTED_SEARCH").ok().as_deref())
+}
+
+// ---------------------------------------------------------------------------
+// Grok hosted-search block shape (CCP_GROK_SEARCH_BLOCKS)
+// ---------------------------------------------------------------------------
+
+/// How a hosted search that xAI ran is reported to the client.
+///
+/// `Text` projects the search query into a standard `text` block.
+///
+/// `Native` preserves the Anthropic server-tool shape: `server_tool_use`
+/// followed by `web_search_tool_result` or `x_search_tool_result`. Select this
+/// shape for clients that consume hosted-tool blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrokSearchBlocks {
+    Text,
+    Native,
+}
+
+pub fn parse_grok_search_blocks(raw: Option<&str>) -> GrokSearchBlocks {
+    match raw.map(str::trim) {
+        Some("native") => GrokSearchBlocks::Native,
+        // Text is the compatibility-safe fallback for empty or unknown values.
+        _ => GrokSearchBlocks::Text,
+    }
+}
+
+pub fn grok_search_blocks() -> GrokSearchBlocks {
+    parse_grok_search_blocks(std::env::var("CCP_GROK_SEARCH_BLOCKS").ok().as_deref())
+}
+
+struct ResolvedOpenCodeConfig {
+    api_key: Option<String>,
+    api_key_source: Option<&'static str>,
+    base_url: String,
+}
+
+fn resolve_opencode_config(
+    env: &HashMap<String, String>,
+    config_dir: &Path,
+) -> ResolvedOpenCodeConfig {
+    let file = read_file_config_with_legacy(config_dir, &legacy_dir_for_env(env))
+        .and_then(|file| file.opencode);
+    let file_key = file
+        .as_ref()
+        .and_then(|config| config.api_key.as_ref())
+        .filter(|value| !value.is_empty());
+    let (api_key, api_key_source) = if let Some(value) = env
+        .get("CCP_OPENCODE_API_KEY")
+        .filter(|value| !value.is_empty())
+    {
+        (Some(value.clone()), Some("CCP_OPENCODE_API_KEY"))
+    } else if let Some(value) = env
+        .get("OPENCODE_API_KEY")
+        .filter(|value| !value.is_empty())
+    {
+        (Some(value.clone()), Some("OPENCODE_API_KEY"))
+    } else if let Some(value) = file_key {
+        (Some(value.clone()), Some("config.json"))
+    } else if let Some((value, source)) = claude_settings_opencode_key(env) {
+        (Some(value), Some(source))
+    } else {
+        (None, None)
+    };
+    let base_url = env
+        .get("CCP_OPENCODE_BASE_URL")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| {
+            file.as_ref()
+                .and_then(|config| config.base_url.as_ref())
+                .filter(|value| !value.is_empty())
+                .cloned()
+        })
+        .unwrap_or_else(|| "https://opencode.ai/zen/go/v1".to_string());
+
+    ResolvedOpenCodeConfig {
+        api_key,
+        api_key_source,
+        base_url,
+    }
+}
+
+/// Last-resort OpenCode key: Claude Code's own settings files sometimes carry
+/// `OPENCODE_API_KEY` under their `env` block. Ours (env vars, then
+/// `config.json`) always wins; this only fills the gap when nothing of ours
+/// is set, so a key the user already pasted for Claude Code keeps working
+/// without pasting it a second time for the proxy.
+fn claude_settings_opencode_key(env: &HashMap<String, String>) -> Option<(String, &'static str)> {
+    let home = env
+        .get("HOME")
+        .or_else(|| env.get("USERPROFILE"))
+        .map(String::as_str)
+        .filter(|home| !home.is_empty())?;
+    for file in ["settings.json", ".claude.json"] {
+        let path = Path::new(home).join(".claude").join(file);
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let root: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(root) => root,
+            Err(_) => continue,
+        };
+        let key = root
+            .get("env")
+            .and_then(|env| env.get("OPENCODE_API_KEY"))
+            .and_then(|key| key.as_str())
+            .filter(|key| !key.is_empty());
+        if let Some(key) = key {
+            return Some((key.to_string(), "claude-settings"));
+        }
+    }
+    None
+}
+
+/// Persist an OpenCode API key to `opencode.apiKey` in config.json,
+/// preserving every other key in the file. Merges over the legacy config
+/// when no current file exists yet, so saving a key never shadows the rest
+/// of a pre-fork setup. Returns the file written.
+pub fn save_opencode_api_key(key: &str) -> anyhow::Result<PathBuf> {
+    let dir = paths::config_dir();
+    let mut root = if dir.join("config.json").exists() {
+        match read_config_json_at(&dir) {
+            Ok(root) if root.is_object() => root,
+            _ => serde_json::json!({}),
+        }
+    } else {
+        let legacy = paths::legacy_config_dir(&paths::DirResolverEnv::default());
+        let merged = if legacy != dir {
+            read_config_json_at(&legacy).unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+        if merged.is_object() {
+            merged
+        } else {
+            serde_json::json!({})
+        }
+    };
+    root["opencode"]["apiKey"] = serde_json::Value::String(key.to_string());
+    write_config_json_at(&dir, &root)
+}
+
+/// Remove `opencode.apiKey` from config.json. Returns true when a key was
+/// present. Environment-provided keys are untouched by design.
+pub fn clear_opencode_api_key() -> anyhow::Result<bool> {
+    let dir = paths::config_dir();
+    let root = match read_config_json_at(&dir) {
+        Ok(root) => root,
+        Err(_) => return Ok(false),
+    };
+    let mut root = match root {
+        serde_json::Value::Object(_) => root,
+        _ => return Ok(false),
+    };
+    let removed = root
+        .get("opencode")
+        .and_then(|opencode| opencode.get("apiKey"))
+        .is_some();
+    if removed
+        && let Some(opencode) = root.get_mut("opencode")
+        && let Some(map) = opencode.as_object_mut()
+    {
+        map.remove("apiKey");
+        if map.is_empty() {
+            root.as_object_mut().map(|root| root.remove("opencode"));
+        }
+        write_config_json_at(&dir, &root)?;
+    }
+    Ok(removed)
+}
+
+/// Read a config directory's config.json as an untyped document.
+/// A missing file reads as an empty object; a corrupt file is an error
+/// naming the path.
+pub(crate) fn read_config_json_at(dir: &Path) -> anyhow::Result<serde_json::Value> {
+    let path = dir.join("config.json");
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw)
+            .map_err(|err| anyhow::anyhow!("invalid config at {}: {err}", path.display())),
+        Err(_) => Ok(serde_json::json!({})),
+    }
+}
+
+/// Write an untyped document to a config directory's config.json,
+/// creating the directory. Returns the file written.
+pub(crate) fn write_config_json_at(
+    dir: &Path,
+    root: &serde_json::Value,
+) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("config.json");
+    std::fs::write(&path, serde_json::to_string_pretty(root)?)?;
+    Ok(path)
+}
+
+pub fn opencode_api_key() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    resolve_opencode_config(&env, &paths::config_dir()).api_key
+}
+
+pub fn opencode_api_key_source() -> Option<&'static str> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    resolve_opencode_config(&env, &paths::config_dir()).api_key_source
+}
+
+pub fn opencode_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    resolve_opencode_config(&env, &paths::config_dir()).base_url
+}
+
+pub fn is_verbose() -> bool {
+    log_verbose()
+}
+
+pub fn kimi_oauth_host() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_KIMI_OAUTH_HOST") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(kimi) = file.kimi
+        && let Some(host) = kimi.oauth_host
+    {
+        return host;
+    }
+    "https://auth.kimi.com".to_string()
+}
+
+pub fn kimi_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_KIMI_BASE_URL") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(kimi) = file.kimi
+        && let Some(url) = kimi.base_url
+    {
+        return url;
+    }
+    "https://api.kimi.com/coding/v1".to_string()
+}
+
+pub fn glm_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_GLM_BASE_URL") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(glm) = file.glm
+        && let Some(url) = glm.base_url
+    {
+        return url;
+    }
+    "https://api.z.ai/api/anthropic".to_string()
+}
+
+pub fn kimi_user_agent(default: &str) -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_KIMI_USER_AGENT") {
+        return raw.clone();
+    }
+    if let Some(raw) = env.get("CCP_USER_AGENT") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(kimi) = file.kimi
+        && let Some(ua) = kimi.user_agent
+    {
+        return ua;
+    }
+    default.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Codex config
+// ---------------------------------------------------------------------------
+
+pub fn codex_base_url(default: &str) -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_BASE_URL") {
+        return raw.clone();
+    }
+    if let Some(raw) = env.get("CLAUDE_CODE_PROXY_CODEX_BASE_URL") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(url) = codex.base_url
+    {
+        return url;
+    }
+    default.to_string()
+}
+
+pub fn codex_originator(default: &str) -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_ORIGINATOR") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(val) = codex.originator
+    {
+        return val;
+    }
+    default.to_string()
+}
+
+pub fn codex_user_agent(default: &str) -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_USER_AGENT") {
+        return raw.clone();
+    }
+    if let Some(raw) = env.get("CCP_USER_AGENT") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(ua) = codex.user_agent
+    {
+        return ua;
+    }
+    default.to_string()
+}
+
+/// Optional path to a fleet quota-state file for the codex provider, in the 5-field
+/// sampler format `<pct_5h>|<resets_5h_iso>|<pct_7d>|<resets_7d_iso>|<epoch_secs>` (percents
+/// are USED-side integers). When set and fresh, a 429 from upstream is checked against it:
+/// an exhausted window means every retry inside the window is guaranteed to fail, so the
+/// proxy fails fast with an explicit message and a Retry-After instead of walking the
+/// transient-429 backoff ladder (measured cost of the ladder on a quota wall: 13s buffered,
+/// ~165s live-stream — per request, multiplied by the client's own retries).
+pub fn codex_quota_state_file() -> Option<std::path::PathBuf> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_QUOTA_STATE_FILE") {
+        if raw.trim().is_empty() {
+            return None;
+        }
+        return Some(std::path::PathBuf::from(raw));
+    }
+    None
+}
+
+pub fn codex_previous_response_id() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_PREVIOUS_RESPONSE_ID") {
+        return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(val) = codex.previous_response_id
+    {
+        return val;
+    }
+    false
+}
+
+pub fn codex_server_compaction() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_SERVER_COMPACTION") {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {}
+        }
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(enabled) = codex.server_compaction
+    {
+        return enabled;
+    }
+    false
+}
+
+pub fn codex_responses_api() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_RESPONSES_API") {
+        return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(enabled) = codex.responses_api
+    {
+        return enabled;
+    }
+    false
+}
+
+pub fn codex_images_api() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_IMAGES_API") {
+        return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(enabled) = codex.images_api
+    {
+        return enabled;
+    }
+    false
+}
+
+pub fn codex_transcriptions_api() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_TRANSCRIPTIONS_API") {
+        return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(enabled) = codex.transcriptions_api
+    {
+        return enabled;
+    }
+    false
+}
+
+pub fn codex_images_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_IMAGES_BASE_URL") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(url) = codex.images_base_url
+    {
+        return url;
+    }
+    "https://chatgpt.com/backend-api/codex".to_string()
+}
+
+pub fn codex_service_tier() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_SERVICE_TIER") {
+        return Some(raw.clone());
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+    {
+        return codex.service_tier;
+    }
+    None
+}
+
+pub fn codex_effort() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_EFFORT") {
+        return Some(raw.clone());
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+    {
+        return codex.effort;
+    }
+    None
+}
+
+pub fn codex_full_lane() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_FULL_LANE") {
+        return raw == "1" || raw == "true";
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+    {
+        return codex.full_lane.unwrap_or(false);
+    }
+    false
+}
+
+pub fn codex_reasoning_summary() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env
+        .get("CCP_CODEX_REASONING_SUMMARY")
+        .filter(|raw| !raw.is_empty())
+    {
+        return Some(raw.clone());
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(summary) = codex.reasoning_summary.filter(|raw| !raw.is_empty())
+    {
+        return Some(summary);
+    }
+    None
+}
+
+pub fn codex_reasoning_signatures_enabled() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env
+        .get("CCP_CODEX_REASONING_SIGNATURES")
+        .filter(|raw| !raw.is_empty())
+    {
+        return reasoning_signatures_enabled(raw);
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(signatures) = codex.reasoning_signatures.filter(|raw| !raw.is_empty())
+    {
+        return reasoning_signatures_enabled(&signatures);
+    }
+    true
+}
+
+fn reasoning_signatures_enabled(raw: &str) -> bool {
+    !matches!(raw, "off" | "none" | "false" | "0")
+}
+
+pub fn codex_model() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_MODEL") {
+        return Some(raw.clone());
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+    {
+        return codex.model;
+    }
+    None
+}
+
+pub fn auto_review_model() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env
+        .get("CCP_AUTO_REVIEW_MODEL")
+        .filter(|raw| !raw.is_empty())
+    {
+        return Some(raw.clone());
+    }
+    read_file_config(&paths::config_dir())
+        .and_then(|file| file.auto_review_model)
+        .filter(|model| !model.is_empty())
+}
+
+/// Optional effort for selected Codex auto-review routes. Empty values
+/// inherit ordinary effort; `off` also disables a value from the file.
+pub fn auto_review_effort() -> Option<String> {
+    std::env::var("CCP_AUTO_REVIEW_EFFORT")
+        .ok()
+        .filter(|raw| !raw.is_empty())
+        .or_else(|| {
+            read_file_config(&paths::config_dir())
+                .and_then(|file| file.auto_review_effort)
+                .filter(|raw| !raw.is_empty())
+        })
+        .filter(|raw| raw != "off")
+}
+
+// ---------------------------------------------------------------------------
+// Codex transport config
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexTransport {
+    Http,
+    WebSocket,
+    Auto,
+}
+
+impl CodexTransport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CodexTransport::Http => "http",
+            CodexTransport::WebSocket => "websocket",
+            CodexTransport::Auto => "auto",
+        }
+    }
+}
+
+fn parse_codex_transport(raw: &str) -> Option<CodexTransport> {
+    match raw {
+        "http" => Some(CodexTransport::Http),
+        "websocket" => Some(CodexTransport::WebSocket),
+        "auto" => Some(CodexTransport::Auto),
+        _ => None,
+    }
+}
+
+/// Plancher d'espacement des ouvertures de WebSocket Codex, en millisecondes.
+///
+/// Zéro (le défaut) laisse le processus ouvrir ses connexions sans attente tant que
+/// l'origine n'a refusé aucun upgrade ; l'espacement s'élargit alors tout seul. Un
+/// opérateur qui préfère un rythme garanti peut imposer un plancher.
+pub fn codex_websocket_connect_spacing() -> std::time::Duration {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_WS_CONNECT_SPACING_MS")
+        && let Ok(ms) = raw.trim().parse::<u64>()
+    {
+        return std::time::Duration::from_millis(ms);
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(ms) = codex.websocket_connect_spacing_ms
+    {
+        return std::time::Duration::from_millis(ms);
+    }
+    std::time::Duration::ZERO
+}
+
+pub fn codex_transport() -> CodexTransport {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_TRANSPORT")
+        && let Some(transport) = parse_codex_transport(raw)
+    {
+        return transport;
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(transport) = codex.transport.as_deref().and_then(parse_codex_transport)
+    {
+        return transport;
+    }
+    CodexTransport::WebSocket
+}
+
+/// How long an HTTP-transport request waits for the Codex response headers.
+///
+/// Codex withholds the response head until the model produces its first
+/// output, so the wait tracks how much reasoning the request asks for rather
+/// than the health of the connection. A large request to a high-effort model
+/// can hold the head for minutes, and the timeout firing fails the request
+/// outright, so the default is generous. Lower it only where a request that
+/// slow is better failed than waited out. Values below
+/// `CODEX_MIN_HEADER_TIMEOUT_MS` are ignored rather than clamped, so a typo
+/// does not hide behind a working default.
+pub const CODEX_DEFAULT_HEADER_TIMEOUT_MS: u64 = 300_000;
+pub const CODEX_MIN_HEADER_TIMEOUT_MS: u64 = 1_000;
+
+pub fn codex_header_timeout_ms() -> u64 {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(ms) = env
+        .get("CCP_CODEX_HEADER_TIMEOUT_MS")
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|ms| *ms >= CODEX_MIN_HEADER_TIMEOUT_MS)
+    {
+        return ms;
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(ms) = codex
+            .header_timeout_ms
+            .filter(|ms| *ms >= CODEX_MIN_HEADER_TIMEOUT_MS)
+    {
+        return ms;
+    }
+    CODEX_DEFAULT_HEADER_TIMEOUT_MS
+}
+
+// ---------------------------------------------------------------------------
+// Cursor config
+// ---------------------------------------------------------------------------
+
+pub fn cursor_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CURSOR_BASE_URL") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(cursor) = file.cursor
+        && let Some(url) = cursor.base_url
+    {
+        return url;
+    }
+    "https://api2.cursor.sh".to_string()
+}
+
+pub fn cursor_client_version() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CURSOR_CLIENT_VERSION") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(cursor) = file.cursor
+        && let Some(version) = cursor.client_version
+    {
+        return version;
+    }
+    detect_cursor_agent_version().unwrap_or_else(|| "cli-2026.07.23-e383d2b".to_string())
+}
+
+fn detect_cursor_agent_version() -> Option<String> {
+    let output = std::process::Command::new("cursor-agent")
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?;
+    let version = version.lines().next()?.trim();
+    if version.is_empty() {
+        return None;
+    }
+    Some(if version.starts_with("cli-") {
+        version.to_string()
+    } else {
+        format!("cli-{version}")
+    })
+}
+
+pub fn cursor_agent_bundle() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CURSOR_AGENT_BUNDLE") {
+        return Some(raw.clone());
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(cursor) = file.cursor
+        && let Some(bundle) = cursor.agent_bundle
+    {
+        return Some(bundle);
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    /// Clears the environment knobs the config accessors read and points the
+    /// config dir at `config`, so neither the developer's shell nor their real
+    /// config.json can leak into the test. Every change is restored when the
+    /// guards drop, including `CCP_CONFIG_DIR`: a plain `remove_var` here would
+    /// strip a `CCP_CONFIG_DIR` the developer exported to isolate the whole
+    /// run, and every later test in the process that reads config through
+    /// `paths::config_dir()` would fall back to the real config file.
+    fn isolated_env(config: &tempfile::TempDir) -> Vec<EnvGuard> {
+        let mut guards = vec![
+            EnvGuard::unset("CCP_BIND_ADDRESS"),
+            EnvGuard::unset("CCP_CODEX_TRANSPORT"),
+            EnvGuard::unset("CCP_LOG_VERBOSE"),
+            EnvGuard::unset("CCP_LOG_STDERR"),
+            EnvGuard::unset("CCP_CODEX_REASONING_SUMMARY"),
+            EnvGuard::unset("CCP_CODEX_SERVER_COMPACTION"),
+            EnvGuard::unset("CCP_CODEX_RESPONSES_API"),
+            EnvGuard::unset("CCP_CODEX_IMAGES_API"),
+            EnvGuard::unset("CCP_CODEX_IMAGES_BASE_URL"),
+            EnvGuard::unset("CCP_CODEX_TRANSCRIPTIONS_API"),
+            EnvGuard::unset("CCP_CODEX_HEADER_TIMEOUT_MS"),
+            EnvGuard::unset("CCP_CODEX_FULL_LANE"),
+            EnvGuard::unset("CCP_CODEX_REASONING_SIGNATURES"),
+            EnvGuard::unset("CCP_AUTO_REVIEW_MODEL"),
+            EnvGuard::unset("CCP_AUTO_REVIEW_EFFORT"),
+            EnvGuard::unset("CCP_CODEX_EFFORT"),
+            EnvGuard::unset("CCP_CODEX_SERVICE_TIER"),
+            EnvGuard::unset("CCP_COMPACT_EFFORT"),
+        ];
+        guards.push(EnvGuard::set("CCP_CONFIG_DIR", config.path()));
+        guards
+    }
+
+    fn config_env(config: &tempfile::TempDir) -> HashMap<String, String> {
+        HashMap::from([(
+            "CCP_CONFIG_DIR".to_string(),
+            config.path().to_string_lossy().into_owned(),
+        )])
+    }
+
+    #[test]
+    fn opencode_config_reads_file_and_env_precedence() {
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"opencode":{"apiKey":"file-key","baseUrl":"https://file.example/v1"}}"#,
+        )
+        .unwrap();
+        let mut env = HashMap::new();
+        let resolved = resolve_opencode_config(&env, config.path());
+        assert_eq!(resolved.api_key.as_deref(), Some("file-key"));
+        assert_eq!(resolved.api_key_source, Some("config.json"));
+        assert_eq!(resolved.base_url, "https://file.example/v1");
+
+        env.insert("OPENCODE_API_KEY".into(), "standard-key".into());
+        let resolved = resolve_opencode_config(&env, config.path());
+        assert_eq!(resolved.api_key.as_deref(), Some("standard-key"));
+        assert_eq!(resolved.api_key_source, Some("OPENCODE_API_KEY"));
+
+        env.insert("CCP_OPENCODE_API_KEY".into(), "ccp-key".into());
+        env.insert(
+            "CCP_OPENCODE_BASE_URL".into(),
+            "https://env.example/v1".into(),
+        );
+        let resolved = resolve_opencode_config(&env, config.path());
+        assert_eq!(resolved.api_key.as_deref(), Some("ccp-key"));
+        assert_eq!(resolved.api_key_source, Some("CCP_OPENCODE_API_KEY"));
+        assert_eq!(resolved.base_url, "https://env.example/v1");
+    }
+
+    #[test]
+    fn opencode_config_falls_back_to_claude_settings_key() {
+        let home = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/settings.json"),
+            r#"{"env":{"OPENCODE_API_KEY":"claude-key"}}"#,
+        )
+        .unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let mut env = HashMap::from([(
+            "HOME".to_string(),
+            home.path().to_string_lossy().into_owned(),
+        )]);
+
+        let resolved = resolve_opencode_config(&env, config.path());
+        assert_eq!(resolved.api_key.as_deref(), Some("claude-key"));
+        assert_eq!(resolved.api_key_source, Some("claude-settings"));
+
+        // Ours wins: env first, then config.json, then Claude settings.
+        env.insert("OPENCODE_API_KEY".into(), "standard-key".into());
+        let resolved = resolve_opencode_config(&env, config.path());
+        assert_eq!(resolved.api_key_source, Some("OPENCODE_API_KEY"));
+        env.remove("OPENCODE_API_KEY");
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"opencode":{"apiKey":"file-key"}}"#,
+        )
+        .unwrap();
+        let resolved = resolve_opencode_config(&env, config.path());
+        assert_eq!(resolved.api_key_source, Some("config.json"));
+
+        // Empty keys and missing files are skipped, not matched.
+        let home2 = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(home2.path().join(".claude")).unwrap();
+        std::fs::write(
+            home2.path().join(".claude/settings.json"),
+            r#"{"env":{"OPENCODE_API_KEY":""}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home2.path().join(".claude/.claude.json"),
+            r#"{"env":{"OPENCODE_API_KEY":"legacy-key"}}"#,
+        )
+        .unwrap();
+        let env2 = HashMap::from([(
+            "HOME".to_string(),
+            home2.path().to_string_lossy().into_owned(),
+        )]);
+        let empty_config = tempfile::TempDir::new().unwrap();
+        let resolved = resolve_opencode_config(&env2, empty_config.path());
+        assert_eq!(resolved.api_key.as_deref(), Some("legacy-key"));
+        assert_eq!(resolved.api_key_source, Some("claude-settings"));
+    }
+
+    #[test]
+    fn opencode_api_key_round_trips_through_config_file() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set("CCP_CONFIG_DIR", dir.path());
+        std::fs::write(dir.path().join("config.json"), r#"{"port":18766}"#).unwrap();
+
+        let path = save_opencode_api_key("saved-key").unwrap();
+        assert_eq!(path, dir.path().join("config.json"));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(root["opencode"]["apiKey"], "saved-key");
+        assert_eq!(root["port"], 18766, "unrelated keys must survive");
+
+        assert!(clear_opencode_api_key().unwrap());
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(root.get("opencode").is_none());
+        assert!(!clear_opencode_api_key().unwrap());
+    }
+
+    #[test]
+    fn bind_address_defaults_to_loopback() {
+        let config = tempfile::TempDir::new().unwrap();
+        let env = config_env(&config);
+
+        assert_eq!(load_config_for_env(&env).bind_address, "127.0.0.1");
+    }
+
+    #[test]
+    fn codex_full_lane_defaults_off_reads_config_and_env_takes_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+
+        assert!(!codex_full_lane());
+
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"fullLane":true}}"#,
+        )
+        .unwrap();
+        assert!(codex_full_lane());
+
+        let _env = EnvGuard::set("CCP_CODEX_FULL_LANE", "0");
+        assert!(!codex_full_lane());
+    }
+
+    #[test]
+    fn bind_address_reads_config_and_env_takes_precedence() {
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"bindAddress":"192.0.2.10"}"#,
+        )
+        .unwrap();
+        let mut env = config_env(&config);
+
+        assert_eq!(load_config_for_env(&env).bind_address, "192.0.2.10");
+        env.insert("CCP_BIND_ADDRESS".to_string(), "0.0.0.0".to_string());
+        assert_eq!(load_config_for_env(&env).bind_address, "0.0.0.0");
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn isolated_env_restores_an_exported_config_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let exported = tempfile::TempDir::new().unwrap();
+        let _exported_env = EnvGuard::set("CCP_CONFIG_DIR", exported.path());
+        {
+            let config = tempfile::TempDir::new().unwrap();
+            let _env = isolated_env(&config);
+            assert_eq!(paths::config_dir(), config.path());
+        }
+        assert_eq!(paths::config_dir(), exported.path());
+    }
+
+    #[test]
+    fn codex_transport_defaults_to_websocket() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        let result = codex_transport();
+        assert_eq!(result, CodexTransport::WebSocket);
+    }
+
+    #[test]
+    fn codex_transport_reads_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        unsafe {
+            std::env::set_var("CCP_CODEX_TRANSPORT", "auto");
+        }
+        assert_eq!(codex_transport(), CodexTransport::Auto);
+    }
+
+    #[test]
+    fn codex_transport_env_websocket() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        unsafe {
+            std::env::set_var("CCP_CODEX_TRANSPORT", "websocket");
+        }
+        assert_eq!(codex_transport(), CodexTransport::WebSocket);
+    }
+
+    #[test]
+    fn codex_transport_invalid_env_falls_back_to_websocket() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        unsafe {
+            std::env::set_var("CCP_CODEX_TRANSPORT", "invalid");
+        }
+        assert_eq!(codex_transport(), CodexTransport::WebSocket);
+    }
+
+    #[test]
+    fn codex_transport_empty_env_falls_back_to_websocket() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        unsafe {
+            std::env::set_var("CCP_CODEX_TRANSPORT", "");
+        }
+        assert_eq!(codex_transport(), CodexTransport::WebSocket);
+    }
+
+    #[test]
+    fn codex_header_timeout_defaults_overrides_and_floors() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+
+        assert_eq!(codex_header_timeout_ms(), CODEX_DEFAULT_HEADER_TIMEOUT_MS);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"headerTimeoutMs":600000}}"#,
+        )
+        .unwrap();
+        assert_eq!(codex_header_timeout_ms(), 600_000);
+        {
+            let _timeout_env = EnvGuard::set("CCP_CODEX_HEADER_TIMEOUT_MS", "120000");
+            assert_eq!(codex_header_timeout_ms(), 120_000);
+        }
+        // Below the floor is ignored, not clamped: a value that small is a typo,
+        // and clamping it would hide the typo behind a working default.
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"headerTimeoutMs":5}}"#,
+        )
+        .unwrap();
+        assert_eq!(codex_header_timeout_ms(), CODEX_DEFAULT_HEADER_TIMEOUT_MS);
+        let _timeout_env = EnvGuard::set("CCP_CODEX_HEADER_TIMEOUT_MS", "0");
+        assert_eq!(codex_header_timeout_ms(), CODEX_DEFAULT_HEADER_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn parse_codex_transport_variants() {
+        assert_eq!(parse_codex_transport("http"), Some(CodexTransport::Http));
+        assert_eq!(
+            parse_codex_transport("websocket"),
+            Some(CodexTransport::WebSocket)
+        );
+        assert_eq!(parse_codex_transport("auto"), Some(CodexTransport::Auto));
+        assert_eq!(parse_codex_transport(""), None);
+        assert_eq!(parse_codex_transport("HTTP"), None);
+        assert_eq!(parse_codex_transport("ws"), None);
+    }
+
+    #[test]
+    fn codex_transport_as_str() {
+        assert_eq!(CodexTransport::Http.as_str(), "http");
+        assert_eq!(CodexTransport::WebSocket.as_str(), "websocket");
+        assert_eq!(CodexTransport::Auto.as_str(), "auto");
+    }
+
+    #[test]
+    fn log_env_presence_enables_legacy_verbose_and_stderr() {
+        let config = tempfile::TempDir::new().unwrap();
+        let mut env = config_env(&config);
+        env.insert("CCP_LOG_VERBOSE".to_string(), "0".to_string());
+        env.insert("CCP_LOG_STDERR".to_string(), String::new());
+
+        let loaded = load_config_for_env(&env);
+        assert!(loaded.log_verbose);
+        assert!(loaded.log_stderr);
+    }
+
+    #[test]
+    fn log_config_values_apply_without_env() {
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"log":{"verbose":true,"stderr":true}}"#,
+        )
+        .unwrap();
+        let env = config_env(&config);
+
+        let loaded = load_config_for_env(&env);
+        assert!(loaded.log_verbose);
+        assert!(loaded.log_stderr);
+    }
+
+    #[test]
+    fn codex_responses_api_defaults_to_disabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+
+        assert!(!codex_responses_api());
+    }
+
+    #[test]
+    fn codex_responses_api_reads_config_and_env_takes_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"responsesApi":true}}"#,
+        )
+        .unwrap();
+        let _env = isolated_env(&config);
+
+        assert!(codex_responses_api());
+        let _responses_env = EnvGuard::set("CCP_CODEX_RESPONSES_API", "false");
+        assert!(!codex_responses_api());
+    }
+
+    #[test]
+    fn codex_responses_api_accepts_enabled_env_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+
+        for value in ["1", "true", "TRUE", "yes"] {
+            let _responses_env = EnvGuard::set("CCP_CODEX_RESPONSES_API", value);
+            assert!(codex_responses_api(), "{value}");
+        }
+    }
+
+    #[test]
+    fn codex_images_api_defaults_to_disabled_and_env_overrides_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"imagesApi":true,"imagesBaseUrl":"https://chatgpt.com/backend-api/codex-custom"}}"#,
+        )
+        .unwrap();
+        let _env = isolated_env(&config);
+
+        assert!(codex_images_api());
+        assert_eq!(
+            codex_images_base_url(),
+            "https://chatgpt.com/backend-api/codex-custom"
+        );
+        let _enabled_env = EnvGuard::set("CCP_CODEX_IMAGES_API", "false");
+        let _base_env = EnvGuard::set(
+            "CCP_CODEX_IMAGES_BASE_URL",
+            "https://chatgpt.com/backend-api/codex",
+        );
+        assert!(!codex_images_api());
+        assert_eq!(
+            codex_images_base_url(),
+            "https://chatgpt.com/backend-api/codex"
+        );
+    }
+
+    #[test]
+    fn codex_transcriptions_api_defaults_to_disabled_and_env_overrides_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"transcriptionsApi":true}}"#,
+        )
+        .unwrap();
+        let _env = isolated_env(&config);
+
+        assert!(codex_transcriptions_api());
+        let _enabled_env = EnvGuard::set("CCP_CODEX_TRANSCRIPTIONS_API", "false");
+        assert!(!codex_transcriptions_api());
+    }
+
+    #[test]
+    fn codex_reasoning_summary_reads_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"reasoningSummary":"off"}}"#,
+        )
+        .unwrap();
+        let _env = isolated_env(&config);
+
+        assert_eq!(codex_reasoning_summary().as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn codex_reasoning_summary_env_overrides_config_and_empty_falls_through() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"reasoningSummary":"off"}}"#,
+        )
+        .unwrap();
+        let _env = isolated_env(&config);
+        {
+            let _summary_env = EnvGuard::set("CCP_CODEX_REASONING_SUMMARY", "auto");
+            assert_eq!(codex_reasoning_summary().as_deref(), Some("auto"));
+        }
+        {
+            let _summary_env = EnvGuard::set("CCP_CODEX_REASONING_SUMMARY", "");
+            assert_eq!(codex_reasoning_summary().as_deref(), Some("off"));
+        }
+    }
+
+    fn auto_review_translation(
+        selected_route: bool,
+        compact: bool,
+    ) -> anyhow::Result<crate::providers::codex::translate::request::ResponsesRequest> {
+        use crate::providers::codex::translate::request::{TranslateOptions, translate_request};
+        let system = if compact {
+            "You are a security monitor for autonomous AI coding agents. You are a helpful AI assistant tasked with summarizing conversations."
+        } else {
+            "You are a security monitor for autonomous AI coding agents."
+        };
+        let mut request: crate::anthropic::schema::MessagesRequest =
+            serde_json::from_value(serde_json::json!({
+                "model":"gpt-6-luna",
+                "messages":[{"role":"user","content":"review this command"}],
+                "system":[{"type":"text","text":system}],
+                "output_config":{"effort":"medium","format":{"type":"json_object"}}
+            }))
+            .unwrap();
+        // Simulate the marker the server sets after final provider selection.
+        request.bypass_provider_model_override = selected_route;
+        let original_output_config = request.extra["output_config"].clone();
+        let translated = translate_request(
+            &request,
+            TranslateOptions {
+                session_id: None,
+                service_tier: None,
+                model: "gpt-6-luna".to_string(),
+                use_responses_lite: true,
+            },
+        );
+        assert_eq!(request.extra["output_config"], original_output_config);
+        translated
+    }
+
+    #[test]
+    fn auto_review_effort_defaults_off_and_obeys_env_file_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        let path = config.path().join("config.json");
+        std::fs::write(&path, "{}").unwrap();
+        assert_eq!(auto_review_effort(), None);
+        std::fs::write(&path, r#"{"autoReviewEffort":"low"}"#).unwrap();
+        assert_eq!(auto_review_effort().as_deref(), Some("low"));
+        for (value, expected) in [("high", Some("high")), ("", Some("low")), ("off", None)] {
+            let _override = EnvGuard::set("CCP_AUTO_REVIEW_EFFORT", value);
+            assert_eq!(auto_review_effort().as_deref(), expected);
+        }
+        for value in ["", "off"] {
+            std::fs::write(
+                &path,
+                serde_json::json!({"autoReviewEffort":value}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(auto_review_effort(), None);
+        }
+    }
+
+    #[test]
+    fn auto_review_effort_only_overrides_global_for_selected_codex_routes() {
+        use crate::providers::codex::translate::request::{Effort, ResponsesTextFormat};
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        let path = config.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"autoReviewEffort":"low","codex":{"effort":"max"}}"#,
+        )
+        .unwrap();
+        let selected = auto_review_translation(true, false).unwrap();
+        assert_eq!(selected.reasoning.unwrap().effort, Some(Effort::Low));
+        assert!(matches!(
+            selected.text.format,
+            Some(ResponsesTextFormat::JsonObject)
+        ));
+        assert_eq!(
+            auto_review_translation(false, false)
+                .unwrap()
+                .reasoning
+                .unwrap()
+                .effort,
+            Some(Effort::Max)
+        );
+        {
+            let _global = EnvGuard::set("CCP_CODEX_EFFORT", "bogus");
+            assert_eq!(
+                auto_review_translation(true, false)
+                    .unwrap()
+                    .reasoning
+                    .unwrap()
+                    .effort,
+                Some(Effort::Low)
+            );
+            assert!(auto_review_translation(false, false).is_err());
+        }
+        for file in [
+            r#"{"codex":{"effort":"max"}}"#,
+            r#"{"autoReviewEffort":"off","codex":{"effort":"max"}}"#,
+        ] {
+            std::fs::write(&path, file).unwrap();
+            assert_eq!(
+                auto_review_translation(true, false)
+                    .unwrap()
+                    .reasoning
+                    .unwrap()
+                    .effort,
+                Some(Effort::Max)
+            );
+        }
+        std::fs::write(&path, "{}").unwrap();
+        assert_eq!(
+            auto_review_translation(true, false)
+                .unwrap()
+                .reasoning
+                .unwrap()
+                .effort,
+            Some(Effort::Medium)
+        );
+    }
+
+    #[test]
+    fn auto_review_effort_validates_values_only_for_selected_routes() {
+        use crate::providers::codex::translate::request::{
+            Effort, translate_openai_compatible_request,
+        };
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"effort":"high"}}"#,
+        )
+        .unwrap();
+        for (value, expected) in [
+            ("none", Effort::None),
+            ("low", Effort::Low),
+            ("medium", Effort::Medium),
+            ("high", Effort::High),
+            ("xhigh", Effort::Xhigh),
+            ("max", Effort::Max),
+        ] {
+            let _override = EnvGuard::set("CCP_AUTO_REVIEW_EFFORT", value);
+            let selected = auto_review_translation(true, false).unwrap();
+            let reasoning = selected.reasoning.unwrap();
+            assert_eq!(reasoning.effort, Some(expected));
+            if value == "none" {
+                assert_eq!(reasoning.summary, None);
+                assert_eq!(selected.include, None);
+            }
+            assert_eq!(
+                auto_review_translation(false, false)
+                    .unwrap()
+                    .reasoning
+                    .unwrap()
+                    .effort,
+                Some(Effort::High)
+            );
+        }
+        for value in ["bogus", "LOW", " low "] {
+            let _override = EnvGuard::set("CCP_AUTO_REVIEW_EFFORT", value);
+            let error = auto_review_translation(true, false)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("CCP_AUTO_REVIEW_EFFORT"));
+            assert!(error.contains("none, low, medium, high, xhigh, max"));
+            assert_eq!(
+                auto_review_translation(false, false)
+                    .unwrap()
+                    .reasoning
+                    .unwrap()
+                    .effort,
+                Some(Effort::High)
+            );
+            let request = serde_json::from_value(serde_json::json!({
+                "model":"foreign-model","messages":[{"role":"user","content":"hello"}],
+                "output_config":{"effort":"medium"}
+            }))
+            .unwrap();
+            let translated =
+                translate_openai_compatible_request(&request, "foreign-model".to_string(), None)
+                    .unwrap();
+            assert_eq!(translated.reasoning.unwrap().effort, Some(Effort::Medium));
+        }
+    }
+
+    #[test]
+    fn auto_review_effort_compaction_cap_remains_final() {
+        use crate::providers::codex::translate::request::Effort;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"autoReviewEffort":"max","codex":{"effort":"high"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            auto_review_translation(true, true)
+                .unwrap()
+                .reasoning
+                .unwrap()
+                .effort,
+            Some(Effort::Low)
+        );
+        {
+            let _cap = EnvGuard::set("CCP_COMPACT_EFFORT", "off");
+            assert_eq!(
+                auto_review_translation(true, true)
+                    .unwrap()
+                    .reasoning
+                    .unwrap()
+                    .effort,
+                Some(Effort::Max)
+            );
+        }
+        let _override = EnvGuard::set("CCP_AUTO_REVIEW_EFFORT", "none");
+        assert_eq!(
+            auto_review_translation(true, true)
+                .unwrap()
+                .reasoning
+                .unwrap()
+                .effort,
+            Some(Effort::None)
+        );
+    }
+
+    #[test]
+    fn auto_review_model_reads_top_level_config_and_env_takes_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"autoReviewModel":"grok-4.5"}"#,
+        )
+        .unwrap();
+        let _env = isolated_env(&config);
+
+        assert_eq!(auto_review_model().as_deref(), Some("grok-4.5"));
+        {
+            let _model_env = EnvGuard::set("CCP_AUTO_REVIEW_MODEL", "gpt-5.6-terra");
+            assert_eq!(auto_review_model().as_deref(), Some("gpt-5.6-terra"));
+        }
+        {
+            let _model_env = EnvGuard::set("CCP_AUTO_REVIEW_MODEL", "");
+            assert_eq!(auto_review_model().as_deref(), Some("grok-4.5"));
+        }
+    }
+
+    #[test]
+    fn codex_server_compaction_defaults_and_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+
+        assert!(!codex_server_compaction());
+        {
+            let _enabled_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "on");
+            assert!(codex_server_compaction());
+        }
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"serverCompaction":true}}"#,
+        )
+        .unwrap();
+        assert!(codex_server_compaction());
+        let _disabled_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "false");
+        assert!(!codex_server_compaction());
+    }
+
+    #[test]
+    fn codex_reasoning_signatures_default_to_enabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+
+        assert!(codex_reasoning_signatures_enabled());
+    }
+
+    #[test]
+    fn codex_reasoning_signatures_reads_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"reasoningSignatures":"off"}}"#,
+        )
+        .unwrap();
+
+        assert!(!codex_reasoning_signatures_enabled());
+    }
+
+    #[test]
+    fn codex_reasoning_signatures_env_overrides_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"reasoningSignatures":"off"}}"#,
+        )
+        .unwrap();
+        let _signature_env = EnvGuard::set("CCP_CODEX_REASONING_SIGNATURES", "on");
+
+        assert!(codex_reasoning_signatures_enabled());
+    }
+}

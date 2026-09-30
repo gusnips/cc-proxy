@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Start an isolated cc-proxy debugging instance on a random localhost port.
+
+Usage:
+  scripts/debug-proxy
+  scripts/debug-proxy --help
+
+Prerequisites:
+  - Run from a checkout of cc-proxy.
+  - Install cargo, curl, and the upstream provider credentials you need.
+  - Authenticate providers with the normal `cc-proxy <provider> auth`
+    commands. This helper reads the normal config directory, so existing logins
+    remain available.
+
+The helper builds the debug binary, retries random dynamic ports until the
+health endpoint responds, and enables:
+  - complete string fields in proxy.log via CCP_LOG_VERBOSE=1
+  - mirrored process output via CCP_LOG_STDERR=1
+  - full request and event captures via CCP_TRAFFIC_LOG=1
+  - an isolated XDG state directory under the system temporary directory
+
+It prints a client.env path for another shell, exact log and capture paths, and
+example Claude Code model settings. Keep the launching shell open. Press Ctrl-C
+to stop the proxy. The temporary directory remains available for investigation.
+
+Traffic captures preserve prompt and tool content. Treat the artifact directory
+as sensitive and delete it manually after the investigation.
+EOF
+}
+
+if (($# > 1)) || (($# == 1)) && [[ $1 != "--help" && $1 != "-h" ]]; then
+  usage >&2
+  exit 2
+fi
+if (($# == 1)); then
+  usage
+  exit 0
+fi
+
+for command in git cargo curl; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    printf 'error: required command not found: %s\n' "$command" >&2
+    exit 1
+  fi
+done
+
+if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  printf 'error: run this helper from a cc-proxy checkout\n' >&2
+  exit 1
+fi
+run_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-proxy-debug.XXXXXX")"
+state_home="$run_dir/state"
+server_log="$run_dir/server.log"
+client_env="$run_dir/client.env"
+proxy_pid=""
+proxy_port=""
+
+cleanup() {
+  if [[ -n "$proxy_pid" ]] && kill -0 "$proxy_pid" 2>/dev/null; then
+    kill "$proxy_pid" 2>/dev/null || true
+    wait "$proxy_pid" 2>/dev/null || true
+  fi
+  printf '\nDebug artifacts: %s\n' "$run_dir"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+cd "$repo_root"
+cargo build --quiet --bin cc-proxy
+
+for _attempt in {1..20}; do
+  proxy_port=$((49152 + (RANDOM % 16384)))
+  : > "$server_log"
+
+  XDG_STATE_HOME="$state_home" \
+  CCP_LOG_STDERR=1 \
+  CCP_LOG_VERBOSE=1 \
+  CCP_TRAFFIC_LOG=1 \
+    "$repo_root/target/debug/cc-proxy" serve \
+      --port "$proxy_port" \
+      --no-monitor >> "$server_log" 2>&1 &
+  proxy_pid=$!
+
+  for _check in {1..100}; do
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+      wait "$proxy_pid" 2>/dev/null || true
+      proxy_pid=""
+      break
+    fi
+    if curl --fail --silent \
+      "http://127.0.0.1:$proxy_port/healthz" >/dev/null 2>&1; then
+      sleep 0.1
+      if kill -0 "$proxy_pid" 2>/dev/null; then
+        break 2
+      fi
+    fi
+    sleep 0.1
+  done
+
+  if [[ -n "$proxy_pid" ]]; then
+    kill "$proxy_pid" 2>/dev/null || true
+    wait "$proxy_pid" 2>/dev/null || true
+    proxy_pid=""
+  fi
+done
+
+if [[ -z "$proxy_pid" ]]; then
+  printf 'error: proxy failed to become ready after 20 attempts\n' >&2
+  printf 'last server output: %s\n' "$server_log" >&2
+  exit 1
+fi
+
+cat > "$client_env" <<EOF
+export ANTHROPIC_BASE_URL=http://127.0.0.1:$proxy_port
+export ANTHROPIC_AUTH_TOKEN=unused
+EOF
+chmod 600 "$client_env"
+
+cat <<EOF
+Proxy ready: http://127.0.0.1:$proxy_port
+PID: $proxy_pid
+
+In another shell, load the proxy endpoint and choose models:
+  source "$client_env"
+  export ANTHROPIC_MODEL='gpt-5.6-sol[1m]'
+  export ANTHROPIC_SMALL_FAST_MODEL='gpt-5.6-luna[1m]'
+  claude
+
+Live process output:
+  tail -F "$server_log"
+
+Structured JSONL log:
+  tail -F "$state_home/cc-proxy/proxy.log"
+
+Full traffic captures:
+  $state_home/cc-proxy/traffic
+
+Press Ctrl-C here to stop the proxy. Debug artifacts remain in:
+  $run_dir
+EOF
+
+wait "$proxy_pid"

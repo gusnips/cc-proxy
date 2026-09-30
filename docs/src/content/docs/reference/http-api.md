@@ -1,0 +1,205 @@
+---
+title: HTTP API
+description: Local routes for health checks, account usage, Anthropic Messages, token counts, model discovery, OpenAI-compatible requests, and Codex images.
+---
+
+The server exposes the Anthropic and OpenAI routes supported by the proxy. Each route uses the configured provider credential for the selected model.
+
+<div class="security-callout">
+<strong>No client authentication.</strong> The listener accepts requests without validating `Authorization` or `x-api-key`. Loopback is the default. Protect every non-loopback listener with a firewall or authenticating reverse proxy.
+</div>
+
+## `GET /healthz`
+
+Liveness check:
+
+```json
+{"ok":true}
+```
+
+It does not verify provider credentials or upstream availability.
+
+## `GET /monitor`
+
+Read-only dashboard snapshot, available when monitor collection is enabled. The CLI enables collection in both plain and interactive `serve` modes. Only actual loopback peers are allowed; forwarded IP headers do not grant access. Other peers receive HTTP 403, and disabled collection returns HTTP 404. Responses use `Cache-Control: no-store`.
+
+The JSON envelope contains `version: 1` and a `snapshot` with the proxy start time, sessions, active requests and recent requests. It includes the monitor's display metadata, timing, token usage and computed throughput. It does not include credentials or request/response bodies. Process-local monotonic clocks remain in the service; snapshots contain elapsed durations instead.
+
+The `monitor` CLI polls this endpoint. There is no corresponding mutation or shutdown endpoint. Attaching or disconnecting a viewer does not change proxy lifetime or request accounting.
+
+## OpenCode Go account usage
+
+```text
+GET /.well-known/ccr/account
+GET /v1/account/limits
+```
+
+Both routes return OpenCode Go's rolling five-hour, weekly, and monthly account
+limits as the same normalized account snapshot. Available percentages become
+quota meters with used and remaining values; reset times and upstream statuses
+are included when supplied. The response follows Claude Code Router's standard
+account endpoint contract, so a proxy provider configured with **Fetch usage**
+and **Standard usage endpoint** can display the limits in its dashboard.
+
+The server caches the latest successful upstream response for 60 seconds, so
+frequent dashboard polling does not make an upstream request each time. After
+the cache expires, an upstream failure is returned explicitly instead of
+serving an unmarked stale snapshot.
+
+The routes use the proxy-owned OpenCode credential. Incoming bearer or API-key
+headers are ignored, as on generation routes. Responses include
+`Cache-Control: no-store`. Because account usage is visible without client
+authentication, keep the listener on loopback or protect it as described
+above.
+
+## `POST /v1/messages`
+
+Accepts an Anthropic Messages request in streaming or non-streaming mode. `POST /v1/messages?beta=true` reaches the same route.
+
+The request `model` selects the provider. The proxy translates supported message content, system prompts, thinking settings, tool definitions, tool choice, tool calls, tool results, images, output configuration, metadata, and streaming behavior according to the provider.
+
+Streaming responses use Anthropic SSE events such as `message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, and `message_stop`. Non-streaming requests are accumulated from the provider's stream.
+
+Codex responses carry the quota headers Codex reports for the subscription: `x-codex-plan-type`, `x-codex-active-limit`, `x-codex-credits-*`, and, for every limit family, `-used-percent`, `-window-minutes`, `-reset-at`, `-reset-after-seconds`, `-limit-name`, and `-over-secondary-limit-percent`. Which family a window belongs to and how long that window runs come from the headers themselves: a plan may meter a weekly window as `primary` and no secondary window at all. The values are the ones Codex sent for the request being answered. A response that arrives before any telemetry does carries the previous values, or none.
+
+Unknown models return HTTP 400 with the supported catalog. Missing provider auth returns HTTP 401.
+
+## `POST /v1/messages/count_tokens`
+
+Accepts the same basic Anthropic request shape and returns:
+
+```json
+{"input_tokens":1234}
+```
+
+Codex tokenizes text locally with `o200k_base` and adds estimates for images, encrypted reasoning, and protocol framing. Kimi, Grok, and OpenCode Go use local text heuristics, while Cursor estimates the rendered prompt from its character length. Counts support Claude Code compaction behavior and are estimates rather than provider billing values.
+
+## `GET /v1/models`
+
+Returns Anthropic-shaped model discovery:
+
+```json
+{
+  "data": [
+    {
+      "type": "model",
+      "id": "gpt-6-sol",
+      "display_name": "gpt-6-sol (codex)"
+    }
+  ],
+  "has_more": false,
+  "first_id": "gpt-6-sol",
+  "last_id": "cursor:gpt-5.5"
+}
+```
+
+An optional `limit` query truncates `data` and sets `has_more`. The route does not expose a pagination cursor.
+
+Claude Code gateway discovery filters IDs according to its own model rules. See [Models and routing](/using/models-and-routing/).
+
+## `POST /v1/chat/completions`
+
+Enable this route with `CCP_CODEX_RESPONSES_API=1` or `codex.responsesApi: true`. The `model` field selects Codex, Kimi, Grok, OpenCode Go, or Cursor. The proxy ignores incoming bearer credentials and uses the configured provider credential.
+
+```sh
+curl http://127.0.0.1:18765/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"kimi-k2.6","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+For Kimi, Grok, OpenCode Go, and Cursor, the route accepts:
+
+- `system`, `developer`, `user`, `assistant`, and `tool` messages
+- text, supported user images, function calls, and tool results
+- function tools, `tool_choice`, and `parallel_tool_calls`
+- `max_tokens` or `max_completion_tokens`
+- `reasoning_effort`
+- streaming, non-streaming responses, and `stream_options.include_usage`
+
+For Grok, `reasoning_effort` accepts `none`, `low`, `medium`, `high`, `xhigh`, and `max`. `xhigh` is available at full strength on `grok-4.6`; `xhigh` and `max` map to `high` for other registered Grok models.
+
+Codex uses its own compatibility path. It supports text messages, `reasoning_effort`, `response_format`, `stream_options.include_usage`, `temperature`, `top_p`, and `user`. Reasoning effort defaults to `medium`, and the proxy-wide Codex effort setting takes precedence. Function calls, images, audio, log probabilities, multiple choices, storage, and output token limits are not supported on the Codex Chat Completions path.
+
+Non-streaming requests return a `chat.completion` object. Streaming requests return `chat.completion.chunk` events followed by `data: [DONE]`. Grok citations are included in message annotations.
+
+Unsupported non-null fields return `invalid_request_error` with the field named in `error.param`. Cursor tools are limited to `Read`, `Write`, and `Bash`. They require `stream: true` and a stable session header.
+
+## `POST /v1/images/generations`
+
+This route exists only when `CCP_CODEX_IMAGES_API=1` or `codex.imagesApi` is true. It reuses the proxy-owned ChatGPT/Codex OAuth session and forwards a bounded JSON request to the Codex image service:
+
+```json
+{
+  "prompt": "A paper-cut fox in a moonlit forest",
+  "model": "gpt-image-2",
+  "background": "auto",
+  "quality": "auto",
+  "size": "auto"
+}
+```
+
+`prompt` is required. `model` defaults to and is restricted to `gpt-image-2`; `background`, `quality`, and `size` default to `auto`. Optional `n` must be between 1 and 10. Unknown fields and URL response formats are rejected rather than silently forwarded. Successful responses contain `data[].b64_json`; the proxy never writes generated image data to traffic captures.
+
+## `POST /v1/images/edits`
+
+This route uses the same opt-in gate and accepts either:
+
+- Codex JSON with `images: [{"image_url":"data:image/png;base64,..."}]`; or
+- OpenAI-style `multipart/form-data` with one to five repeated `image` or `image[]` files and text fields `prompt`, `model`, `background`, `quality`, `size`, and `n`.
+
+Multipart PNG, JPEG, WebP, and GIF signatures are validated and translated to Codex data URLs. The internal Codex edit contract is JSON, so multipart is an ingress compatibility adapter. Masks, remote image URLs, variations, unsupported fields, and other media types return a 4xx OpenAI error. Request bodies, individual files, aggregate inputs, responses, and concurrency are bounded to protect the proxy process.
+
+The Images API is an internal ChatGPT Codex integration, not the public OpenAI Platform Images API. It consumes the signed-in ChatGPT account's entitlement and quota, and the internal contract can change independently of the public API.
+
+## `POST /v1/responses`
+
+Enable this route with `CCP_CODEX_RESPONSES_API=1` or `codex.responsesApi: true`. The `model` field selects Codex, Kimi, Grok, OpenCode Go, or Cursor.
+
+```sh
+curl http://127.0.0.1:18765/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"grok-4.5","input":"Hello"}'
+```
+
+Codex models use native Responses passthrough, including native JSON and SSE output. For Kimi, Grok, OpenCode Go, and Cursor, the route accepts:
+
+- string input or message items
+- `instructions`
+- function calls, function-call outputs, tools, `tool_choice`, and `parallel_tool_calls`
+- `max_output_tokens`
+- `reasoning.effort`
+- streaming or non-streaming output
+
+For Grok, `reasoning.effort` accepts `none`, `low`, `medium`, `high`, `xhigh`, and `max`, with model-specific mapping for the highest levels.
+
+Responses include the accepted tool settings. Grok search appears as a `web_search_call`, with sources in URL citation annotations. When a provider reaches its output token limit, the response status is `incomplete` and the reason is `max_output_tokens`.
+
+`store: true` and other unsupported non-null fields return an error. Stored response retrieval, deletion, and WebSocket client connections are not supported.
+
+### Parallel tool calls
+
+The shared Kimi, Grok, and Cursor ingress accepts boolean `parallel_tool_calls` on both OpenAI routes. `false` preserves serial tool execution through translation, while `true` selects the existing parallel default. Omitting the field leaves the provider default unchanged. Non-boolean values return an `invalid_request_error` with `parallel_tool_calls` in `error.param`.
+
+The setting applies without changing the requested `tool_choice` mode. This includes omitted or `auto` choices, `none`, `required`, and named functions. Internally, an explicit OpenAI setting determines the equivalent Anthropic `tool_choice.disable_parallel_tool_use` value. Anthropic Messages requests can set `disable_parallel_tool_use` directly. Kimi and Grok receive the corresponding upstream `parallel_tool_calls` value, and Cursor's bridged tool loop remains serial between client tool results.
+
+Codex Responses uses native passthrough and forwards `parallel_tool_calls` unchanged. Codex Chat Completions has its own field allowlist and rejects `parallel_tool_calls` because that path does not support function tools.
+
+## OpenAI routing, sessions, and errors
+
+Both OpenAI routes strip a trailing `[1m]`, resolve configured aliases, and choose the provider from `model`. Aliases follow `aliasProvider`, while explicit provider model IDs keep their provider. Unknown models return HTTP 400 with the supported model list.
+
+For requests that need a stable session, set one of these headers:
+
+- `x-claude-code-session-id`
+- `session_id`
+- `x-client-request-id`
+
+The proxy uses the first non-empty value. Cursor tool calls require a stable session. Session affinity also applies to providers that support it.
+
+Authentication, permission, rate-limit, invalid-request, and provider failures use the OpenAI error format. Rate-limit responses keep the provider's `Retry-After` header. Malformed or oversized provider streams return a gateway error.
+
+The monitor and logs show the selected provider and model. Traffic capture records request and response data for debugging, including prompts and tool content, so treat the capture directory as sensitive.
+
+## Other routes
+
+Unmatched paths return the proxy's not-found response. The server has no administrative mutation API, credential API, or remote shutdown route.
