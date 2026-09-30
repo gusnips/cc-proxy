@@ -43,6 +43,7 @@ pub const WEBSOCKET_IDLE_TIMEOUT_MS: u64 = 300_000;
 pub const WEBSOCKET_RESPONSE_START_TIMEOUT_DETAIL: &str = "websocket_response_start_timeout";
 pub const WEBSOCKET_MISSING_TERMINAL_DETAIL: &str = "websocket_missing_terminal";
 pub const WEBSOCKET_KEEPALIVE_FAILURE_DETAIL: &str = "websocket_keepalive_failure";
+pub(super) const WEBSOCKET_QUOTA_REACHED_DETAIL: &str = "rate_limit_reached";
 pub const WEBSOCKET_CONTINUATION_SOCKET_MISSING_DETAIL: &str =
     "websocket_continuation_socket_missing";
 pub(super) const WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL: &str = "websocket_proxy_tunnel_rejected";
@@ -1236,6 +1237,17 @@ fn continuation_socket_missing_error() -> CodexError {
     }
 }
 
+fn quota_snapshot_error(failure: super::events::CodexEventFailure) -> CodexError {
+    CodexError {
+        status: failure.status,
+        message: failure.message,
+        detail: Some(WEBSOCKET_QUOTA_REACHED_DETAIL.to_string()),
+        retry_after: failure.retry_after,
+        usage_limit: None,
+        origin: CodexErrorOrigin::WebSocket,
+    }
+}
+
 fn missing_terminal_error() -> CodexError {
     CodexError {
         status: 0,
@@ -2130,6 +2142,7 @@ where
     let response_wait_started = Instant::now();
     let mut last_response_event_at = response_wait_started;
     let mut response_started = false;
+    let mut pending_quota_failure = None;
 
     loop {
         let response_deadline_started = if response_started {
@@ -2221,29 +2234,15 @@ where
 
                 if is_response_event(&parsed) {
                     response_started = true;
+                    pending_quota_failure = None;
                     last_response_event_at = Instant::now();
                 }
 
-                // A rate limit is authoritative: return it as a terminal 429
-                // now, so quota exhaustion is a clean 429 + Retry-After rather
-                // than a socket close misread as a retryable transport drop.
-                // This covers classified rate-limit error events as well as
-                // the bare `codex.rate_limits` snapshot with
-                // `limit_reached: true`, which carries no error object for
-                // the classifier.
-                if let Some(failure) = super::events::classify_event_failure(&parsed)
-                    .filter(|failure| failure.kind == super::events::CodexFailureKind::RateLimit)
-                    .or_else(|| super::events::limit_reached_failure(&parsed))
+                if !response_started
+                    && parsed.get("type").and_then(serde_json::Value::as_str)
+                        == Some("codex.rate_limits")
                 {
-                    invalidate_pool_owner(pool_owner, pool_entry);
-                    return Err(CodexError {
-                        status: 429,
-                        message: failure.message,
-                        detail: Some("rate_limit_reached".to_string()),
-                        retry_after: failure.retry_after,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::WebSocket,
-                    });
+                    pending_quota_failure = super::events::limit_reached_failure(&parsed);
                 }
 
                 // Check for terminal events
@@ -2291,14 +2290,17 @@ where
             Some(Err(e)) => {
                 // Stream error - invalidate pool
                 invalidate_pool_owner(pool_owner, pool_entry);
-                return Err(CodexError {
-                    status: 0,
-                    message: format!("WebSocket stream error: {e}"),
-                    detail: None,
-                    retry_after: None,
-                    usage_limit: None,
-                    origin: CodexErrorOrigin::WebSocket,
-                });
+                return Err(pending_quota_failure
+                    .take()
+                    .map(quota_snapshot_error)
+                    .unwrap_or_else(|| CodexError {
+                        status: 0,
+                        message: format!("WebSocket stream error: {e}"),
+                        detail: None,
+                        retry_after: None,
+                        usage_limit: None,
+                        origin: CodexErrorOrigin::WebSocket,
+                    }));
             }
             None => {
                 // Stream ended - invalidate pool
@@ -2308,6 +2310,11 @@ where
         }
     }
 
+    if terminal_event.is_none()
+        && let Some(failure) = pending_quota_failure
+    {
+        return Err(quota_snapshot_error(failure));
+    }
     Ok((sse_body, terminal_event))
 }
 
@@ -2326,6 +2333,7 @@ where
     let response_wait_started = Instant::now();
     let mut last_response_event_at = response_wait_started;
     let mut response_started = false;
+    let mut pending_quota_failure = None;
     let mut status = 200u16;
     let mut reusable = false;
     let mut terminal_item = None;
@@ -2420,12 +2428,19 @@ where
 
                 if is_response_event(&parsed) {
                     response_started = true;
+                    pending_quota_failure = None;
                     last_response_event_at = Instant::now();
                 }
                 if parsed.get("type").and_then(|value| value.as_str()) == Some("error") {
                     status = event_error_status(&parsed).unwrap_or(500);
                 }
 
+                if !response_started
+                    && parsed.get("type").and_then(serde_json::Value::as_str)
+                        == Some("codex.rate_limits")
+                {
+                    pending_quota_failure = super::events::limit_reached_failure(&parsed);
+                }
                 if is_terminal_event(&parsed) {
                     if is_previous_response_missing(&parsed) {
                         terminal_item = Some(Err(CodexError {
@@ -2464,18 +2479,24 @@ where
             }
             Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
             Some(Ok(Message::Close(_))) | None => {
-                terminal_item = Some(Err(missing_terminal_error()));
+                terminal_item = Some(Err(pending_quota_failure
+                    .take()
+                    .map(quota_snapshot_error)
+                    .unwrap_or_else(missing_terminal_error)));
                 break;
             }
             Some(Err(error)) => {
-                terminal_item = Some(Err(CodexError {
-                    status: 0,
-                    message: format!("WebSocket stream error: {error}"),
-                    detail: None,
-                    retry_after: None,
-                    usage_limit: None,
-                    origin: CodexErrorOrigin::WebSocket,
-                }));
+                terminal_item = Some(Err(pending_quota_failure
+                    .take()
+                    .map(quota_snapshot_error)
+                    .unwrap_or_else(|| CodexError {
+                        status: 0,
+                        message: format!("WebSocket stream error: {error}"),
+                        detail: None,
+                        retry_after: None,
+                        usage_limit: None,
+                        origin: CodexErrorOrigin::WebSocket,
+                    })));
                 break;
             }
         }
@@ -2521,6 +2542,99 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     use super::*;
+
+    async fn quota_reader_case(
+        live: bool,
+        events: Vec<serde_json::Value>,
+    ) -> Result<(), CodexError> {
+        let (client, server) = tokio::io::duplex(8 * 1024);
+        let mut client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let server = tokio::spawn(async move {
+            let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+            for event in events {
+                server.send(Message::Text(event.to_string())).await.unwrap();
+            }
+            server.send(Message::Close(None)).await.unwrap();
+        });
+        let result = if live {
+            let (tx, mut rx) = mpsc::channel(8);
+            let (_, terminal) = stream_ws_events(&mut client, 1_000, None, &tx).await;
+            while rx.try_recv().is_ok() {}
+            terminal.expect("terminal item").map(|_| ())
+        } else {
+            collect_ws_events(&mut client, 1_000, None, None, None)
+                .await
+                .and_then(|(_, terminal)| terminal.map(|_| ()).ok_or_else(missing_terminal_error))
+        };
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn quota_snapshot_no_start_close_is_nonretryable_in_both_readers() {
+        for live in [false, true] {
+            let error = quota_reader_case(
+                live,
+                vec![serde_json::json!({
+                    "type": "codex.rate_limits",
+                    "rate_limits": {"limit_reached": true, "primary": {"reset_after_seconds": 900}}
+                })],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status, 429);
+            assert_eq!(error.retry_after.as_deref(), Some("900"));
+            assert_eq!(
+                error.detail.as_deref(),
+                Some(WEBSOCKET_QUOTA_REACHED_DETAIL)
+            );
+            assert!(!super::super::retryable_live_start_codex_error(&error));
+        }
+    }
+
+    #[tokio::test]
+    async fn quota_snapshot_does_not_abort_healthy_stream_in_both_readers() {
+        for live in [false, true] {
+            quota_reader_case(live, vec![
+                serde_json::json!({"type":"codex.rate_limits","rate_limits":{"limit_reached":true}}),
+                serde_json::json!({"type":"response.created","response":{"id":"healthy"}}),
+                serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"ok"}),
+                serde_json::json!({"type":"response.completed","response":{"status":"completed"}}),
+            ]).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn quota_snapshot_credits_allowed_and_started_response_do_not_mask_transport_failure() {
+        for live in [false, true] {
+            for events in [
+                vec![
+                    serde_json::json!({"type":"codex.rate_limits","rate_limits":{"limit_reached":true,"allowed":true}}),
+                ],
+                vec![
+                    serde_json::json!({"type":"codex.rate_limits","rate_limits":{"limit_reached":true},"credits":{"has_credits":true}}),
+                ],
+                vec![
+                    serde_json::json!({"type":"codex.rate_limits","rate_limits":{"limit_reached":true},"credits":{"unlimited":true}}),
+                ],
+                vec![
+                    serde_json::json!({"type":"codex.rate_limits","rate_limits":{"limit_reached":true}}),
+                    serde_json::json!({"type":"codex.rate_limits","rate_limits":{"limit_reached":false}}),
+                ],
+                vec![
+                    serde_json::json!({"type":"codex.rate_limits","rate_limits":{"limit_reached":true}}),
+                    serde_json::json!({"type":"response.created","response":{"id":"started"}}),
+                ],
+            ] {
+                let error = quota_reader_case(live, events).await.unwrap_err();
+                assert_eq!(error.status, 0);
+                assert_eq!(
+                    error.detail.as_deref(),
+                    Some(WEBSOCKET_MISSING_TERMINAL_DETAIL)
+                );
+            }
+        }
+    }
 
     #[test]
     fn provider_retry_handoff_is_attempt_local() {

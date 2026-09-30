@@ -1405,6 +1405,11 @@ fn is_codex_success_terminal_event(payload: &serde_json::Value) -> bool {
 }
 
 fn retryable_live_start_codex_error(err: &client::CodexError) -> bool {
+    if err.usage_limit.is_some()
+        || err.detail.as_deref() == Some(websocket::WEBSOCKET_QUOTA_REACHED_DETAIL)
+    {
+        return false;
+    }
     if err.origin == client::CodexErrorOrigin::WebSocketHandshake {
         if err.detail.as_deref() == Some(websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL) {
             return false;
@@ -1570,6 +1575,24 @@ fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
 fn map_codex_error_to_response(err: &client::CodexError) -> Response {
     if let Some(limit) = err.usage_limit.as_ref() {
         return usage_limit_response(limit);
+    }
+    if err.detail.as_deref() == Some(websocket::WEBSOCKET_QUOTA_REACHED_DETAIL) {
+        let mut response = json_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limit_error",
+            &err.message,
+        );
+        response
+            .headers_mut()
+            .insert("x-should-retry", HeaderValue::from_static("false"));
+        if let Some(retry_after) = err.retry_after.as_deref()
+            && let Ok(value) = HeaderValue::from_str(retry_after)
+        {
+            response
+                .headers_mut()
+                .insert(http::header::RETRY_AFTER, value);
+        }
+        return response;
     }
     let message = codex_error_message(err);
     if is_context_window_overflow(message) {
@@ -2591,6 +2614,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_start_quota_snapshot_close_returns_429_without_replay() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        let response = run_live_failure_case(
+            "live-quota-snapshot-close",
+            serde_json::json!({
+                "type": "codex.rate_limits",
+                "rate_limits": {"limit_reached": true, "primary": {"reset_after_seconds": 900}}
+            }),
+            1,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["x-should-retry"], "false");
+        assert_eq!(response.headers()[http::header::RETRY_AFTER], "900");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], "Codex usage limit reached");
+    }
+
+    #[tokio::test]
     async fn usage_limit_fast_fails_websocket_and_aborts_request_state() {
         let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
         let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
@@ -2660,8 +2704,8 @@ mod tests {
             emit_live_event(
                 &mut websocket,
                 &serde_json::json!({
-                    "type": "codex.rate_limits",
-                    "rate_limits": {"allowed": false, "limit_reached": true}
+                    "type": "response.failed",
+                    "response": {"error": {"status": 429, "message": "rate limit exceeded", "retry_after_seconds": 3}}
                 }),
             )
             .await;

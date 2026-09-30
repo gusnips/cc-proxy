@@ -267,16 +267,11 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
     })
 }
 
-/// Authoritative quota exhaustion signalled as a `codex.rate_limits` event
-/// with `limit_reached: true`.
-///
-/// Unlike the error shapes `classify_event_failure` recognises, this event
-/// carries no error object — only the snapshot — so classification alone
-/// leaves it a non-terminal control event and the socket close that follows
-/// is misread as a retryable transport drop. Returns the terminal 429 with
-/// the reset clock from `reset_after_seconds` (primary window first, then
-/// secondary), so callers surface a clean 429 + Retry-After instead of
-/// re-driving the request into a 502 storm.
+/// Stage a possible quota failure from a `codex.rate_limits` snapshot.
+/// The snapshot remains telemetry unless the connection closes without a
+/// response starting. A healthy response can continue even with a full window.
+/// Preserve the reset clock (primary window first, then secondary) when a
+/// no-start closure confirms the quota wall; retrying cannot clear that wall.
 ///
 /// A snapshot covered by credits (`credits.has_credits` / `unlimited`) or
 /// explicitly allowed (`rate_limits.allowed`) is not exhaustion: the request
@@ -308,7 +303,7 @@ pub(crate) fn limit_reached_failure(payload: &Value) -> Option<CodexEventFailure
         .into_iter()
         .find_map(|window| scalar_string(limits.get(window)?.get("reset_after_seconds")));
     Some(CodexEventFailure {
-        kind: CodexFailureKind::RateLimit,
+        kind: CodexFailureKind::Permanent,
         explicit_status: Some(429),
         status: 429,
         message: "Codex usage limit reached".to_string(),
@@ -866,7 +861,8 @@ data: {"type":"response.completed","response":{"status":"completed"}}
             }
         }))
         .expect("limit_reached snapshot");
-        assert_eq!(failure.kind, CodexFailureKind::RateLimit);
+        assert_eq!(failure.kind, CodexFailureKind::Permanent);
+        assert!(!failure.retryable());
         assert_eq!(failure.status, 429);
         assert_eq!(failure.retry_after.as_deref(), Some("518773"));
     }
@@ -911,6 +907,14 @@ data: {"type":"response.completed","response":{"status":"completed"}}
                     "primary": {"reset_after_seconds": 509821}
                 },
                 "credits": {"has_credits": true, "unlimited": false}
+            }))
+            .is_none()
+        );
+        assert!(
+            limit_reached_failure(&serde_json::json!({
+                "type": "codex.rate_limits",
+                "rate_limits": {"limit_reached": true},
+                "credits": {"unlimited": true}
             }))
             .is_none()
         );
