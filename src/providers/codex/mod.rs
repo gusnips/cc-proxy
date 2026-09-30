@@ -30,7 +30,6 @@ use crate::config;
 use crate::logging::create_logger;
 use crate::monitor::usage_from_anthropic_sse;
 use crate::provider::{CliHandlers, Provider, RequestContext};
-use crate::registry;
 use crate::request_identity::ConversationIdentity;
 use crate::retry::{compute_backoff_delay, sleep};
 
@@ -51,8 +50,8 @@ use self::count_tokens::count_translated_tokens;
 use self::translate::accumulate::accumulate_response_with_traffic;
 use self::translate::live_stream::LiveStreamTranslator;
 use self::translate::model_allowlist::{
-    assert_routable_model, full_lane_web_search_model, resolve_model_request_with_config_override,
-    uses_responses_lite,
+    advertised_models, assert_routable_model, full_lane_web_search_model,
+    resolve_model_request_with_config_override, uses_responses_lite,
 };
 use self::translate::reducer::finish_metadata_from_upstream;
 use self::translate::request::{
@@ -561,16 +560,7 @@ impl Provider for CodexProvider {
     }
 
     fn supported_models(&self) -> Vec<String> {
-        let mut models: Vec<String> = registry::CODEX_MODELS
-            .iter()
-            .map(|m| m.to_string())
-            .collect();
-        for m in registry::CODEX_MODELS {
-            models.push(format!("{m}-fast"));
-        }
-        models.sort_unstable();
-        models.dedup();
-        models
+        advertised_models()
     }
 
     fn cli(&self) -> &'static dyn CliHandlers {
@@ -2914,6 +2904,8 @@ mod tests {
         assert!(models.contains(&"gpt-5.6-luna".to_string()));
         assert!(models.contains(&"gpt-6-sol".to_string()));
         assert!(models.contains(&"gpt-6-sol-fast".to_string()));
+        assert!(models.contains(&"gpt-6-astra-ultrafast".to_string()));
+        assert!(!models.contains(&"gpt-6-sol-ultrafast".to_string()));
         assert!(models.contains(&"gpt-6-luna".to_string()));
         assert!(models.contains(&"gpt-5.4".to_string()));
         assert!(models.contains(&"gpt-5.4-mini".to_string()));

@@ -1687,13 +1687,16 @@ impl CodexHttpClient {
                                     .and_then(serde_json::Value::as_array)
                                 {
                                     for item in items {
+                                        let mut done = serde_json::json!({
+                                            "type": "response.output_item.done",
+                                            "item": item,
+                                        });
                                         if item.get("type").and_then(serde_json::Value::as_str)
                                             == Some("function_call")
+                                            && let Err(error) = provisional_tools.observe(&mut done)
                                         {
-                                            if let Err(error) = provisional_tools.observe(&mut serde_json::json!({"type":"response.output_item.done", "item":item})) {
-                                                let _ = tx.send(Err(error)).await;
-                                                return;
-                                            }
+                                            let _ = tx.send(Err(error)).await;
+                                            return;
                                         }
                                     }
                                 }
