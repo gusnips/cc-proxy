@@ -3,7 +3,25 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
-## Unreleased
+## v0.1.47 (2026-09-30)
+
+- Codex streams that drop mid-response now recover more safely. HTTP streams
+  retry a partial tool call only if no tool call has reached Claude Code yet.
+  A WebSocket stream reconnects only while it has sent thinking and nothing
+  else. Recovery stops after 3 retries or 60 seconds from the first failure,
+  whichever comes first. A request that Claude Code cancels is never retried.
+- A Codex quota snapshot now returns a 429 only when the stream closes before
+  the response starts. Snapshots covered by credits, and snapshots on streams
+  that already started, no longer end the request.
+- `gpt-6-astra-ultrafast` requests Codex's `ultrafast` service tier. On other
+  models, `-ultrafast` falls back to `priority`. Stacked suffixes such as
+  `-fast-ultrafast` are rejected.
+- `autoReviewEffort` / `CCP_AUTO_REVIEW_EFFORT` sets the reasoning effort for
+  Codex auto-review requests only. Normal requests keep their own effort.
+- Grok hosted web search sends `allowed_domains` or `blocked_domains` (up to
+  five) and an approximate `user_location` as Grok's native search filters.
+
+## v0.1.43 to v0.1.46 (2026-09-30)
 
 - Fork renamed to `cc-proxy` (`gusnips/cc-proxy`): binary, config and state
   directories, install script, release archives, and docs. An existing
@@ -30,21 +48,6 @@ description: Release notes for cc-proxy.
   dotted keys, with secrets reported as set/unset only.
 - `cc-proxy opencode auth login` stores the API key with hidden input;
   a key in Claude Code settings is used as a last resort.
-- Codex streams that drop mid-response now recover more safely. HTTP streams
-  retry a partial tool call only if no tool call has reached Claude Code yet.
-  A WebSocket stream reconnects only while it has sent thinking and nothing
-  else. Recovery stops after 3 retries or 60 seconds from the first failure,
-  whichever comes first. A request that Claude Code cancels is never retried.
-- A Codex quota snapshot now returns a 429 only when the stream closes before
-  the response starts. Snapshots covered by credits, and snapshots on streams
-  that already started, no longer end the request.
-- `gpt-6-astra-ultrafast` requests Codex's `ultrafast` service tier. On other
-  models, `-ultrafast` falls back to `priority`. Stacked suffixes such as
-  `-fast-ultrafast` are rejected.
-- `autoReviewEffort` / `CCP_AUTO_REVIEW_EFFORT` sets the reasoning effort for
-  Codex auto-review requests only. Normal requests keep their own effort.
-- Grok hosted web search sends `allowed_domains` or `blocked_domains` (up to
-  five) and an approximate `user_location` as Grok's native search filters.
 
 ## v0.1.42 (2026-09-23)
 
