@@ -279,7 +279,17 @@ pub(crate) fn to_codex_effort(effort: Option<&str>) -> Option<Effort> {
     }
 }
 
-fn resolve_effort(effort: Option<Effort>) -> Result<Option<Effort>, anyhow::Error> {
+fn resolve_effort(
+    effort: Option<Effort>,
+    auto_review_route: bool,
+) -> Result<Option<Effort>, anyhow::Error> {
+    // The server sets this internal marker only after selecting a Codex
+    // auto-review route. With no review override, keep global precedence.
+    if auto_review_route && let Some(value) = config::auto_review_effort() {
+        return resolve_effort_override(effort, Some(&value)).map_err(|error| {
+            anyhow::anyhow!("autoReviewEffort / CCP_AUTO_REVIEW_EFFORT: {error}")
+        });
+    }
     resolve_effort_override(effort, config::codex_effort().as_deref())
 }
 
@@ -291,7 +301,7 @@ pub(crate) fn resolve_effort_override(
         let valid = ["none", "low", "medium", "high", "xhigh", "max"];
         if !valid.contains(&val) {
             anyhow::bail!(
-                "Invalid effort override: \"{val}\". Must be one of: none, low, medium, high, xhigh, max"
+                "Invalid effort override: \"{val}\". Use one of: none, low, medium, high, xhigh, max"
             );
         }
         return Ok(Some(match val {
@@ -591,7 +601,7 @@ fn translate_request_inner(
     let effort = read_effort(req)?;
     let codex_effort = to_codex_effort(effort);
     let mut resolved_effort = if apply_codex_config {
-        resolve_effort(codex_effort)?
+        resolve_effort(codex_effort, req.bypass_provider_model_override)?
     } else {
         codex_effort
     };

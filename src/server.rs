@@ -2449,6 +2449,30 @@ mod auto_review_tests {
     }
 
     #[test]
+    fn classifier_marker_must_start_a_system_block() {
+        let marker = "You are a security monitor for autonomous AI coding agents.";
+        let mut body = request("You are an interactive coding agent.", false, json!([]));
+        body.messages[0].content = json!(marker);
+        assert!(!is_claude_auto_review_request(&body));
+        let quoted = request(&format!("Example: {marker}"), false, json!([]));
+        assert!(!is_claude_auto_review_request(&quoted));
+        assert!(apply_auto_review_model(&mut body, false, None, "codex").is_none());
+        assert_eq!(body.model.as_deref(), Some("gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn client_json_cannot_set_the_auto_review_route_marker() {
+        let body: MessagesRequest = serde_json::from_value(json!({
+            "model":"gpt-6-sol",
+            "messages":[{"role":"user","content":"hello"}],
+            "bypass_provider_model_override":true
+        }))
+        .unwrap();
+        assert!(!body.bypass_provider_model_override);
+        assert!(!is_claude_auto_review_request(&body));
+    }
+
+    #[test]
     fn detects_claude_auto_review_classifier() {
         let body = request(
             "You are a security monitor for autonomous AI coding agents.\n\n## Context",

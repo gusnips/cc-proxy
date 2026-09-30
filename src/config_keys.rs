@@ -19,6 +19,8 @@ enum ConfigKind {
     Bool,
     /// One of a fixed set.
     Provider,
+    /// Codex auto-review effort, or off to inherit ordinary effort.
+    AutoReviewEffort,
     /// Codex tier, validated by the request translator.
     ServiceTier,
     /// Like Str, but get/list only ever print `set`/`unset`.
@@ -65,6 +67,13 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         env: &["CCP_AUTO_REVIEW_MODEL"],
         default: None,
         blurb: "model for background review passes",
+    },
+    ConfigKey {
+        path: "autoReviewEffort",
+        kind: ConfigKind::AutoReviewEffort,
+        env: &["CCP_AUTO_REVIEW_EFFORT"],
+        default: None,
+        blurb: "effort for routed Codex security reviews (none|low|medium|high|xhigh|max; off inherits)",
     },
     ConfigKey {
         path: "log.verbose",
@@ -192,6 +201,16 @@ fn parse_value(key: &ConfigKey, raw: &str) -> Result<serde_json::Value> {
             Ok(serde_json::Value::from(port))
         }
         ConfigKind::Bool => Ok(serde_json::Value::from(parse_bool(raw)?)),
+        ConfigKind::AutoReviewEffort => {
+            let value = raw.trim();
+            if value != "off" {
+                crate::providers::codex::translate::request::resolve_effort_override(
+                    None,
+                    Some(value),
+                )?;
+            }
+            Ok(serde_json::Value::String(value.to_string()))
+        }
         ConfigKind::ServiceTier => {
             let value = raw.trim();
             crate::providers::codex::translate::request::normalize_service_tier(value)?;
@@ -434,6 +453,19 @@ mod tests {
             assert_eq!(parse_value(key, value).unwrap(), serde_json::json!(value));
         }
         for value in ["", "turbo", "Ultrafast"] {
+            assert!(parse_value(key, value).is_err());
+        }
+    }
+
+    #[test]
+    fn auto_review_effort_config_key_validates_values_and_off() {
+        let key = find_key("autoReviewEffort").unwrap();
+        assert_eq!(key.env, &["CCP_AUTO_REVIEW_EFFORT"]);
+        assert_eq!(key.default, None);
+        for value in ["none", "low", "medium", "high", "xhigh", "max", "off"] {
+            assert_eq!(parse_value(key, value).unwrap(), serde_json::json!(value));
+        }
+        for value in ["", "bogus", "LOW"] {
             assert!(parse_value(key, value).is_err());
         }
     }

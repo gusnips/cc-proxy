@@ -44,6 +44,18 @@ When reasoning is enabled, the proxy requests an automatic reasoning summary and
 
 Claude Code summary compaction requests are capped at low effort by default because they perform extraction over a large transcript. `CCP_COMPACT_EFFORT=off` disables the cap, `none` removes reasoning, and another valid effort sets a different maximum. The cap never raises effort.
 
+### Auto-review effort
+
+Claude Code's non-streaming, tool-free security-review requests route to `gpt-6-luna` by default when they use Codex. `autoReviewModel` can select another model. To set a separate effort for these requests, use:
+
+```sh
+cc-proxy config set autoReviewEffort low
+```
+
+Or set `CCP_AUTO_REVIEW_EFFORT` for the proxy process. Accepted values are `none`, `low`, `medium`, `high`, `xhigh`, and `max`. This setting overrides global Codex effort only after an auto-review route selects Codex. `none` disables reasoning. Unset, empty, or `off` keeps ordinary effort precedence; an environment value of `off` disables the file setting. Invalid values fail only the selected review request and name the setting to fix.
+
+Normal messages, token counting, reviews routed to another provider, and OpenAI-compatible requests keep their existing effort rules. The compaction cap still applies last.
+
 ## Tools and multimodal input
 
 - Claude function tools and tool results map to Responses API function calls and outputs.

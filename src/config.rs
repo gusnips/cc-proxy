@@ -39,6 +39,8 @@ struct FileConfig {
     pub alias_provider: Option<String>,
     #[serde(rename = "autoReviewModel")]
     pub auto_review_model: Option<String>,
+    #[serde(rename = "autoReviewEffort")]
+    pub auto_review_effort: Option<String>,
     pub log: Option<FileLog>,
     pub kimi: Option<KimiConfig>,
     pub codex: Option<CodexConfig>,
@@ -356,6 +358,12 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
         out.push("CCP_AUTO_REVIEW_MODEL (env)".to_string());
     }
     if env
+        .get("CCP_AUTO_REVIEW_EFFORT")
+        .is_some_and(|raw| !raw.is_empty())
+    {
+        out.push("CCP_AUTO_REVIEW_EFFORT (env)".to_string());
+    }
+    if env
         .get("CCP_CODEX_REASONING_SIGNATURES")
         .is_some_and(|raw| !raw.is_empty())
     {
@@ -376,6 +384,12 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
             .is_some_and(|model| !model.is_empty())
         {
             out.push("autoReviewModel (config)".to_string());
+        }
+        if file_cfg
+            .auto_review_effort
+            .is_some_and(|effort| !effort.is_empty())
+        {
+            out.push("autoReviewEffort (config)".to_string());
         }
         if let Some(log) = file_cfg.log {
             if let Some(v) = log.verbose {
@@ -1088,6 +1102,20 @@ pub fn auto_review_model() -> Option<String> {
         .filter(|model| !model.is_empty())
 }
 
+/// Optional effort for selected Codex auto-review routes. Empty values
+/// inherit ordinary effort; `off` also disables a value from the file.
+pub fn auto_review_effort() -> Option<String> {
+    std::env::var("CCP_AUTO_REVIEW_EFFORT")
+        .ok()
+        .filter(|raw| !raw.is_empty())
+        .or_else(|| {
+            read_file_config(&paths::config_dir())
+                .and_then(|file| file.auto_review_effort)
+                .filter(|raw| !raw.is_empty())
+        })
+        .filter(|raw| raw != "off")
+}
+
 // ---------------------------------------------------------------------------
 // Codex transport config
 // ---------------------------------------------------------------------------
@@ -1291,6 +1319,10 @@ mod tests {
             EnvGuard::unset("CCP_CODEX_FULL_LANE"),
             EnvGuard::unset("CCP_CODEX_REASONING_SIGNATURES"),
             EnvGuard::unset("CCP_AUTO_REVIEW_MODEL"),
+            EnvGuard::unset("CCP_AUTO_REVIEW_EFFORT"),
+            EnvGuard::unset("CCP_CODEX_EFFORT"),
+            EnvGuard::unset("CCP_CODEX_SERVICE_TIER"),
+            EnvGuard::unset("CCP_COMPACT_EFFORT"),
         ];
         guards.push(EnvGuard::set("CCP_CONFIG_DIR", config.path()));
         guards
@@ -1740,6 +1772,233 @@ mod tests {
             let _summary_env = EnvGuard::set("CCP_CODEX_REASONING_SUMMARY", "");
             assert_eq!(codex_reasoning_summary().as_deref(), Some("off"));
         }
+    }
+
+    fn auto_review_translation(
+        selected_route: bool,
+        compact: bool,
+    ) -> anyhow::Result<crate::providers::codex::translate::request::ResponsesRequest> {
+        use crate::providers::codex::translate::request::{TranslateOptions, translate_request};
+        let system = if compact {
+            "You are a security monitor for autonomous AI coding agents. You are a helpful AI assistant tasked with summarizing conversations."
+        } else {
+            "You are a security monitor for autonomous AI coding agents."
+        };
+        let mut request: crate::anthropic::schema::MessagesRequest =
+            serde_json::from_value(serde_json::json!({
+                "model":"gpt-6-luna",
+                "messages":[{"role":"user","content":"review this command"}],
+                "system":[{"type":"text","text":system}],
+                "output_config":{"effort":"medium","format":{"type":"json_object"}}
+            }))
+            .unwrap();
+        // Simulate the marker the server sets after final provider selection.
+        request.bypass_provider_model_override = selected_route;
+        let original_output_config = request.extra["output_config"].clone();
+        let translated = translate_request(
+            &request,
+            TranslateOptions {
+                session_id: None,
+                service_tier: None,
+                model: "gpt-6-luna".to_string(),
+                use_responses_lite: true,
+            },
+        );
+        assert_eq!(request.extra["output_config"], original_output_config);
+        translated
+    }
+
+    #[test]
+    fn auto_review_effort_defaults_off_and_obeys_env_file_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        let path = config.path().join("config.json");
+        std::fs::write(&path, "{}").unwrap();
+        assert_eq!(auto_review_effort(), None);
+        std::fs::write(&path, r#"{"autoReviewEffort":"low"}"#).unwrap();
+        assert_eq!(auto_review_effort().as_deref(), Some("low"));
+        for (value, expected) in [("high", Some("high")), ("", Some("low")), ("off", None)] {
+            let _override = EnvGuard::set("CCP_AUTO_REVIEW_EFFORT", value);
+            assert_eq!(auto_review_effort().as_deref(), expected);
+        }
+        for value in ["", "off"] {
+            std::fs::write(
+                &path,
+                serde_json::json!({"autoReviewEffort":value}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(auto_review_effort(), None);
+        }
+    }
+
+    #[test]
+    fn auto_review_effort_only_overrides_global_for_selected_codex_routes() {
+        use crate::providers::codex::translate::request::{Effort, ResponsesTextFormat};
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        let path = config.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"autoReviewEffort":"low","codex":{"effort":"max"}}"#,
+        )
+        .unwrap();
+        let selected = auto_review_translation(true, false).unwrap();
+        assert_eq!(selected.reasoning.unwrap().effort, Some(Effort::Low));
+        assert!(matches!(
+            selected.text.format,
+            Some(ResponsesTextFormat::JsonObject)
+        ));
+        assert_eq!(
+            auto_review_translation(false, false)
+                .unwrap()
+                .reasoning
+                .unwrap()
+                .effort,
+            Some(Effort::Max)
+        );
+        {
+            let _global = EnvGuard::set("CCP_CODEX_EFFORT", "bogus");
+            assert_eq!(
+                auto_review_translation(true, false)
+                    .unwrap()
+                    .reasoning
+                    .unwrap()
+                    .effort,
+                Some(Effort::Low)
+            );
+            assert!(auto_review_translation(false, false).is_err());
+        }
+        for file in [
+            r#"{"codex":{"effort":"max"}}"#,
+            r#"{"autoReviewEffort":"off","codex":{"effort":"max"}}"#,
+        ] {
+            std::fs::write(&path, file).unwrap();
+            assert_eq!(
+                auto_review_translation(true, false)
+                    .unwrap()
+                    .reasoning
+                    .unwrap()
+                    .effort,
+                Some(Effort::Max)
+            );
+        }
+        std::fs::write(&path, "{}").unwrap();
+        assert_eq!(
+            auto_review_translation(true, false)
+                .unwrap()
+                .reasoning
+                .unwrap()
+                .effort,
+            Some(Effort::Medium)
+        );
+    }
+
+    #[test]
+    fn auto_review_effort_validates_values_only_for_selected_routes() {
+        use crate::providers::codex::translate::request::{
+            Effort, translate_openai_compatible_request,
+        };
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"effort":"high"}}"#,
+        )
+        .unwrap();
+        for (value, expected) in [
+            ("none", Effort::None),
+            ("low", Effort::Low),
+            ("medium", Effort::Medium),
+            ("high", Effort::High),
+            ("xhigh", Effort::Xhigh),
+            ("max", Effort::Max),
+        ] {
+            let _override = EnvGuard::set("CCP_AUTO_REVIEW_EFFORT", value);
+            let selected = auto_review_translation(true, false).unwrap();
+            let reasoning = selected.reasoning.unwrap();
+            assert_eq!(reasoning.effort, Some(expected));
+            if value == "none" {
+                assert_eq!(reasoning.summary, None);
+                assert_eq!(selected.include, None);
+            }
+            assert_eq!(
+                auto_review_translation(false, false)
+                    .unwrap()
+                    .reasoning
+                    .unwrap()
+                    .effort,
+                Some(Effort::High)
+            );
+        }
+        for value in ["bogus", "LOW", " low "] {
+            let _override = EnvGuard::set("CCP_AUTO_REVIEW_EFFORT", value);
+            let error = auto_review_translation(true, false)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("CCP_AUTO_REVIEW_EFFORT"));
+            assert!(error.contains("none, low, medium, high, xhigh, max"));
+            assert_eq!(
+                auto_review_translation(false, false)
+                    .unwrap()
+                    .reasoning
+                    .unwrap()
+                    .effort,
+                Some(Effort::High)
+            );
+            let request = serde_json::from_value(serde_json::json!({
+                "model":"foreign-model","messages":[{"role":"user","content":"hello"}],
+                "output_config":{"effort":"medium"}
+            }))
+            .unwrap();
+            let translated =
+                translate_openai_compatible_request(&request, "foreign-model".to_string(), None)
+                    .unwrap();
+            assert_eq!(translated.reasoning.unwrap().effort, Some(Effort::Medium));
+        }
+    }
+
+    #[test]
+    fn auto_review_effort_compaction_cap_remains_final() {
+        use crate::providers::codex::translate::request::Effort;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = tempfile::TempDir::new().unwrap();
+        let _env = isolated_env(&config);
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"autoReviewEffort":"max","codex":{"effort":"high"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            auto_review_translation(true, true)
+                .unwrap()
+                .reasoning
+                .unwrap()
+                .effort,
+            Some(Effort::Low)
+        );
+        {
+            let _cap = EnvGuard::set("CCP_COMPACT_EFFORT", "off");
+            assert_eq!(
+                auto_review_translation(true, true)
+                    .unwrap()
+                    .reasoning
+                    .unwrap()
+                    .effort,
+                Some(Effort::Max)
+            );
+        }
+        let _override = EnvGuard::set("CCP_AUTO_REVIEW_EFFORT", "none");
+        assert_eq!(
+            auto_review_translation(true, true)
+                .unwrap()
+                .reasoning
+                .unwrap()
+                .effort,
+            Some(Effort::None)
+        );
     }
 
     #[test]

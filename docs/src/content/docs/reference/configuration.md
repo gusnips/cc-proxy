@@ -66,7 +66,8 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 | `PORT` | `port` | `18765` | Listener port. |
 | `CCP_CONFIG_DIR` | none | Platform config directory | Replaces the configuration and file-backed auth root. |
 | `CCP_ALIAS_PROVIDER` | `aliasProvider` | `codex` | Routes recognized Anthropic-style aliases through `codex` or `kimi`. |
-| `CCP_AUTO_REVIEW_MODEL` | `autoReviewModel` | `gpt-6-luna` for Codex | Routes Claude Code's non-streaming, tool-free Bash security-review classifier through a registered model. |
+| `CCP_AUTO_REVIEW_MODEL` | `autoReviewModel` | `gpt-6-luna` for Codex | Routes Claude Code's non-streaming, tool-free Bash security-review classifier through a routable model. |
+| `CCP_AUTO_REVIEW_EFFORT` | `autoReviewEffort` | unset | Sets `none`, `low`, `medium`, `high`, `xhigh`, or `max` only for auto-review requests routed to Codex. `off` inherits ordinary effort. |
 | `CCP_LOG_STDERR` | `log.stderr` | `false` | Mirrors logs to stderr when present in the environment, regardless of its value. |
 | `CCP_LOG_VERBOSE` | `log.verbose` | `false` | Preserves full string fields in structured logs when present, regardless of its value. |
 | `CCP_TRAFFIC_LOG` | none | `false` | Enables full request captures for `1`, `true`, or `yes`. |
@@ -74,7 +75,9 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 
 `CCP_CONFIG_DIR` affects `config.json` and file-backed provider auth. It does not relocate the state directory.
 
-Codex auto-review classifier requests use `gpt-6-luna` by default. Requests routed through other providers retain their requested model. `CCP_AUTO_REVIEW_MODEL` or `autoReviewModel` selects an explicit registered model for all detected classifier requests without changing the session's provider affinity. Normal messages, streaming requests, tool-using requests, and token counting retain their requested model.
+Codex auto-review classifier requests use `gpt-6-luna` by default. Requests routed through other providers retain their requested model. `CCP_AUTO_REVIEW_MODEL` or `autoReviewModel` selects an explicit routable model for detected classifier requests without changing the session's provider affinity. Normal messages, streaming requests, tool-using requests, and token counting retain their requested model.
+
+`autoReviewEffort` is disabled by default and applies only when an auto-review route selects Codex. It overrides `codex.effort` or `CCP_CODEX_EFFORT` for that request; `none` explicitly disables reasoning. Unset, empty, or `off` inherits ordinary effort. A non-empty `CCP_AUTO_REVIEW_EFFORT` wins over the file; `off` disables the file value, while an empty environment value falls through to it. Invalid values fail the selected review request with the accepted values. The compaction cap still applies last. Other providers and OpenAI-compatible requests are unchanged.
 
 ## Outbound proxies
 
