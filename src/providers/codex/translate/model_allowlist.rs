@@ -168,6 +168,11 @@ fn resolve_with_model_override(model: &str, override_model: Option<&str>) -> Res
         .unwrap_or(model);
 
     let requested = resolve_tier_model_alias(alias);
+    // A model override must not hide a repeated or mixed local suffix.
+    // Keep the unresolved suffix so the routing gate rejects the request.
+    if requested.model.ends_with("-fast") || requested.model.ends_with("-ultrafast") {
+        return requested;
+    }
     let resolved = match override_model {
         Some(val) if !val.is_empty() => resolve_tier_model_alias(val),
         _ => requested.clone(),
@@ -399,8 +404,10 @@ mod tests {
             "gpt-6-astra-fast-ultrafast",
             "gpt-9-unlisted-ultrafast-ultrafast",
         ] {
-            let resolved = resolve_with_model_override(model, None);
-            assert!(assert_routable_model(&resolved.model).is_err(), "{model}");
+            for override_model in [None, Some("gpt-6-astra")] {
+                let resolved = resolve_with_model_override(model, override_model);
+                assert!(assert_routable_model(&resolved.model).is_err(), "{model}");
+            }
         }
         for model in ["-fast", "grok-9-fast", "kimi-k9-ultrafast"] {
             assert_eq!(split_tier_suffix(model), None);
