@@ -291,7 +291,7 @@ fn auth_error(_: anyhow::Error) -> GrokError {
     GrokError {
         status: StatusCode::UNAUTHORIZED,
         retry_after: None,
-        message: "Grok authentication requires official CLI login and proxy import".into(),
+        message: "Grok authentication requires login; run `cc-proxy grok auth login` and retry the request".into(),
     }
 }
 

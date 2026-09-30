@@ -19,7 +19,7 @@ use crate::traffic::{
 
 use super::client::{CodexError, CodexHttpClient};
 use super::translate::model_allowlist::{
-    MODEL_ALIASES, allowed_models_display, assert_allowed_model, full_lane_web_search_model,
+    MODEL_ALIASES, allowed_models_display, assert_routable_model, full_lane_web_search_model,
     is_allowed_model, uses_responses_lite,
 };
 
@@ -95,7 +95,7 @@ pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
             )
         })?;
     let (resolved, _) = resolve_native_model(&requested);
-    if let Err(error) = assert_allowed_model(&resolved) {
+    if let Err(error) = assert_routable_model(&resolved) {
         return Err(openai_error(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",

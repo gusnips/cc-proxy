@@ -21,6 +21,7 @@ pub const ALLOWED_MODELS: &[&str] = &[
     "gpt-6-astra",
     "gpt-6-luna",
     "gpt-6-sol",
+    "gpt-6.1-sol",
 ];
 
 pub const MODEL_ALIASES: &[(&str, &str)] = &[
@@ -96,6 +97,17 @@ fn resolve_fast_model_alias(model: &str) -> ResolvedModel {
             model: base.to_string(),
             service_tier: Some(ServiceTier::Priority),
         }
+    } else if let Some(base) = model
+        .strip_suffix("-fast")
+        .filter(|base| base.starts_with("gpt-"))
+    {
+        // The `-fast` suffix is ours: an unlisted `gpt-9-x-fast` still means
+        // `gpt-9-x` at priority tier, and Codex reports the base ID itself
+        // when it never heard of it.
+        ResolvedModel {
+            model: base.to_string(),
+            service_tier: Some(ServiceTier::Priority),
+        }
     } else {
         ResolvedModel {
             model: model.to_string(),
@@ -155,6 +167,21 @@ impl std::fmt::Display for ModelNotAllowedError {
 
 pub fn assert_allowed_model(model: &str) -> Result<(), ModelNotAllowedError> {
     if is_allowed_model(model) {
+        Ok(())
+    } else {
+        Err(ModelNotAllowedError {
+            model: model.to_string(),
+        })
+    }
+}
+
+/// Routing gate: everything `assert_allowed_model` accepts, plus any
+/// `gpt-*` ID the catalog never listed. Unlisted IDs forward to Codex
+/// verbatim — Codex reports the ones it never heard of, so a launch-day
+/// model works before any proxy release lists it. Same pattern as
+/// `opencode-go/` IDs for OpenCode Go.
+pub fn assert_routable_model(model: &str) -> Result<(), ModelNotAllowedError> {
+    if is_allowed_model(model) || model.starts_with("gpt-") {
         Ok(())
     } else {
         Err(ModelNotAllowedError {
@@ -320,6 +347,21 @@ mod tests {
     fn not_allowed_rejected() {
         assert!(assert_allowed_model("gpt-7").is_err());
         assert!(assert_allowed_model("gpt-7-fast").is_err());
+    }
+
+    #[test]
+    fn routable_accepts_unlisted_gpt_but_rejects_foreign_ids() {
+        assert!(assert_routable_model("gpt-6.1-sol").is_ok());
+        assert!(assert_routable_model("gpt-9-future").is_ok());
+        assert!(assert_routable_model("not-a-model").is_err());
+        assert!(assert_routable_model("claude-sonnet-9").is_err());
+    }
+
+    #[test]
+    fn unlisted_gpt_fast_strips_suffix_with_priority() {
+        let r = resolve_model_request("gpt-9-future-fast");
+        assert_eq!(r.model, "gpt-9-future");
+        assert_eq!(r.service_tier, Some(ServiceTier::Priority));
     }
 
     #[test]

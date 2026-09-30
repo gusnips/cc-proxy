@@ -9,7 +9,7 @@ The model ID in each request selects its provider. One proxy listener can serve 
 
 | Pattern | Provider |
 | --- | --- |
-| Registered `gpt-*` IDs and their `-fast` forms | Codex |
+| Any `gpt-*` ID and its `-fast` form (unlisted IDs forward to Codex raw; Codex reports unknown ones) | Codex |
 | `k3`, `kimi-k3`, `kimi-k2.6`, `k2.6` (legacy `kimi-for-coding`) | Kimi |
 | `grok-composer-2.5-fast`, `grok-4.5`, `grok-4.6`, `grok-4.7` | Grok |
 | Non-conflicting OpenCode Go IDs and **every** `opencode-go/<model-id>`, registered or not | OpenCode Go |

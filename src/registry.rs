@@ -51,6 +51,7 @@ pub(crate) const CODEX_MODELS: &[&str] = &[
     "gpt-6-astra",
     "gpt-6-luna",
     "gpt-6-sol",
+    "gpt-6.1-sol",
 ];
 
 pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "kimi-k3", "k2.6", "k3"];
@@ -228,6 +229,13 @@ impl Registry {
             }
         }
 
+        // Unlisted `gpt-*` IDs ride the Codex provider raw — same pattern as
+        // `opencode-go/`: Codex reports unknown IDs, so a launch-day model
+        // works before any proxy release lists it.
+        if normalized.starts_with("gpt-") {
+            return self.handlers.get("codex").cloned();
+        }
+
         None
     }
 
@@ -238,7 +246,10 @@ impl Registry {
             models.sort_unstable();
             parts.push(format!("{}: {}", provider, models.join(", ")));
         }
-        format!("Supported: {}.", parts.join("; "))
+        format!(
+            "Supported: {}. Run `cc-proxy models` for the current catalog.",
+            parts.join("; ")
+        )
     }
 }
 
@@ -472,12 +483,29 @@ mod tests {
     #[test]
     fn gpt_6_sol_and_luna_route_to_codex() {
         let registry = Registry::new(AliasProvider::Codex);
-        for model in ["gpt-6-sol", "gpt-6-sol-fast", "gpt-6-luna"] {
+        for model in ["gpt-6-sol", "gpt-6-sol-fast", "gpt-6-luna", "gpt-6.1-sol"] {
             assert_eq!(
                 registry.provider_for_model(model, None).unwrap().name(),
                 "codex"
             );
         }
+    }
+
+    #[test]
+    fn unlisted_gpt_models_forward_to_codex_raw() {
+        let registry = Registry::new(AliasProvider::Codex);
+        for model in ["gpt-9-future", "gpt-9-future-fast"] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                "codex",
+                "{model}"
+            );
+        }
+        assert!(
+            registry
+                .provider_for_model("definitely-not-a-model", None)
+                .is_none()
+        );
     }
 
     #[test]
