@@ -14,7 +14,7 @@ use crate::anthropic::{
 };
 use crate::monitor::{MonitorHandle, usage_from_anthropic_sse};
 use crate::providers::{
-    grok::translate::stream::SseDecoder,
+    grok::translate::stream::{SseDecoder, stream_error},
     translate_shared::{
         ContentBlock, flatten_system_text, image_source_to_url, normalize_content, read_effort,
     },
@@ -1085,13 +1085,6 @@ pub fn accumulate_response(
     translator.push(input)?;
     translator.finish()?;
     translator.state.response()
-}
-
-pub fn stream_error(error_type: &str, message: &str) -> Vec<u8> {
-    encode_sse_event(
-        Some("error"),
-        &json!({"type":"error","error":{"type":error_type,"message":message}}).to_string(),
-    )
 }
 
 pub fn stream_body<S>(
