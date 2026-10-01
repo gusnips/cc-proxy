@@ -54,7 +54,7 @@ Set both model variables to routable IDs:
 
 ```sh
 ANTHROPIC_MODEL=gpt-6-sol[1m]
-ANTHROPIC_SMALL_FAST_MODEL=gpt-6-luna[1m]
+ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-6-luna[1m]
 ```
 
 Claude Code sends background work to its small/fast model. Its built-in Haiku ID can route through `aliasProvider`, but a concrete provider ID keeps the behavior explicit.
@@ -78,7 +78,7 @@ CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \
 ANTHROPIC_BASE_URL=http://127.0.0.1:18765 \
 ANTHROPIC_AUTH_TOKEN=unused \
 ANTHROPIC_MODEL=gpt-6-sol[1m] \
-ANTHROPIC_SMALL_FAST_MODEL=gpt-6-luna[1m] \
+ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-6-luna[1m] \
   claude
 ```
 

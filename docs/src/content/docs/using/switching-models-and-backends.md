@@ -7,6 +7,7 @@ Claude Code binds its base URL and client auth when the process starts. A **back
 
 | Goal | Pattern |
 | --- | --- |
+| Start one session on the proxy | `cc-proxy claude`, with any `claude` flags |
 | Always use the proxy | Put client variables in `~/.claude/settings.json` |
 | Try one model once | Prefix `claude` with environment variables or use an alias |
 | Toggle between proxy and direct Anthropic | Use a launch wrapper controlled by a flag |
@@ -15,8 +16,8 @@ Claude Code binds its base URL and client auth when the process starts. A **back
 ## One-shot aliases
 
 ```sh
-alias csol='ANTHROPIC_BASE_URL=http://127.0.0.1:18765 ANTHROPIC_AUTH_TOKEN=unused ANTHROPIC_MODEL=gpt-6-sol[1m] ANTHROPIC_SMALL_FAST_MODEL=gpt-6-luna[1m] CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 claude'
-alias cgrok='ANTHROPIC_BASE_URL=http://127.0.0.1:18765 ANTHROPIC_AUTH_TOKEN=unused ANTHROPIC_MODEL=grok-4.5 ANTHROPIC_SMALL_FAST_MODEL=grok-4.5 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 claude'
+alias csol='ANTHROPIC_BASE_URL=http://127.0.0.1:18765 ANTHROPIC_AUTH_TOKEN=unused ANTHROPIC_MODEL=gpt-6-sol[1m] ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-6-luna[1m] CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 claude'
+alias cgrok='ANTHROPIC_BASE_URL=http://127.0.0.1:18765 ANTHROPIC_AUTH_TOKEN=unused ANTHROPIC_MODEL=grok-4.5 ANTHROPIC_DEFAULT_HAIKU_MODEL=grok-4.5 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 claude'
 ```
 
 These affect only the launched process.
@@ -41,7 +42,7 @@ if [ -f "$flag" ]; then
   export ANTHROPIC_BASE_URL="http://127.0.0.1:18765"
   export ANTHROPIC_AUTH_TOKEN="unused"
   export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-$model}"
-  export ANTHROPIC_SMALL_FAST_MODEL="${ANTHROPIC_SMALL_FAST_MODEL:-$model}"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL:-$model}"
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
   export CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1
 fi

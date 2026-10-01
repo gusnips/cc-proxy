@@ -53,7 +53,7 @@ they do not belong to another provider:
 
 ```sh
 ANTHROPIC_MODEL=opencode-go/glm-5.2 \
-ANTHROPIC_SMALL_FAST_MODEL=opencode-go/glm-5.2 \
+ANTHROPIC_DEFAULT_HAIKU_MODEL=opencode-go/glm-5.2 \
   claude --model opencode-go/glm-5.2
 ```
 

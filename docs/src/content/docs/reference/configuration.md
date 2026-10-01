@@ -15,6 +15,10 @@ These settings configure the proxy process. Claude Code client settings such as 
   "port": 18765,
   "aliasProvider": "codex",
   "autoReviewModel": "gpt-5.6-terra",
+  "claude": {
+    "model": "gpt-6-sol",
+    "fastModel": "gpt-6-luna"
+  },
   "codex": {
     "originator": "cc-proxy",
     "userAgent": "cc-proxy/0.1.24",
@@ -67,6 +71,8 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 | `CCP_CONFIG_DIR` | none | Platform config directory | Replaces the configuration and file-backed auth root. |
 | `CCP_ALIAS_PROVIDER` | `aliasProvider` | `codex` | Routes recognized Anthropic-style aliases through `codex` or `kimi`. |
 | `CCP_AUTO_REVIEW_MODEL` | `autoReviewModel` | `gpt-6-luna` for Codex | Routes Claude Code's non-streaming, tool-free Bash security-review classifier through a routable model. |
+| none | `claude.model` | unset | The model `cc-proxy claude` starts Claude Code on, as `ANTHROPIC_MODEL`. |
+| none | `claude.fastModel` | unset | The model for Claude Code's small background requests under `cc-proxy claude`, as `ANTHROPIC_DEFAULT_HAIKU_MODEL`. |
 | `CCP_AUTO_REVIEW_EFFORT` | `autoReviewEffort` | unset | Sets `none`, `low`, `medium`, `high`, `xhigh`, or `max` only for auto-review requests routed to Codex. `off` inherits ordinary effort. |
 | `CCP_LOG_STDERR` | `log.stderr` | `false` | Mirrors logs to stderr when present in the environment, regardless of its value. |
 | `CCP_LOG_VERBOSE` | `log.verbose` | `false` | Preserves full string fields in structured logs when present, regardless of its value. |

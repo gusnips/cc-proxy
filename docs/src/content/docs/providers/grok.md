@@ -24,11 +24,11 @@ The proxy owns and refreshes its Grok tokens. It does not read `~/.grok/auth.jso
 
 ## Models
 
-The catalog includes `grok-composer-2.5-fast`, `grok-4.5`, `grok-4.6`, and `grok-4.7`. Run `cc-proxy models` for the current list. Access depends on your account and region. Set `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` to the same Grok ID.
+The catalog includes `grok-composer-2.5-fast`, `grok-4.5`, `grok-4.6`, and `grok-4.7`. Run `cc-proxy models` for the current list. Access depends on your account and region. Set `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_HAIKU_MODEL` to the same Grok ID.
 
 ```sh
 ANTHROPIC_MODEL=grok-4.6 \
-ANTHROPIC_SMALL_FAST_MODEL=grok-4.6 \
+ANTHROPIC_DEFAULT_HAIKU_MODEL=grok-4.6 \
   claude --model grok-4.6
 ```
 

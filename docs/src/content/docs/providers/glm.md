@@ -32,7 +32,7 @@ Run `cc-proxy models` for the current catalog. GLM serves `glm-5.3` and
 
 ```sh
 ANTHROPIC_MODEL=glm-5.3 \
-ANTHROPIC_SMALL_FAST_MODEL=glm-5.3-flash \
+ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5.3-flash \
   claude --model glm-5.3
 ```
 

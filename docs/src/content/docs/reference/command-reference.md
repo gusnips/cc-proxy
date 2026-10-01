@@ -1,6 +1,6 @@
 ---
 title: Command reference
-description: Canonical cc-proxy command syntax for serving, monitoring, listing models, version output, provider authentication, and OpenCode Go usage.
+description: Canonical cc-proxy command syntax for starting Claude Code, serving, monitoring, listing models, version output, provider authentication, and OpenCode Go usage.
 ---
 
 Running `cc-proxy` without a subcommand is equivalent to `cc-proxy serve`.
@@ -14,6 +14,27 @@ cc-proxy version
 ```
 
 Each prints `cc-proxy <version>`.
+
+## `claude`
+
+```sh
+cc-proxy claude [claude arguments...]
+```
+
+Starts Claude Code on the proxy. If nothing answers on the configured port,
+it starts the background service first. Then it runs
+`claude --settings '<json>'` followed by every argument you gave, unchanged.
+`cc-proxy claude --help` shows Claude Code's own help.
+
+The JSON holds the variables in
+[Configure Claude Code](/using/configure-claude-code/), plus `claude.model` and
+`claude.fastModel` from `config.json` when they are set. Settings passed this
+way rank above `~/.claude/settings.json` and the project's settings, for that
+session only.
+
+On Unix, cc-proxy replaces itself with `claude`, so the exit code and signals
+are Claude Code's own. On Windows it waits for `claude` and exits with its
+code. If there's no `claude` on `PATH`, it exits with code 127.
 
 ## `serve`
 
