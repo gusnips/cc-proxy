@@ -34,8 +34,7 @@ use crate::providers::cursor::response::{
     CursorDecodeError, decode_cursor_upstream, decode_upstream_response,
 };
 use crate::providers::cursor::tool_bridge::{
-    BridgeRegistry, advertised_tool_names, can_bridge_cursor_native_tools, find_tool_result,
-    resume_cursor_tool_bridge, start_cursor_tool_bridge,
+    advertised_tool_names, can_bridge_cursor_native_tools, start_cursor_tool_bridge,
 };
 
 // ---------------------------------------------------------------------------
@@ -84,30 +83,6 @@ impl Provider for CursorProvider {
             );
         }
 
-        if let Some(ref session_id) = ctx.session_id
-            && let Some(pending) = BridgeRegistry::pending_tool(session_id)
-            && let Some(result) = find_tool_result(&body, pending.tool_use_id())
-        {
-            let (_result_messages, sse_bytes) =
-                resume_cursor_tool_bridge(session_id, &message_id, model, result, &pending);
-            if let Some(monitor) = ctx.monitor.as_ref() {
-                let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
-                monitor.stream_progress(
-                    &ctx.req_id,
-                    sse_bytes.len() as u64,
-                    count_sse_events(&sse_bytes),
-                    input_tokens,
-                    output_tokens,
-                );
-            }
-            let headers = [
-                (http::header::CONTENT_TYPE, "text/event-stream"),
-                (http::header::CACHE_CONTROL, "no-cache"),
-                (http::header::CONNECTION, "keep-alive"),
-            ];
-            return (headers, sse_bytes).into_response();
-        }
-
         let auth = match load_cursor_auth() {
             Ok(Some(auth)) => auth,
             Ok(None) => {
@@ -151,60 +126,37 @@ impl Provider for CursorProvider {
         };
 
         if want_stream {
-            let session_id = ctx.session_id.as_deref();
-            let bridge_eligible = can_bridge_cursor_native_tools(&body, session_id);
-
-            if bridge_eligible {
+            let sse_bytes = if can_bridge_cursor_native_tools(&body, ctx.session_id.as_deref()) {
                 let events = match decode_upstream_response(&upstream.body) {
                     Ok(e) => e,
                     Err(e) => return map_cursor_decode_error_to_response(&e),
                 };
-
-                let allowed = advertised_tool_names(&body);
-                let (sse_bytes, _paused) = start_cursor_tool_bridge(
+                start_cursor_tool_bridge(
                     &message_id,
                     model,
-                    session_id.unwrap(),
                     &events,
-                    allowed,
+                    advertised_tool_names(&body),
                     Box::new(|| uuid::Uuid::new_v4().to_string().replace('-', "")),
-                );
-                if let Some(monitor) = ctx.monitor.as_ref() {
-                    let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
-                    monitor.stream_progress(
-                        &ctx.req_id,
-                        sse_bytes.len() as u64,
-                        count_sse_events(&sse_bytes),
-                        input_tokens,
-                        output_tokens,
-                    );
-                }
-
-                let headers = [
-                    (http::header::CONTENT_TYPE, "text/event-stream"),
-                    (http::header::CACHE_CONTROL, "no-cache"),
-                    (http::header::CONNECTION, "keep-alive"),
-                ];
-                (headers, sse_bytes).into_response()
+                )
             } else {
-                let sse_bytes = sse::frame_cursor_stream(&upstream, &message_id, model);
-                if let Some(monitor) = ctx.monitor.as_ref() {
-                    let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
-                    monitor.stream_progress(
-                        &ctx.req_id,
-                        sse_bytes.len() as u64,
-                        count_sse_events(&sse_bytes),
-                        input_tokens,
-                        output_tokens,
-                    );
-                }
-                let headers = [
-                    (http::header::CONTENT_TYPE, "text/event-stream"),
-                    (http::header::CACHE_CONTROL, "no-cache"),
-                    (http::header::CONNECTION, "keep-alive"),
-                ];
-                (headers, sse_bytes).into_response()
+                sse::frame_cursor_stream(&upstream, &message_id, model)
+            };
+            if let Some(monitor) = ctx.monitor.as_ref() {
+                let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
+                monitor.stream_progress(
+                    &ctx.req_id,
+                    sse_bytes.len() as u64,
+                    count_sse_events(&sse_bytes),
+                    input_tokens,
+                    output_tokens,
+                );
             }
+            let headers = [
+                (http::header::CONTENT_TYPE, "text/event-stream"),
+                (http::header::CACHE_CONTROL, "no-cache"),
+                (http::header::CONNECTION, "keep-alive"),
+            ];
+            (headers, sse_bytes).into_response()
         } else {
             match decode_cursor_upstream(&upstream, &message_id, model) {
                 Ok(json) => {
@@ -256,17 +208,6 @@ impl Provider for CursorProvider {
             monitor.model_resolved(&ctx.req_id, &resolved.model_id);
         }
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
-        if let Some(session_id) = ctx.session_id.as_deref()
-            && let Some(pending) = BridgeRegistry::pending_tool(session_id)
-            && let Some(result) = find_tool_result(&body, pending.tool_use_id())
-        {
-            let (_, bytes) =
-                resume_cursor_tool_bridge(session_id, &message_id, &requested, result, &pending);
-            return Ok(Generation {
-                body: GenerationBody::BufferedSse(bytes.into()),
-                resolved_model: resolved.model_id,
-            });
-        }
         let auth = load_cursor_auth()
             .map_err(|error| {
                 ProviderError::new(
@@ -318,12 +259,10 @@ impl Provider for CursorProvider {
             start_cursor_tool_bridge(
                 &message_id,
                 &requested,
-                ctx.session_id.as_deref().expect("bridge session validated"),
                 &events,
                 allowed,
                 Box::new(|| uuid::Uuid::new_v4().simple().to_string()),
             )
-            .0
         } else {
             sse::frame_cursor_stream(&upstream, &message_id, &requested)
         };
