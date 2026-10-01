@@ -415,11 +415,17 @@ struct Usage {
     completion_tokens: Option<u64>,
     cached_tokens: Option<u64>,
     prompt_tokens_details: Option<PromptTokensDetails>,
+    completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 struct PromptTokensDetails {
     cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct CompletionTokensDetails {
+    reasoning_tokens: Option<u64>,
 }
 
 impl Usage {
@@ -430,12 +436,23 @@ impl Usage {
             .and_then(|details| details.cached_tokens)
             .or(self.cached_tokens)
             .unwrap_or(0);
-        json!({
+        let mut usage = json!({
             "input_tokens":self.prompt_tokens.unwrap_or(0).saturating_sub(cached),
             "output_tokens":self.completion_tokens.unwrap_or(0),
             "cache_creation_input_tokens":0,
             "cache_read_input_tokens":cached,
-        })
+        });
+        // Reasoning is counted inside completion_tokens; its share rides along
+        // so the OpenAI routes report it instead of a zero.
+        if let Some(reasoning) = self
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens)
+        {
+            usage["output_tokens_details"] =
+                json!({"reasoning_tokens":reasoning, "thinking_tokens":reasoning});
+        }
+        usage
     }
 }
 
@@ -821,17 +838,10 @@ impl TranslationState {
         self.close_text(&mut out);
         self.close_tools(&mut out);
         self.ensure_message_start(&mut out);
-        let stop = self.pending_stop.unwrap_or({
-            if self.tools.is_empty() {
-                StopReason::EndTurn
-            } else {
-                StopReason::ToolUse
-            }
-        });
         emit(
             &mut out,
             "message_delta",
-            json!({"type":"message_delta","delta":{"stop_reason":stop.anthropic(),"stop_sequence":null},"usage":self.usage.anthropic()}),
+            json!({"type":"message_delta","delta":{"stop_reason":self.stop_reason().anthropic(),"stop_sequence":null},"usage":self.usage.anthropic()}),
         );
         emit(&mut out, "message_stop", json!({"type":"message_stop"}));
         self.finished = true;
@@ -865,23 +875,28 @@ impl TranslationState {
                 }
             }
         }
-        let stop = self.pending_stop.unwrap_or({
-            if self.tools.is_empty() {
-                StopReason::EndTurn
-            } else {
-                StopReason::ToolUse
-            }
-        });
         Ok(json!({
             "id":self.message_id,
             "type":"message",
             "role":"assistant",
             "model":self.model,
             "content":content,
-            "stop_reason":stop.anthropic(),
+            "stop_reason":self.stop_reason().anthropic(),
             "stop_sequence":null,
             "usage":self.usage.anthropic(),
         }))
+    }
+
+    /// A turn that called tools ends on tool_use even when finish_reason says
+    /// `stop`: end_turn reaches an OpenAI client as finish_reason `stop`,
+    /// which says there is nothing to run. Only a length cut outranks the
+    /// tools, because their arguments may be the part that was cut.
+    fn stop_reason(&self) -> StopReason {
+        match self.pending_stop {
+            Some(StopReason::MaxTokens) => StopReason::MaxTokens,
+            _ if !self.tools.is_empty() => StopReason::ToolUse,
+            stop => stop.unwrap_or(StopReason::EndTurn),
+        }
     }
 
     fn ensure_message_start(&mut self, out: &mut Vec<u8>) {
@@ -1677,6 +1692,23 @@ mod tests {
         assert!(accumulate_response(partial_frame, "m", "model").is_err());
         assert!(accumulate_response(filtered, "m", "model").is_err());
         assert!(accumulate_response(unknown, "m", "model").is_err());
+    }
+
+    #[test]
+    fn tools_end_the_turn_on_tool_use_unless_it_was_cut() {
+        let tool = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"search\",\"arguments\":\"{}\"}}]}}]}\n\n";
+        let text = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+        for (delta, finish, expected) in [
+            (tool, "stop", "tool_use"),
+            (tool, "length", "max_tokens"),
+            (text, "length", "max_tokens"),
+            (text, "stop", "end_turn"),
+        ] {
+            let upstream =
+                format!("{delta}data: {{\"choices\":[{{\"finish_reason\":\"{finish}\"}}]}}\n\n");
+            let response = accumulate_response(upstream.as_bytes(), "m", "model").unwrap();
+            assert_eq!(response["stop_reason"], expected, "{finish}");
+        }
     }
 
     #[test]
