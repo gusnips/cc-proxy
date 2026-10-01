@@ -2,7 +2,9 @@ use crate::anthropic::schema::MessagesRequest;
 use crate::providers::cursor::client::{
     CursorUpstreamResponse, decode_frame_payload, decode_upstream_frames,
 };
-use crate::providers::cursor::connect::{ConnectEndError, FLAG_END, parse_connect_error};
+use crate::providers::cursor::connect::{
+    ConnectEndError, ConnectFrame, FLAG_END, parse_connect_error,
+};
 use crate::providers::cursor::proto::AgentServerMessage;
 
 /// A decoded event from the Cursor upstream response stream.
@@ -60,40 +62,54 @@ pub fn decode_upstream_response(body: &[u8]) -> Result<Vec<CursorStreamEvent>, C
     let frames =
         decode_upstream_frames(body).map_err(|e| CursorDecodeError::Decode(e.to_string()))?;
     let mut events = Vec::new();
-
     for frame in &frames {
-        if frame.flags & FLAG_END != 0 {
-            // Check for Connect error in end frame
-            if !frame.payload.is_empty()
-                && let Some(err) = parse_connect_error(&frame.payload)
-            {
-                return Err(CursorDecodeError::ConnectEnd(err));
-            }
-            events.push(CursorStreamEvent::End);
-            continue;
+        decode_frame_events(frame, &mut events)?;
+    }
+    Ok(events)
+}
+
+/// Whether this frame ends Cursor's turn: its `turn_ended` update, or the
+/// Connect end frame, which also carries any upstream error.
+pub(crate) fn frame_ends_turn(frame: &ConnectFrame) -> bool {
+    let mut events = Vec::new();
+    frame.flags & FLAG_END != 0
+        || (decode_frame_events(frame, &mut events).is_ok()
+            && events
+                .iter()
+                .any(|event| matches!(event, CursorStreamEvent::End)))
+}
+
+fn decode_frame_events(
+    frame: &ConnectFrame,
+    events: &mut Vec<CursorStreamEvent>,
+) -> Result<(), CursorDecodeError> {
+    if frame.flags & FLAG_END != 0 {
+        // Check for Connect error in end frame
+        if !frame.payload.is_empty()
+            && let Some(err) = parse_connect_error(&frame.payload)
+        {
+            return Err(CursorDecodeError::ConnectEnd(err));
         }
-
-        let decompressed;
-        let payload = if frame.flags & crate::providers::cursor::connect::FLAG_GZIP != 0 {
-            decompressed = crate::providers::cursor::connect::decode_gzip_frame(&frame.payload)
-                .map_err(|error| CursorDecodeError::Decode(format!("gzip decompress: {error}")))?;
-            &decompressed[..]
-        } else {
-            &frame.payload[..]
-        };
-        if events_from_current_payload(payload, &mut events) {
-            continue;
-        }
-
-        let msg = match decode_frame_payload(frame) {
-            Ok(message) => message,
-            Err(_) => continue,
-        };
-
-        events_from_message(&msg, &mut events);
+        events.push(CursorStreamEvent::End);
+        return Ok(());
     }
 
-    Ok(events)
+    let decompressed;
+    let payload = if frame.flags & crate::providers::cursor::connect::FLAG_GZIP != 0 {
+        decompressed = crate::providers::cursor::connect::decode_gzip_frame(&frame.payload)
+            .map_err(|error| CursorDecodeError::Decode(format!("gzip decompress: {error}")))?;
+        &decompressed[..]
+    } else {
+        &frame.payload[..]
+    };
+    if events_from_current_payload(payload, events) {
+        return Ok(());
+    }
+
+    if let Ok(msg) = decode_frame_payload(frame) {
+        events_from_message(&msg, events);
+    }
+    Ok(())
 }
 
 /// Build an accumulated Anthropic response JSON from upstream bytes for

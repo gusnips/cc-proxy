@@ -343,7 +343,7 @@ fn map_cursor_error_to_response(err: &client::CursorError) -> Response {
         _ => json_error(
             StatusCode::BAD_GATEWAY,
             "api_error",
-            err.detail.as_deref().unwrap_or("Upstream error"),
+            err.detail.as_deref().unwrap_or(&err.message),
         ),
     }
 }

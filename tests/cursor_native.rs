@@ -1395,6 +1395,94 @@ async fn cursor_tool_result_reaches_cursor_on_the_next_request() {
     }
 }
 
+/// A Cursor stream that closes before its turn ends is an error Claude Code
+/// can retry. It used to come back as a cut-off answer marked `end_turn`.
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn cursor_stream_that_closes_mid_answer_is_an_error() {
+    use axum::{Router, routing::post};
+    use cc_proxy::provider::{Provider, RequestContext};
+    use cc_proxy::providers::cursor::CursorProvider;
+    use cc_proxy::providers::cursor::connect::encode_connect_frame;
+    use cc_proxy::providers::cursor::proto::*;
+    use prost::Message;
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let msg = AgentServerMessage {
+        interaction_update: Some(InteractionUpdate {
+            thinking_delta: None,
+            text_delta: Some(TextDelta {
+                text: "The answer is".into(),
+            }),
+            turn_ended: None,
+        }),
+        exec_server_message: None,
+    };
+    let mut payload = Vec::new();
+    msg.encode(&mut payload).unwrap();
+    let response_body = encode_connect_frame(&payload, 0).to_vec();
+
+    let app = Router::new().route(
+        "/agent.v1.AgentService/Run",
+        post(move |_body: axum::body::Body| async move {
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/connect+proto",
+                )],
+                response_body,
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_url = format!("http://{}", listener.local_addr().unwrap());
+    let _handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    unsafe {
+        std::env::set_var("CCP_CURSOR_BASE_URL", &mock_url);
+        std::env::set_var("CCP_CURSOR_AUTH_TOKEN", "mock-token-cut-off");
+        std::env::set_var("CCP_CURSOR_CLIENT_VERSION", "0.0.0");
+    }
+
+    let response = CursorProvider::new()
+        .handle_messages(
+            serde_json::from_value(serde_json::json!({
+                "model": "cursor:gpt-5.5",
+                "stream": true,
+                "messages": [{"role": "user", "content": "explain"}]
+            }))
+            .unwrap(),
+            RequestContext {
+                req_id: "test-req".into(),
+                session_id: None,
+                session_seq: None,
+                provider: "cursor".into(),
+                traffic: None,
+                monitor: None,
+            },
+        )
+        .await;
+
+    assert_eq!(response.status(), 502);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "api_error");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("before the answer was finished")),
+        "{json}"
+    );
+
+    unsafe {
+        std::env::remove_var("CCP_CURSOR_BASE_URL");
+        std::env::remove_var("CCP_CURSOR_AUTH_TOKEN");
+        std::env::remove_var("CCP_CURSOR_CLIENT_VERSION");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // No TypeScript sidecar
 // ---------------------------------------------------------------------------

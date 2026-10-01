@@ -42,6 +42,11 @@ description: Release notes for cc-proxy.
   the answer ignored the result, and a second tool call in the same turn was
   lost. Now the result goes back to Cursor with the rest of the conversation,
   and Cursor answers from it.
+- Cursor answers no longer stop early. A pause of 5 seconds used to end the
+  answer and mark it finished, so a long think came back cut off. Now an
+  answer ends only when Cursor says it is done. If Cursor sends nothing for 60
+  seconds, or closes the connection before it is done, the request fails
+  with an error that Claude Code retries.
 
 ## v0.1.47 (2026-09-30)
 
