@@ -295,3 +295,91 @@ fn claude_missing_from_path_says_how_to_fix_it() -> Result<(), Box<dyn std::erro
         .stderr(contains("there's no `claude` on your PATH"));
     Ok(())
 }
+
+/// `cc-proxy` with this test's isolated state, plus `extra` env.
+#[cfg(unix)]
+fn run_isolated(
+    guard: &DaemonGuard,
+    extra: &[(&str, &std::ffi::OsStr)],
+    args: &[&str],
+) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    for (key, value) in &guard.env {
+        cmd.env(key, value);
+    }
+    for (key, value) in extra {
+        cmd.env(key, value);
+    }
+    Ok(cmd.env_remove("ZDOTDIR").args(args).output()?)
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_install_adds_one_line_and_uninstall_restores_the_file()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let guard = DaemonGuard::new(&temp, free_port());
+    let zsh = [("SHELL", std::ffi::OsStr::new("/bin/zsh"))];
+    let zshrc = temp.path().join(".zshrc");
+    let original = "export EDITOR=vim\nalias ll='ls -l'\n";
+    std::fs::write(&zshrc, original)?;
+
+    for _ in 0..2 {
+        let output = run_isolated(&guard, &zsh, &["shell", "install"])?;
+        assert!(output.status.success(), "{output:?}");
+    }
+    let installed = std::fs::read_to_string(&zshrc)?;
+    assert!(installed.starts_with(original));
+    assert_eq!(installed.matches("# cc-proxy shell hook").count(), 1);
+    let function = temp.path().join("config/shell/claude.sh");
+    assert!(function.exists());
+
+    let output = run_isolated(&guard, &zsh, &["shell", "uninstall"])?;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&zshrc)?, original);
+    assert!(!function.exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn the_hook_runs_plain_claude_when_cc_proxy_is_off() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let guard = DaemonGuard::new(&temp, free_port());
+    let zsh = [("SHELL", std::ffi::OsStr::new("/bin/zsh"))];
+    for args in [&["shell", "install"][..], &["off"]] {
+        let output = run_isolated(&guard, &zsh, args)?;
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    // Load the function the way the startup file does, then call it.
+    let cc_proxy_dir = assert_cmd::cargo::cargo_bin("cc-proxy")
+        .parent()
+        .ok_or("cc-proxy has no parent dir")?
+        .to_path_buf();
+    let path = std::env::join_paths(
+        [fake_claude(&temp)?, cc_proxy_dir]
+            .into_iter()
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )?;
+    let out = temp.path().join("args.txt");
+    let mut shell = std::process::Command::new("sh");
+    shell
+        .arg("-c")
+        .arg(". \"$1\" && claude --resume abc -p 'hi there'")
+        .arg("sh")
+        .arg(temp.path().join("config/shell/claude.sh"))
+        .env("PATH", path)
+        .env("CLAUDE_ARGS_OUT", &out);
+    for (key, value) in &guard.env {
+        shell.env(key, value);
+    }
+    assert!(shell.status()?.success());
+
+    let recorded = std::fs::read_to_string(&out)?;
+    assert_eq!(
+        recorded.lines().collect::<Vec<_>>(),
+        ["--resume", "abc", "-p", "hi there"]
+    );
+    Ok(())
+}

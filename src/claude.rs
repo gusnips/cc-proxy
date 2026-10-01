@@ -67,10 +67,11 @@ fn proxy_url() -> Result<String> {
 
 pub fn run(args: Vec<OsString>) -> Result<()> {
     let mut command = Command::new("claude");
-    command
-        .arg("--settings")
-        .arg(settings_json(&proxy_url()?))
-        .args(args);
+    // Off, through the shell hook: plain claude, no proxy and no settings.
+    if crate::shell::wants_proxy() {
+        command.arg("--settings").arg(settings_json(&proxy_url()?));
+    }
+    command.args(args).env_remove(crate::shell::HOOK_ENV);
     let error = exec(command);
     if error.kind() == std::io::ErrorKind::NotFound {
         eprintln!(

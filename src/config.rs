@@ -135,6 +135,7 @@ struct GlmConfig {
 /// What `cc-proxy claude` starts Claude Code on.
 #[derive(Deserialize, Clone)]
 struct ClaudeConfig {
+    pub enabled: Option<bool>,
     pub model: Option<String>,
     #[serde(rename = "fastModel")]
     pub fast_model: Option<String>,
@@ -1096,6 +1097,14 @@ pub fn codex_model() -> Option<String> {
         return codex.model;
     }
     None
+}
+
+/// Whether plain `claude`, through the shell hook, uses the proxy. On unless
+/// `cc-proxy off` (or `shell uninstall`) wrote false.
+pub fn claude_enabled() -> bool {
+    read_file_config(&paths::config_dir())
+        .and_then(|file| file.claude?.enabled)
+        .unwrap_or(true)
 }
 
 /// Main model for `cc-proxy claude`. Unset, Claude Code picks its own and
