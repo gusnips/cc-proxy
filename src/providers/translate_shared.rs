@@ -66,28 +66,39 @@ pub fn parallel_tool_calls(req: &MessagesRequest) -> Option<bool> {
         .map(|disabled| !disabled)
 }
 
+/// The reasoning effort the caller asked for. `thinking: {"type":"disabled"}`
+/// reads as "none" and outranks output_config.effort. Ignoring it sent the
+/// same request as saying nothing, and every backend's default thinks
+/// (medium on Codex, high on Kimi K3): the caller who turned thinking off
+/// still paid for it, and a capped max_tokens could be spent on reasoning
+/// before any text. Each backend maps "none" to its own off switch, or to its
+/// lowest level where it has none.
 pub fn read_effort(req: &MessagesRequest) -> Result<Option<&str>, anyhow::Error> {
-    read_effort_with_allowed(req, &["low", "medium", "high", "xhigh", "max"])
-}
-
-pub fn read_effort_with_allowed<'a>(
-    req: &'a MessagesRequest,
-    allowed: &[&str],
-) -> Result<Option<&'a str>, anyhow::Error> {
-    let output_config = match req.extra.get("output_config") {
-        Some(Value::Object(m)) => m,
-        _ => return Ok(None),
-    };
-    match output_config.get("effort") {
+    let effort = match req
+        .extra
+        .get("output_config")
+        .and_then(|config| config.get("effort"))
+    {
         Some(Value::String(s)) => {
-            if allowed.contains(&s.as_str()) {
-                Ok(Some(s.as_str()))
+            if ["none", "low", "medium", "high", "xhigh", "max"].contains(&s.as_str()) {
+                Some(s.as_str())
             } else {
                 anyhow::bail!("Invalid output_config.effort: {s}")
             }
         }
-        _ => Ok(None),
-    }
+        _ => None,
+    };
+    let thinking_disabled = req
+        .extra
+        .get("thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        == Some("disabled");
+    Ok(if thinking_disabled {
+        Some("none")
+    } else {
+        effort
+    })
 }
 
 pub fn normalize_content(content: &Value, missing_tool_input: Value) -> Vec<ContentBlock> {

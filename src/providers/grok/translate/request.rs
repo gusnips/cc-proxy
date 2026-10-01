@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::anthropic::schema::{Message, MessagesRequest};
 use crate::config::GrokToolImageMode;
 use crate::providers::translate_shared::{
-    ImageSource, image_source_to_url, parallel_tool_calls, read_effort_with_allowed,
+    ImageSource, image_source_to_url, parallel_tool_calls, read_effort,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -226,12 +226,9 @@ pub fn translate_request_with_options(
     } else {
         parse_tool_choice(req.extra.get("tool_choice"), &mut tools)?
     };
-    let reasoning =
-        read_effort_with_allowed(req, &["none", "low", "medium", "high", "xhigh", "max"])?.map(
-            |effort| GrokReasoning {
-                effort: map_reasoning_effort(effort, &model),
-            },
-        );
+    let reasoning = read_effort(req)?.map(|effort| GrokReasoning {
+        effort: map_reasoning_effort(effort, &model),
+    });
     let mut call_ids = HashSet::new();
     let mut input = Vec::new();
     let mut budget = ReattachBudget::new(&req.messages, image_mode);
@@ -413,7 +410,7 @@ fn map_reasoning_effort(effort: &str, model: &str) -> String {
         "none" | "low" | "medium" | "high" => effort.to_string(),
         "xhigh" | "max" if model == "grok-4.6" => "xhigh".to_string(),
         "xhigh" | "max" => "high".to_string(),
-        _ => unreachable!("read_effort_with_allowed validates the effort"),
+        _ => unreachable!("read_effort validates the effort"),
     }
 }
 

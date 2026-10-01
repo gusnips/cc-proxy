@@ -134,7 +134,9 @@ fn translate_request_with_override(
         );
     }
     let mut reasoning = Map::from_iter([("context".to_string(), json!("all_turns"))]);
-    if let Some(effort) = effort.as_ref().filter(|effort| **effort != Effort::None) {
+    // "none" is sent, not omitted: omitted, the backend applies its own
+    // default and thinks at medium.
+    if let Some(effort) = effort.as_ref() {
         reasoning.insert("effort".to_string(), json!(effort));
     }
     upstream.insert("reasoning".to_string(), Value::Object(reasoning));
@@ -166,9 +168,7 @@ fn translate_request_with_override(
         upstream: Value::Object(upstream),
         requested_model,
         model: resolved.model,
-        effort: effort
-            .map(|effort| effort.to_string())
-            .filter(|effort| effort != "none"),
+        effort: effort.map(|effort| effort.to_string()),
         stream,
         include_usage,
         use_responses_lite,
@@ -292,9 +292,6 @@ fn translate_content(content: Option<&Value>, index: usize) -> Result<Vec<Value>
 }
 
 fn parse_effort(value: &str) -> Result<Option<Effort>, ChatError> {
-    if value == "none" {
-        return Ok(Some(Effort::None));
-    }
     to_codex_effort(Some(value)).map(Some).ok_or_else(|| {
         ChatError::invalid(
             format!(
@@ -458,11 +455,11 @@ mod tests {
     }
 
     #[test]
-    fn none_effort_retains_context() {
+    fn none_effort_is_sent_and_retains_context() {
         let mut body = base();
         body["reasoning_effort"] = json!("none");
         let translated = translate_request(body).unwrap();
-        assert!(translated.upstream["reasoning"].get("effort").is_none());
+        assert_eq!(translated.upstream["reasoning"]["effort"], "none");
         assert_eq!(translated.upstream["reasoning"]["context"], "all_turns");
     }
 

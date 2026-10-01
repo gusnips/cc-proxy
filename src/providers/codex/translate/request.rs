@@ -270,6 +270,7 @@ pub struct TranslateOptions {
 
 pub(crate) fn to_codex_effort(effort: Option<&str>) -> Option<Effort> {
     match effort {
+        Some("none") => Some(Effort::None),
         Some("max") => Some(Effort::Max),
         Some("xhigh") => Some(Effort::Xhigh),
         Some("low") => Some(Effort::Low),
@@ -398,7 +399,6 @@ fn compact_effort_cap_from(raw: Option<&str>) -> Option<Effort> {
     match raw {
         None | Some("") => Some(Effort::Low),
         Some("off") => None,
-        Some("none") => Some(Effort::None),
         Some(other) => to_codex_effort(Some(other)).or(Some(Effort::Low)),
     }
 }
@@ -1968,6 +1968,22 @@ mod tests {
         .unwrap();
         let out = translate_request(&req, opts()).unwrap();
         assert!(matches!(out.reasoning.unwrap().effort, Some(Effort::Max)));
+    }
+
+    #[test]
+    fn disabled_thinking_sends_none_over_the_requested_effort() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content":"hello"}],
+            "thinking": {"type": "disabled"},
+            "output_config": {"effort": "high"}
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        let reasoning = out.reasoning.unwrap();
+        assert!(matches!(reasoning.effort, Some(Effort::None)));
+        assert_eq!(reasoning.summary, None);
+        assert_eq!(out.include, None);
     }
 
     #[test]

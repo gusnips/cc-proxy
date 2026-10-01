@@ -136,7 +136,7 @@ pub fn parse_request(
     } else {
         OpenAiResponseMetadata::default()
     };
-    let effort = parse_effort(surface, object, provider)?;
+    let effort = parse_effort(surface, object)?;
     validate_cursor(provider, session_id, stream, &messages, &tools)?;
 
     let mut extra = Map::new();
@@ -299,7 +299,6 @@ fn parse_max_tokens(
 fn parse_effort(
     surface: OpenAiSurface,
     object: &Map<String, Value>,
-    provider: &str,
 ) -> Result<Option<String>, OpenAiError> {
     let value = match surface {
         OpenAiSurface::ChatCompletions => object.get("reasoning_effort"),
@@ -326,12 +325,7 @@ fn parse_effort(
             }),
         )
     })?;
-    let supported = if provider == "grok" {
-        ["none", "low", "medium", "high", "xhigh", "max"].as_slice()
-    } else {
-        ["low", "medium", "high", "xhigh", "max"].as_slice()
-    };
-    if supported.contains(&effort) {
+    if ["none", "low", "medium", "high", "xhigh", "max"].contains(&effort) {
         Ok(Some(effort.to_string()))
     } else {
         Err(OpenAiError::invalid(
@@ -1242,7 +1236,7 @@ mod tests {
     }
 
     #[test]
-    fn grok_effort_accepts_none_on_both_openai_surfaces() {
+    fn effort_none_is_accepted_on_both_openai_surfaces() {
         let chat = parse_request(
             OpenAiSurface::ChatCompletions,
             json!({
@@ -1271,8 +1265,8 @@ mod tests {
     }
 
     #[test]
-    fn non_grok_effort_rejects_none() {
-        let error = parse_request(
+    fn effort_none_reaches_every_provider() {
+        let chat = parse_request(
             OpenAiSurface::ChatCompletions,
             json!({
                 "model":"kimi-k2.6",
@@ -1282,8 +1276,8 @@ mod tests {
             "kimi",
             None,
         )
-        .unwrap_err();
-        assert_eq!(error.param.as_deref(), Some("reasoning_effort"));
+        .unwrap();
+        assert_eq!(chat.messages.extra["output_config"]["effort"], "none");
     }
 
     #[test]

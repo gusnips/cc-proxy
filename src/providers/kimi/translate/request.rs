@@ -182,17 +182,21 @@ fn clamp_max_tokens(requested: Option<u32>, k3: bool) -> u32 {
 }
 
 fn map_reasoning_effort(effort: Option<&str>, k3: bool) -> String {
+    // The request always enables thinking; no off switch for Kimi Code has
+    // been verified here. So "none" gets the lowest level, not the default
+    // (high on K3, medium otherwise).
     if k3 {
         // k3 supports: low, high, max (default: high)
         match effort {
             Some("max") => "max".to_string(),
             Some("xhigh" | "high") => "high".to_string(),
-            Some("low") => "low".to_string(),
+            Some("none" | "low") => "low".to_string(),
             _ => "high".to_string(),
         }
     } else {
         match effort {
             Some("max" | "xhigh") => "high".to_string(),
+            Some("none") => "low".to_string(),
             Some(v) => v.to_string(),
             None => "medium".to_string(),
         }
@@ -1123,6 +1127,18 @@ mod tests {
                 .any(|m| matches!(m, KimiMessage::Tool { .. })),
             "tool result missing"
         );
+    }
+
+    #[test]
+    fn k3_disabled_thinking_asks_for_the_lowest_effort() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "kimi-k3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "disabled"}
+        }))
+        .unwrap();
+        let translated = translate_request(&req, TranslateOptions { session_id: None }).unwrap();
+        assert_eq!(translated.reasoning_effort.as_deref(), Some("low"));
     }
 
     #[test]

@@ -358,7 +358,10 @@ fn map_reasoning_effort(req: &MessagesRequest, model: &str) -> anyhow::Result<Op
     .any(|needle| id.contains(needle))
     {
         return match effort {
-            "high" => Ok(Some("high".into())),
+            // Go's GLM takes only high and max, with no way to turn thinking
+            // off, so a caller who disabled thinking gets the least it offers
+            // rather than a 400.
+            "none" | "high" => Ok(Some("high".into())),
             "xhigh" | "max" => Ok(Some("max".into())),
             other => anyhow::bail!(
                 "OpenCode Go model {model} does not support reasoning effort {other}; use high, xhigh, or max"
@@ -367,6 +370,8 @@ fn map_reasoning_effort(req: &MessagesRequest, model: &str) -> anyhow::Result<Op
     }
     if id.contains("deepseek-v4") {
         return match effort {
+            // No off switch is mapped for DeepSeek V4 here; low is its least.
+            "none" => Ok(Some("low".into())),
             "low" | "medium" | "high" | "max" => Ok(Some(effort.into())),
             "xhigh" => Ok(Some("max".into())),
             _ => unreachable!("read_effort validates the effort"),
@@ -374,6 +379,8 @@ fn map_reasoning_effort(req: &MessagesRequest, model: &str) -> anyhow::Result<Op
     }
     if id.contains("mimo") {
         return match effort {
+            // No off switch is mapped for MiMo here; low is its least.
+            "none" => Ok(Some("low".into())),
             "low" | "medium" | "high" => Ok(Some(effort.into())),
             other => anyhow::bail!(
                 "OpenCode Go model {model} does not support reasoning effort {other}; use low, medium, or high"
@@ -1306,6 +1313,23 @@ mod tests {
             wire["messages"][1]["tool_calls"][0]["function"]["arguments"],
             "{\"q\":\"rust\"}"
         );
+    }
+
+    #[test]
+    fn disabled_thinking_asks_each_model_for_its_lowest_effort() {
+        for (model, expected) in [
+            ("glm-5.2", Some("high")),
+            ("deepseek-v4-pro", Some("low")),
+            ("mimo-v3", Some("low")),
+            ("minimax-m3", None),
+        ] {
+            let req = request(json!({
+                "messages":[{"role":"user","content":"hi"}],
+                "thinking":{"type":"disabled"}
+            }));
+            let wire = serde_json::to_value(prepare_request(&req, model).unwrap()).unwrap();
+            assert_eq!(wire["reasoning_effort"].as_str(), expected, "{model}");
+        }
     }
 
     #[test]

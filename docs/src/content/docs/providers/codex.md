@@ -38,7 +38,7 @@ On `/v1/messages`, `CCP_CODEX_SERVICE_TIER` or `codex.serviceTier` wins over the
 
 ## Reasoning
 
-Claude Code's `/effort` value maps to Codex `reasoning.effort`: `low`, `medium`, `high`, `xhigh`, or `max`. A proxy override can also force `none`.
+Claude Code's `/effort` value maps to Codex `reasoning.effort`: `low`, `medium`, `high`, `xhigh`, or `max`. A request that turns thinking off sends `none`. A proxy override can also force `none`.
 
 When reasoning is enabled, the proxy requests an automatic reasoning summary and translates summary deltas into Claude Code thinking blocks. Codex may omit a summary for a simple prompt. `CCP_CODEX_REASONING_SUMMARY=off` suppresses summaries while preserving effort and encrypted continuation content.
 

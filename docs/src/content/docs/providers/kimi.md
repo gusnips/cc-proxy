@@ -27,7 +27,7 @@ ANTHROPIC_SMALL_FAST_MODEL=k3[1m]
 
 ## Reasoning
 
-Claude Code's `/effort` setting maps to Kimi `reasoning_effort` at `low`, `medium`, or `high`. Returned reasoning streams into Claude Code thinking blocks. If the Anthropic request disables thinking, the proxy omits both Kimi reasoning controls.
+Claude Code's `/effort` setting maps to Kimi `reasoning_effort` at `low`, `medium`, or `high`. Returned reasoning streams into Claude Code thinking blocks. If a request turns thinking off, the proxy asks Kimi for `low`, its lowest effort. Thinking itself stays on.
 
 ## Tools and multimodal input
 
