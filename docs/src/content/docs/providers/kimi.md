@@ -22,7 +22,7 @@ The current model is Kimi K3: use `k3` (or `kimi-k3`), sent upstream as the `k3`
 
 ```sh
 ANTHROPIC_MODEL=k3[1m]
-ANTHROPIC_SMALL_FAST_MODEL=k3[1m]
+ANTHROPIC_DEFAULT_HAIKU_MODEL=k3[1m]
 ```
 
 ## Reasoning

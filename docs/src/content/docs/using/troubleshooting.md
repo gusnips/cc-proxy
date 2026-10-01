@@ -46,7 +46,7 @@ An unknown local ID returns a catalog in the error. A known ID can still be reje
 
 ## Background requests fail
 
-Set `ANTHROPIC_SMALL_FAST_MODEL` to a concrete routable ID. Claude Code sends title and small background tasks through that model independently of the main model.
+Set `ANTHROPIC_DEFAULT_HAIKU_MODEL` to a concrete routable ID. Claude Code sends title and small background tasks through that model independently of the main model.
 
 ## A tool runs twice
 

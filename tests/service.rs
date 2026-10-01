@@ -210,3 +210,88 @@ fn restart_keeps_serving() -> Result<(), Box<dyn std::error::Error>> {
     wait_for_status(&guard, true)?;
     Ok(())
 }
+
+/// A stand-in `claude` that writes each argument it got on its own line.
+#[cfg(unix)]
+fn fake_claude(temp: &TempDir) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let script = bin.join("claude");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CLAUDE_ARGS_OUT\"\n",
+    )?;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+    Ok(bin)
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_starts_the_proxy_and_passes_every_argument() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let port = free_port();
+    let guard = DaemonGuard::new(&temp, port);
+    let config_dir = temp.path().join("config");
+    std::fs::create_dir_all(&config_dir)?;
+    std::fs::write(
+        config_dir.join("config.json"),
+        r#"{"claude":{"model":"k3[1m]","fastModel":"k3"}}"#,
+    )?;
+    let bin = fake_claude(&temp)?;
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )?;
+    let out = temp.path().join("args.txt");
+
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    for (key, value) in &guard.env {
+        cmd.env(key, value);
+    }
+    cmd.env("PATH", path)
+        .env("CLAUDE_ARGS_OUT", &out)
+        .args(["claude", "--resume", "abc", "-p", "hi there", "--worktree"])
+        .assert()
+        .success()
+        .stderr(contains("Started cc-proxy"));
+
+    let recorded = std::fs::read_to_string(&out)?;
+    let args: Vec<&str> = recorded.lines().collect();
+    assert_eq!(args[0], "--settings");
+    let settings: serde_json::Value = serde_json::from_str(args[1])?;
+    let env = &settings["env"];
+    assert_eq!(
+        env["ANTHROPIC_BASE_URL"],
+        format!("http://127.0.0.1:{port}")
+    );
+    assert_eq!(env["ANTHROPIC_MODEL"], "k3[1m]");
+    assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "k3");
+    assert_eq!(
+        args[2..],
+        ["--resume", "abc", "-p", "hi there", "--worktree"]
+    );
+    wait_for_status(&guard, true)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_missing_from_path_says_how_to_fix_it() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let port = free_port();
+    let guard = DaemonGuard::new(&temp, port);
+    let empty = temp.path().join("empty");
+    std::fs::create_dir_all(&empty)?;
+
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    for (key, value) in &guard.env {
+        cmd.env(key, value);
+    }
+    cmd.env("PATH", &empty)
+        .arg("claude")
+        .assert()
+        .failure()
+        .code(127)
+        .stderr(contains("there's no `claude` on your PATH"));
+    Ok(())
+}

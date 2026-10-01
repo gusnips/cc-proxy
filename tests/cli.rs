@@ -52,6 +52,7 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
     let stdout = String::from_utf8(output.stdout)?;
     for description in [
         "Print version information",
+        "Start Claude Code on the proxy, passing every argument to claude",
         "Start the proxy as a background service",
         "Stop the background proxy service",
         "Show whether the background proxy service is running",

@@ -85,18 +85,17 @@ cc-proxy update --check
 cc-proxy update
 ```
 
-Start Claude Code in another:
+Start Claude Code on the proxy:
 
 ```sh
-ANTHROPIC_BASE_URL=http://127.0.0.1:18765 \
-ANTHROPIC_AUTH_TOKEN=unused \
-ANTHROPIC_MODEL=gpt-6-sol[1m] \
-ANTHROPIC_SMALL_FAST_MODEL=gpt-6-luna[1m] \
-CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000 \
-CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
-  claude
+cc-proxy claude
+cc-proxy claude --model gpt-6-sol
 ```
+
+`cc-proxy claude` starts the proxy if it isn't running, then runs `claude`
+with every argument you gave it, so `--resume`, `--worktree` and `-p` work as
+usual. It doesn't change any settings file. To pick the model every session
+starts on, run `cc-proxy config set claude.model gpt-6-sol`.
 
 See [Getting started](docs/src/content/docs/getting-started.md)
 for the complete first session.

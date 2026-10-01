@@ -32,7 +32,7 @@ To launch Claude Code through a running local proxy, set:
 ANTHROPIC_BASE_URL=http://127.0.0.1:18765
 ANTHROPIC_AUTH_TOKEN=unused
 ANTHROPIC_MODEL=<routable-model-id>
-ANTHROPIC_SMALL_FAST_MODEL=<routable-model-id>
+ANTHROPIC_DEFAULT_HAIKU_MODEL=<routable-model-id>
 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1
 ```
 

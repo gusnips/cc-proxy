@@ -3,6 +3,20 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## Unreleased
+
+- `cc-proxy claude` starts Claude Code on the proxy. It starts the proxy
+  first if it isn't running, then passes every argument to `claude`, so
+  `--resume`, `--worktree`, `-p` and a pasted resume command work as usual.
+  The proxy's address goes in a `--settings` flag for that session, so no
+  settings file changes. Choose the model it starts on with
+  `cc-proxy config set claude.model <id>`, and the background model with
+  `claude.fastModel`.
+- The serve banner and the monitor's setup panel now point to
+  `cc-proxy claude`. Their variable lists use `ANTHROPIC_DEFAULT_HAIKU_MODEL`,
+  which replaced `ANTHROPIC_SMALL_FAST_MODEL` in Claude Code, and add
+  `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1`.
+
 ## v0.1.48 (2026-10-01)
 
 - Upstream errors keep their meaning on Kimi, GLM, OpenCode Go and Grok. A

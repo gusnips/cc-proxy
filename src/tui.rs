@@ -31,6 +31,7 @@ use ratatui::{
 use tokio::sync::oneshot;
 
 use crate::{
+    claude, config, daemon,
     monitor::{
         MockMonitor, MonitorHandle, SESSION_TOKEN_BUCKET_SECS,
         snapshot::{
@@ -1709,7 +1710,7 @@ fn render_setup_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, setup_text: 
     let mut lines = setup_text
         .lines()
         .map(|line| {
-            let style = if line.starts_with("export ") {
+            let style = if line.starts_with("export ") || line.starts_with("cc-proxy ") {
                 Style::default().fg(WHITE)
             } else {
                 Style::default().fg(DIM_WHITE)
@@ -1756,13 +1757,14 @@ pub fn setup_text(port: u16, registry: &Registry) -> String {
         format!("Config: {}", paths::config_dir().display()),
         format!("Providers: {model_summary}"),
     ];
-    lines.push(format!(
-        "export ANTHROPIC_BASE_URL=\"http://localhost:{port}\""
-    ));
-    lines.push("export ANTHROPIC_AUTH_TOKEN=\"anything\"".to_string());
-    lines.push("export ANTHROPIC_MODEL=\"gpt-6-sol\"".to_string());
-    lines.push("export ANTHROPIC_SMALL_FAST_MODEL=\"gpt-6-luna\"".to_string());
-    lines.push("export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1".to_string());
+    lines.push(String::new());
+    lines.push("Start Claude Code on the proxy:".to_string());
+    lines.push("cc-proxy claude".to_string());
+    lines.push("Or set these yourself before you run claude:".to_string());
+    let base_url = daemon::client_url(&config::bind_address(), port);
+    for (name, value) in claude::env(&base_url) {
+        lines.push(format!("export {name}=\"{value}\""));
+    }
     lines.join("\n")
 }
 

@@ -32,10 +32,18 @@ pub struct DaemonInfo {
 
 impl DaemonInfo {
     pub fn listen_url(&self) -> String {
-        match self.bind.parse::<std::net::IpAddr>() {
-            Ok(ip) if ip.is_unspecified() => format!("http://127.0.0.1:{}", self.port),
-            _ => format!("http://{}:{}", self.bind, self.port),
-        }
+        client_url(&self.bind, self.port)
+    }
+}
+
+/// Where a client on this machine reaches a proxy bound to `bind`. A
+/// wildcard bind answers on loopback, and `0.0.0.0` is not an address to
+/// connect to.
+pub fn client_url(bind: &str, port: u16) -> String {
+    match bind.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_unspecified() => format!("http://127.0.0.1:{port}"),
+        Ok(ip) => format!("http://{}", std::net::SocketAddr::new(ip, port)),
+        Err(_) => format!("http://{bind}:{port}"),
     }
 }
 
@@ -675,5 +683,7 @@ mod tests {
             ..wild
         };
         assert_eq!(local.listen_url(), "http://127.0.0.1:18765");
+        assert_eq!(client_url("::1", 18765), "http://[::1]:18765");
+        assert_eq!(client_url("localhost", 18765), "http://localhost:18765");
     }
 }
