@@ -12,8 +12,6 @@ use crate::providers::grok::translate::stream::SseDecoder;
 use crate::providers::upstream_error;
 use crate::traffic::{StreamTrafficCapture, TrafficCapture};
 
-use super::client::{OpenCodeError, OpenCodeResponse};
-
 const DEFAULT_MAX_TOKENS: u32 = 32_000;
 
 pub fn prepare_request(
@@ -33,14 +31,25 @@ pub fn prepare_request(
     Ok(translated)
 }
 
-pub fn stream_body(
-    upstream: OpenCodeResponse,
+/// Passes an upstream that already speaks Anthropic Messages SSE through to
+/// Claude Code as it arrives, and turns any stream that is not whole (a read
+/// that fails, a frame that is not JSON, an end without `message_stop`) into
+/// an `error` event. GLM shares it: the checks are about the wire shape, not
+/// about who sent it.
+pub fn stream_body<S, E>(
+    upstream: S,
+    provider: &'static str,
     monitor: Option<MonitorHandle>,
     req_id: String,
     traffic: Option<Arc<TrafficCapture>>,
-) -> Body {
+) -> Body
+where
+    S: futures_util::Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
+    E: Send + 'static,
+{
     let state = MessagesStreamState {
-        upstream: upstream.into_stream(),
+        upstream,
+        provider,
         decoder: SseDecoder::default(),
         terminal: false,
         error_sent: false,
@@ -62,6 +71,7 @@ pub fn stream_body(
 
 struct MessagesStreamState<S> {
     upstream: S,
+    provider: &'static str,
     decoder: SseDecoder,
     terminal: bool,
     error_sent: bool,
@@ -73,9 +83,9 @@ struct MessagesStreamState<S> {
     traffic: Option<Arc<TrafficCapture>>,
 }
 
-impl<S> MessagesStreamState<S>
+impl<S, E> MessagesStreamState<S>
 where
-    S: futures_util::Stream<Item = Result<Bytes, OpenCodeError>> + Unpin,
+    S: futures_util::Stream<Item = Result<Bytes, E>> + Unpin,
 {
     async fn next_output(&mut self) -> Option<Bytes> {
         if self.terminal {
@@ -88,12 +98,12 @@ where
 
         let chunk = match self.upstream.next().await {
             Some(Ok(chunk)) => chunk,
-            Some(Err(_)) => return Some(self.fail_at("transport", "upstream_stream")),
+            Some(Err(_)) => return Some(self.cut_off("transport", "upstream_stream")),
             None => {
                 if self.decoder.finish().is_err() {
-                    return Some(self.fail_at("decoder", "incomplete_stream"));
+                    return Some(self.cut_off("decoder", "incomplete_stream"));
                 }
-                return Some(self.fail_at("protocol", "missing_message_stop"));
+                return Some(self.cut_off("protocol", "missing_message_stop"));
             }
         };
         if self.bytes == 0
@@ -141,7 +151,7 @@ where
                 // prompt that is too long, but only when the type says so.
                 let failure = upstream_error::from_stream(
                     value.get("error").unwrap_or(&value),
-                    "OpenCode Go",
+                    self.provider,
                 );
                 return Some(self.fail(
                     "upstream",
@@ -173,13 +183,20 @@ where
         Some(chunk)
     }
 
+    /// The answer stopped partway: the read failed or timed out, or the
+    /// stream closed before `message_stop`. Saying so, rather than "invalid",
+    /// tells the reader that sending it again is the fix.
+    fn cut_off(&mut self, stage: &str, kind: &str) -> Bytes {
+        let message = format!(
+            "{} stopped before the answer finished. Try again.",
+            self.provider
+        );
+        self.fail(stage, kind, "api_error", &message)
+    }
+
     fn fail_at(&mut self, stage: &str, kind: &str) -> Bytes {
-        self.fail(
-            stage,
-            kind,
-            "api_error",
-            "OpenCode Go Messages stream is invalid",
-        )
+        let message = format!("{} sent a stream cc-proxy could not read.", self.provider);
+        self.fail(stage, kind, "api_error", &message)
     }
 
     fn fail(&mut self, stage: &str, kind: &str, error_type: &str, message: &str) -> Bytes {
@@ -189,7 +206,7 @@ where
         }
         if let Some(traffic) = self.traffic.as_ref() {
             traffic.write_json(
-                "060-opencode-messages-stream-error",
+                "060-messages-stream-error",
                 &serde_json::json!({
                     "stage": stage,
                     "kind": kind,
@@ -222,7 +239,7 @@ where
                     "bytes": self.bytes,
                     "chunks": self.chunks,
                 }),
-                "061-opencode-messages-stream-summary",
+                "061-messages-stream-summary",
             );
         }
     }
@@ -243,7 +260,7 @@ impl<S> Drop for MessagesStreamState<S> {
                     "bytes": self.bytes,
                     "chunks": self.chunks,
                 }),
-                "061-opencode-messages-stream-summary",
+                "061-messages-stream-summary",
             );
         }
     }
@@ -283,11 +300,12 @@ mod tests {
     #[tokio::test]
     async fn live_stream_rejects_an_incomplete_frame_after_message_stop() {
         let upstream =
-            futures_util::stream::iter([Ok::<Bytes, OpenCodeError>(Bytes::from_static(
+            futures_util::stream::iter([Ok::<Bytes, std::io::Error>(Bytes::from_static(
                 b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\ndata: {",
             ))]);
         let mut state = MessagesStreamState {
             upstream,
+            provider: "OpenCode Go",
             decoder: SseDecoder::default(),
             terminal: false,
             error_sent: false,
@@ -300,18 +318,20 @@ mod tests {
         };
         let output = state.next_output().await.expect("error event");
         assert!(
-            String::from_utf8_lossy(&output).contains("OpenCode Go Messages stream is invalid")
+            String::from_utf8_lossy(&output)
+                .contains("OpenCode Go sent a stream cc-proxy could not read.")
         );
     }
 
     #[tokio::test]
     async fn live_stream_forwards_the_upstream_error_type() {
         let upstream =
-            futures_util::stream::iter([Ok::<Bytes, OpenCodeError>(Bytes::from_static(
+            futures_util::stream::iter([Ok::<Bytes, std::io::Error>(Bytes::from_static(
                 b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
             ))]);
         let mut state = MessagesStreamState {
             upstream,
+            provider: "OpenCode Go",
             decoder: SseDecoder::default(),
             terminal: false,
             error_sent: false,
@@ -331,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn live_stream_rejects_a_complete_event_after_message_stop() {
         let upstream =
-            futures_util::stream::iter([Ok::<Bytes, OpenCodeError>(Bytes::from_static(
+            futures_util::stream::iter([Ok::<Bytes, std::io::Error>(Bytes::from_static(
                 concat!(
                     "event: message_stop\n",
                     "data: {\"type\":\"message_stop\"}\n\n",
@@ -342,6 +362,7 @@ mod tests {
             ))]);
         let mut state = MessagesStreamState {
             upstream,
+            provider: "OpenCode Go",
             decoder: SseDecoder::default(),
             terminal: false,
             error_sent: false,
@@ -354,7 +375,8 @@ mod tests {
         };
         let output = state.next_output().await.expect("error event");
         assert!(
-            String::from_utf8_lossy(&output).contains("OpenCode Go Messages stream is invalid")
+            String::from_utf8_lossy(&output)
+                .contains("OpenCode Go sent a stream cc-proxy could not read.")
         );
     }
 }

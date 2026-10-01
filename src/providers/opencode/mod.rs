@@ -306,7 +306,8 @@ impl Provider for OpenCodeProvider {
                     .await
                     .map_err(opencode_provider_error)?;
                 messages::stream_body(
-                    upstream,
+                    upstream.into_stream(),
+                    "OpenCode Go",
                     ctx.monitor.clone(),
                     ctx.req_id.clone(),
                     ctx.traffic.clone(),
