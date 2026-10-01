@@ -3,7 +3,7 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
-## Unreleased
+## v0.1.48 (2026-10-01)
 
 - Upstream errors keep their meaning on Kimi, GLM, OpenCode Go and Grok. A
   prompt that is too long now returns a 400 that says "prompt is too long",
