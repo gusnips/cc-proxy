@@ -49,12 +49,7 @@ impl fmt::Debug for CursorToolUseXmlParser {
 }
 
 impl CursorToolUseXmlParser {
-    /// Create a parser with the default UUID-based id factory.
-    pub fn new(allowed_tool_names: Option<BTreeSet<String>>) -> Self {
-        Self::new_with_id_factory(allowed_tool_names, default_id_factory())
-    }
-
-    /// Create a parser with a custom id factory for deterministic tests.
+    /// Create a parser that names each recovered tool call with `id_factory`.
     pub fn new_with_id_factory(
         allowed_tool_names: Option<BTreeSet<String>>,
         id_factory: impl FnMut() -> String + Send + 'static,
@@ -236,13 +231,6 @@ impl CursorToolUseXmlParser {
         }
         events.push(RecoveredCursorEvent::Text(text.to_string()));
     }
-}
-
-fn default_id_factory() -> Box<dyn FnMut() -> String + Send> {
-    Box::new(|| {
-        let id = uuid::Uuid::new_v4().to_string().replace('-', "");
-        format!("call_cursor_{id}")
-    })
 }
 
 // ---------------------------------------------------------------------------

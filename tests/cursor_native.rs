@@ -1102,43 +1102,42 @@ fn bridge_start_pauses_on_tool_use_xml() {
         format!("call_cursor_test_{counter}")
     });
 
-    let (sse, paused) = start_cursor_tool_bridge(
-        "msg_1",
-        "cursor-test",
-        "session-bridge-1",
-        &events,
-        Some(allowed),
-        id_factory,
-    );
-
-    assert!(paused, "bridge should pause on tool_use");
+    let sse = start_cursor_tool_bridge("msg_1", "cursor-test", &events, Some(allowed), id_factory);
 
     let sse_str = String::from_utf8_lossy(&sse);
     let parsed = parse_sse_events(&sse_str);
 
-    let event_names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
-    assert!(
-        event_names.contains(&"content_block_start"),
-        "expected content_block_start for tool_use"
-    );
-    assert!(
-        event_names.contains(&"message_stop"),
-        "expected message_stop"
-    );
+    let tool_use = parsed
+        .iter()
+        .find(|(n, d)| n == "content_block_start" && d["content_block"]["type"] == "tool_use")
+        .map(|(_, d)| d.clone())
+        .expect("expected a tool_use block");
+    assert_eq!(tool_use["content_block"]["name"], "Read");
+    assert_eq!(tool_use["content_block"]["id"], "call_cursor_test_1");
+
+    // Text Cursor wrote after the call was written without the tool result.
+    let text: String = parsed
+        .iter()
+        .filter_map(|(n, d)| (n == "content_block_delta").then(|| d["delta"]["text"].as_str())?)
+        .collect();
+    assert_eq!(text, "before ");
 
     let msg_delta = parsed
         .iter()
         .find(|(n, _)| n == "message_delta")
-        .map(|(_, d)| d.clone());
-    assert!(msg_delta.is_some(), "expected message_delta");
+        .map(|(_, d)| d.clone())
+        .expect("expected message_delta");
     assert_eq!(
-        msg_delta.unwrap()["delta"]["stop_reason"],
-        "tool_use",
+        msg_delta["delta"]["stop_reason"], "tool_use",
         "stop_reason should be tool_use"
     );
-
-    // Clean up
-    BridgeRegistry::remove("session-bridge-1");
+    // Usage arrives after the call and still counts: Cursor billed it.
+    assert_eq!(msg_delta["usage"]["input_tokens"], 10);
+    assert_eq!(msg_delta["usage"]["output_tokens"], 5);
+    assert_eq!(
+        parsed.iter().filter(|(n, _)| n == "message_stop").count(),
+        1
+    );
 }
 
 #[test]
@@ -1159,16 +1158,13 @@ fn bridge_start_passes_through_without_tool_use() {
         CursorStreamEvent::End,
     ];
 
-    let (sse, paused) = start_cursor_tool_bridge(
+    let sse = start_cursor_tool_bridge(
         "msg_2",
         "cursor-test",
-        "session-bridge-2",
         &events,
         None,
         Box::new(|| "id".into()),
     );
-
-    assert!(!paused, "bridge should NOT pause without tool_use");
 
     let sse_str = String::from_utf8_lossy(&sse);
     let parsed = parse_sse_events(&sse_str);
@@ -1192,166 +1188,29 @@ fn bridge_start_passes_through_without_tool_use() {
 }
 
 #[test]
-fn bridge_start_creates_pending_tool_in_registry() {
+fn bridge_rejects_tool_not_in_allowed_list() {
     use cc_proxy::providers::cursor::response::*;
     use cc_proxy::providers::cursor::tool_bridge::*;
 
-    // Clean state
-    BridgeRegistry::clear();
-
-    let events = vec![CursorStreamEvent::TextDelta {
-        text: r#"<tool_use name="Read">{"file_path":"/tmp/test"}</tool_use>"#.to_string(),
-    }];
-
-    let allowed: std::collections::BTreeSet<String> = ["Read".to_string()].into_iter().collect();
-
-    let (_, paused) = start_cursor_tool_bridge(
-        "msg_3",
-        "cursor-test",
-        "session-bridge-pt",
-        &events,
-        Some(allowed),
-        Box::new(|| "call_test".into()),
-    );
-
-    assert!(paused);
-
-    let pending = BridgeRegistry::pending_tool("session-bridge-pt");
-    assert!(pending.is_some(), "pending tool should be stored");
-    assert_eq!(pending.unwrap().name(), "Read");
-
-    BridgeRegistry::remove("session-bridge-pt");
-}
-
-#[test]
-fn bridge_resume_continues_after_tool_use_pause() {
-    use cc_proxy::providers::cursor::response::*;
-    use cc_proxy::providers::cursor::tool_bridge::*;
-
-    BridgeRegistry::clear();
-
-    // Events: tool_use in the middle, text after
     let events = vec![
         CursorStreamEvent::TextDelta {
-            text: "before ".to_string(),
-        },
-        CursorStreamEvent::TextDelta {
-            text: r#"<tool_use name="Read">{"file_path":"/tmp/a"}</tool_use>"#.to_string(),
-        },
-        CursorStreamEvent::TextDelta {
-            text: " continued".to_string(),
-        },
-        CursorStreamEvent::Usage {
-            input_tokens: 10,
-            output_tokens: 5,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
+            text: r#"<tool_use name="Bash">{"command":"pwd"}</tool_use>"#.to_string(),
         },
         CursorStreamEvent::End,
     ];
 
     let allowed: std::collections::BTreeSet<String> = ["Read".to_string()].into_iter().collect();
 
-    let mut counter = 0u64;
-    let id_factory = Box::new(move || {
-        counter += 1;
-        format!("call_cursor_test_{counter}")
-    });
-
-    let (_first_sse, paused) = start_cursor_tool_bridge(
-        "msg_first",
-        "cursor-test",
-        "session-resume-1",
-        &events,
-        Some(allowed),
-        id_factory,
-    );
-    assert!(paused);
-
-    let body: cc_proxy::MessagesRequest =
-        serde_json::from_value(serde_json::json!({
-            "model": "cursor-test",
-            "messages": [
-                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_cursor_test_1", "content": "result text"}]}
-            ]
-        }))
-        .unwrap();
-
-    let pending =
-        BridgeRegistry::pending_tool("session-resume-1").expect("should have pending tool");
-    assert_eq!(pending.tool_use_id(), "call_cursor_test_1");
-
-    let result = find_tool_result(&body, pending.tool_use_id()).expect("should find tool result");
-
-    let (result_msgs, second_sse) = resume_cursor_tool_bridge(
-        "session-resume-1",
-        "msg_second",
-        "cursor-test",
-        result,
-        &pending,
-    );
-
-    assert!(!result_msgs.is_empty(), "should have result messages");
-
-    let sse_str = String::from_utf8_lossy(&second_sse);
-    let parsed = parse_sse_events(&sse_str);
-    let event_names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
-
-    assert!(
-        event_names.contains(&"message_start"),
-        "resume should have message_start in {event_names:?}"
-    );
-    assert!(
-        event_names.contains(&"message_stop"),
-        "resume should have message_stop in {event_names:?}"
-    );
-
-    let text_deltas: Vec<&str> = parsed
-        .iter()
-        .filter_map(|(n, d)| {
-            if n == "content_block_delta" {
-                d["delta"]["text"].as_str()
-            } else {
-                None
-            }
-        })
-        .collect();
-    let combined = text_deltas.join("");
-    assert!(
-        combined.contains("continued"),
-        "resume should include remaining text deltas"
-    );
-
-    BridgeRegistry::remove("session-resume-1");
-}
-
-#[test]
-fn bridge_rejects_tool_not_in_allowed_list() {
-    use cc_proxy::providers::cursor::response::*;
-    use cc_proxy::providers::cursor::tool_bridge::*;
-
-    BridgeRegistry::clear();
-
-    let events = vec![CursorStreamEvent::TextDelta {
-        text: r#"<tool_use name="Bash">{"command":"pwd"}</tool_use>"#.to_string(),
-    }];
-
-    let allowed: std::collections::BTreeSet<String> = ["Read".to_string()].into_iter().collect();
-
-    let (sse, paused) = start_cursor_tool_bridge(
+    let sse = start_cursor_tool_bridge(
         "msg_filter",
         "cursor-test",
-        "session-filter-1",
         &events,
         Some(allowed),
         Box::new(|| "id".into()),
     );
 
-    assert!(!paused, "should NOT pause for disallowed tool");
-
     let sse_str = String::from_utf8_lossy(&sse);
     let parsed = parse_sse_events(&sse_str);
-    let _event_names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
 
     let msg_delta = parsed
         .iter()
@@ -1362,136 +1221,266 @@ fn bridge_rejects_tool_not_in_allowed_list() {
         "end_turn",
         "disallowed tool should not trigger tool_use"
     );
-
-    BridgeRegistry::remove("session-filter-1");
 }
 
-#[test]
-fn bridge_result_messages_have_correct_read_shape() {
-    use cc_proxy::providers::cursor::tool_bridge::*;
+/// Claude Code answers a tool call in its next request. That request must
+/// reach Cursor with the result in the prompt. It used to be answered from
+/// text Cursor wrote before the result existed, so the model never saw it.
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn cursor_tool_result_reaches_cursor_on_the_next_request() {
+    use axum::{Router, routing::post};
+    use cc_proxy::provider::{Provider, RequestContext};
+    use cc_proxy::providers::cursor::CursorProvider;
+    use cc_proxy::providers::cursor::connect::{ConnectFrameDecoder, encode_connect_frame};
+    use cc_proxy::providers::cursor::proto::*;
+    use prost::Message;
+    use std::sync::{Arc, Mutex};
 
-    let exec = CursorExec {
-        id: Some(42),
-        exec_id: None,
-        args: serde_json::json!({"file_path": "/tmp/readme.txt"}),
-    };
-    let result = CursorNativeToolResult {
-        content: "file contents here".into(),
-        is_error: false,
-    };
+    fn cursor_turn(text: &str) -> Vec<u8> {
+        let msg = AgentServerMessage {
+            interaction_update: Some(InteractionUpdate {
+                thinking_delta: None,
+                text_delta: Some(TextDelta { text: text.into() }),
+                turn_ended: Some(TurnEnded {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                }),
+            }),
+            exec_server_message: None,
+        };
+        let mut payload = Vec::new();
+        msg.encode(&mut payload).unwrap();
+        let mut body = encode_connect_frame(&payload, 0).to_vec();
+        body.extend_from_slice(&encode_connect_frame(b"", 2));
+        body
+    }
 
-    let msg = build_read_result_from_native(&exec, &result);
-    let msg_obj = msg.as_object().unwrap();
+    async fn sse_text(response: axum::response::Response) -> String {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
 
-    assert_eq!(msg_obj.get("id").and_then(|v| v.as_i64()), Some(42));
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prompts: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let prompts_handler = Arc::clone(&prompts);
 
-    let read_result = msg_obj.get("readResult").unwrap();
-    assert!(read_result.get("success").is_some());
-    let success = read_result.get("success").unwrap();
-    assert_eq!(
-        success.get("path").and_then(|v| v.as_str()),
-        Some("/tmp/readme.txt")
+    let app = Router::new().route(
+        "/agent.v1.AgentService/Run",
+        post(move |mut body: axum::body::Body| {
+            let prompts_handler = Arc::clone(&prompts_handler);
+            async move {
+                // The prompt rides in the first frame; the client keeps the
+                // request open after it, so stop reading there.
+                let mut decoder = ConnectFrameDecoder::new();
+                let first_frame = loop {
+                    let frame = body.frame().await.unwrap().unwrap();
+                    let Ok(data) = frame.into_data() else {
+                        continue;
+                    };
+                    if let Some(frame) = decoder.push(&data).unwrap().into_iter().next() {
+                        break frame.payload.to_vec();
+                    }
+                };
+                let mut prompts = prompts_handler.lock().unwrap();
+                prompts.push(first_frame);
+                let reply = if prompts.len() == 1 {
+                    cursor_turn(
+                        r#"Reading it. <tool_use name="Read">{"file_path":"/tmp/notes.txt"}</tool_use> The file probably says hello."#,
+                    )
+                } else {
+                    cursor_turn("The file says: real contents.")
+                };
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/connect+proto",
+                    )],
+                    reply,
+                )
+            }
+        }),
     );
-    assert_eq!(
-        success.get("content").and_then(|v| v.as_str()),
-        Some("file contents here")
-    );
-    assert_eq!(success.get("totalLines").and_then(|v| v.as_i64()), Some(1));
-}
 
-#[test]
-fn bridge_result_messages_have_correct_write_shape() {
-    use cc_proxy::providers::cursor::tool_bridge::*;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_url = format!("http://{}", listener.local_addr().unwrap());
+    let _handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    unsafe {
+        std::env::set_var("CCP_CURSOR_BASE_URL", &mock_url);
+        std::env::set_var("CCP_CURSOR_AUTH_TOKEN", "mock-token-tool-result");
+        std::env::set_var("CCP_CURSOR_CLIENT_VERSION", "0.0.0");
+    }
 
-    let exec = CursorExec {
-        id: Some(99),
-        exec_id: Some("exec-write-1".into()),
-        args: serde_json::json!({"file_path": "/tmp/writeme.txt", "content": "data"}),
+    let ctx = RequestContext {
+        req_id: "test-req".into(),
+        session_id: Some("session-tool-result".into()),
+        session_seq: None,
+        provider: "cursor".into(),
+        traffic: None,
+        monitor: None,
     };
+    let tools = serde_json::json!([{"name": "Read", "description": "read", "input_schema": {}}]);
+    let provider = CursorProvider::new();
 
-    let result = CursorNativeToolResult {
-        content: "written".into(),
-        is_error: false,
-    };
-    let msg = build_write_result_from_native(&exec, &result);
-    let msg_obj = msg.as_object().unwrap();
-    assert_eq!(
-        msg_obj.get("execId").and_then(|v| v.as_str()),
-        Some("exec-write-1")
-    );
-    let write_result = msg_obj.get("writeResult").unwrap();
-    let success = write_result.get("success").unwrap();
-    assert_eq!(
-        success.get("path").and_then(|v| v.as_str()),
-        Some("/tmp/writeme.txt")
-    );
-    assert!(success.get("linesCreated").is_some());
-    assert!(success.get("fileSize").is_some());
-
-    let error_result = CursorNativeToolResult {
-        content: "permission denied".into(),
-        is_error: true,
-    };
-    let err_msg = build_write_result_from_native(&exec, &error_result);
-    let err_obj = err_msg.as_object().unwrap();
-    let write_result = err_obj.get("writeResult").unwrap();
-    let error = write_result.get("error").unwrap();
-    assert_eq!(
-        error.get("path").and_then(|v| v.as_str()),
-        Some("/tmp/writeme.txt")
-    );
+    let first = provider
+        .handle_messages(
+            serde_json::from_value(serde_json::json!({
+                "model": "cursor:gpt-5.5",
+                "stream": true,
+                "tools": tools,
+                "messages": [{"role": "user", "content": "read my notes"}]
+            }))
+            .unwrap(),
+            ctx.clone(),
+        )
+        .await;
+    let first = parse_sse_events(&sse_text(first).await);
+    let tool_use = first
+        .iter()
+        .find(|(n, d)| n == "content_block_start" && d["content_block"]["type"] == "tool_use")
+        .map(|(_, d)| d["content_block"].clone())
+        .expect("first turn should stop at the tool call");
     assert!(
-        error
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .contains("permission")
+        first
+            .iter()
+            .all(|(_, d)| d["delta"]["text"] != " The file probably says hello."),
+        "text written after the call must not reach Claude Code"
     );
+
+    let second = provider
+        .handle_messages(
+            serde_json::from_value(serde_json::json!({
+                "model": "cursor:gpt-5.5",
+                "stream": true,
+                "tools": tools,
+                "messages": [
+                    {"role": "user", "content": "read my notes"},
+                    {"role": "assistant", "content": [
+                        {"type": "text", "text": "Reading it. "},
+                        tool_use
+                    ]},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": tool_use["id"], "content": "hello from disk"}
+                    ]}
+                ]
+            }))
+            .unwrap(),
+            ctx,
+        )
+        .await;
+    let second = parse_sse_events(&sse_text(second).await);
+    let text: String = second
+        .iter()
+        .filter_map(|(n, d)| (n == "content_block_delta").then(|| d["delta"]["text"].as_str())?)
+        .collect();
+    assert_eq!(text, "The file says: real contents.");
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 2, "the tool result must go back to Cursor");
+    assert!(
+        prompts[1]
+            .windows(b"hello from disk".len())
+            .any(|window| window == b"hello from disk"),
+        "Cursor must see the tool result in the prompt"
+    );
+
+    unsafe {
+        std::env::remove_var("CCP_CURSOR_BASE_URL");
+        std::env::remove_var("CCP_CURSOR_AUTH_TOKEN");
+        std::env::remove_var("CCP_CURSOR_CLIENT_VERSION");
+    }
 }
 
-#[test]
-fn bridge_shell_stream_result_has_correct_shape() {
-    use cc_proxy::providers::cursor::tool_bridge::*;
+/// A Cursor stream that closes before its turn ends is an error Claude Code
+/// can retry. It used to come back as a cut-off answer marked `end_turn`.
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn cursor_stream_that_closes_mid_answer_is_an_error() {
+    use axum::{Router, routing::post};
+    use cc_proxy::provider::{Provider, RequestContext};
+    use cc_proxy::providers::cursor::CursorProvider;
+    use cc_proxy::providers::cursor::connect::encode_connect_frame;
+    use cc_proxy::providers::cursor::proto::*;
+    use prost::Message;
 
-    let exec = CursorExec {
-        id: Some(7),
-        exec_id: Some("exec-shell".into()),
-        args: serde_json::json!({}),
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let msg = AgentServerMessage {
+        interaction_update: Some(InteractionUpdate {
+            thinking_delta: None,
+            text_delta: Some(TextDelta {
+                text: "The answer is".into(),
+            }),
+            turn_ended: None,
+        }),
+        exec_server_message: None,
     };
+    let mut payload = Vec::new();
+    msg.encode(&mut payload).unwrap();
+    let response_body = encode_connect_frame(&payload, 0).to_vec();
 
-    let result = CursorNativeToolResult {
-        content: "stdout output".into(),
-        is_error: false,
-    };
-
-    let messages = build_shell_stream_result(
-        &exec,
-        &result,
-        std::time::Duration::from_millis(150),
-        "/home/user",
+    let app = Router::new().route(
+        "/agent.v1.AgentService/Run",
+        post(move |_body: axum::body::Body| async move {
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/connect+proto",
+                )],
+                response_body,
+            )
+        }),
     );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_url = format!("http://{}", listener.local_addr().unwrap());
+    let _handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    unsafe {
+        std::env::set_var("CCP_CURSOR_BASE_URL", &mock_url);
+        std::env::set_var("CCP_CURSOR_AUTH_TOKEN", "mock-token-cut-off");
+        std::env::set_var("CCP_CURSOR_CLIENT_VERSION", "0.0.0");
+    }
 
-    assert_eq!(messages.len(), 4, "start + stdout + exit + close");
+    let response = CursorProvider::new()
+        .handle_messages(
+            serde_json::from_value(serde_json::json!({
+                "model": "cursor:gpt-5.5",
+                "stream": true,
+                "messages": [{"role": "user", "content": "explain"}]
+            }))
+            .unwrap(),
+            RequestContext {
+                req_id: "test-req".into(),
+                session_id: None,
+                session_seq: None,
+                provider: "cursor".into(),
+                traffic: None,
+                monitor: None,
+            },
+        )
+        .await;
 
+    assert_eq!(response.status(), 502);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "api_error");
     assert!(
-        messages[0]
-            .get("shellStream")
-            .and_then(|s| s.get("start"))
-            .is_some()
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("before the answer was finished")),
+        "{json}"
     );
 
-    assert_eq!(
-        messages[1]["shellStream"]["stdout"]["data"],
-        "stdout output"
-    );
-
-    assert_eq!(messages[2]["shellStream"]["exit"]["code"], 0);
-    assert_eq!(messages[2]["shellStream"]["exit"]["cwd"], "/home/user");
-
-    assert_eq!(
-        messages[3]["execClientControlMessage"]["streamClose"]["id"],
-        7
-    );
+    unsafe {
+        std::env::remove_var("CCP_CURSOR_BASE_URL");
+        std::env::remove_var("CCP_CURSOR_AUTH_TOKEN");
+        std::env::remove_var("CCP_CURSOR_CLIENT_VERSION");
+    }
 }
 
 // ---------------------------------------------------------------------------

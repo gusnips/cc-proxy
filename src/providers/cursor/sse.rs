@@ -347,11 +347,19 @@ impl<'a> CursorSseFramer<'a> {
         self.finalized = true;
     }
 
+    /// Close the message once the upstream events run out.
+    ///
+    /// Only an End event earns a stop reason. Without one, Cursor never
+    /// finished the turn, and `end_turn` would hand Claude Code a cut-off
+    /// answer as a complete one, so this sends an `error` event instead.
     pub fn finalize(&mut self) {
         if !self.finalized {
             self.ensure_start();
             self.close_open_blocks();
-            self.emit_final_message("end_turn");
+            self.output.extend_from_slice(&format_sse_error(
+                "Cursor ended the response before the answer was finished. Retry this turn.",
+            ));
+            self.finalized = true;
         }
     }
 }
@@ -452,21 +460,32 @@ mod tests {
     }
 
     #[test]
-    fn sse_handles_empty_upstream() {
+    fn sse_reports_an_error_when_cursor_never_ends_the_turn() {
         let upstream = CursorUpstreamResponse {
             status: 200,
-            body: Vec::new(),
+            body: test_frames::text_frame("half an ans"),
             error_detail: None,
         };
 
         let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test");
-        let sse_str = String::from_utf8_lossy(&sse);
-
-        // Should still produce events even with empty body
-        let events = parse_sse_events(&sse_str);
+        let events = parse_sse_events(&String::from_utf8_lossy(&sse));
         let event_names: Vec<&str> = events.iter().map(|e| e.0.as_str()).collect();
-        assert!(event_names.contains(&"message_start"));
-        assert!(event_names.contains(&"message_stop"));
+
+        assert_eq!(
+            event_names,
+            vec![
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "error"
+            ]
+        );
+        assert!(
+            events[4].1["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("before the answer was finished"))
+        );
     }
 
     #[test]

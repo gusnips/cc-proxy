@@ -1,6 +1,6 @@
 use base64::Engine;
 use bytes::Bytes;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use prost::Message;
 use tokio::sync::mpsc;
 
@@ -12,6 +12,15 @@ use crate::providers::cursor::connect::{
 use crate::providers::cursor::model::CursorModelResolution;
 use crate::providers::cursor::proto;
 use crate::providers::cursor::request::CursorSelectedImage;
+use crate::providers::cursor::response::frame_ends_turn;
+
+/// How long Cursor may send nothing at all before the request fails.
+///
+/// A gap is not an answer. Only Cursor's `turn_ended` update or the Connect
+/// end frame says the turn is over. Failing a stalled stream lets Claude Code
+/// retry, where reading the gap as the end handed it a cut-off answer that
+/// claimed to be finished.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Upstream response from the Cursor API.
 ///
@@ -138,43 +147,18 @@ impl CursorHttpClient {
             .get("grpc-message")
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let mut stream = response.bytes_stream();
-        let mut body_bytes = Vec::new();
-        let mut received_data = false;
-
-        loop {
-            let timeout = if received_data {
-                std::time::Duration::from_secs(5)
-            } else {
-                std::time::Duration::from_secs(60)
-            };
-            match tokio::time::timeout(timeout, stream.next()).await {
-                Ok(Some(Ok(chunk))) => {
-                    received_data = true;
-                    body_bytes.extend_from_slice(&chunk);
-                    if contains_end_frame(&body_bytes) {
-                        break;
-                    }
-                }
-                Ok(Some(Err(error))) => {
-                    sender.abort();
-                    return Err(CursorError::internal(format!("read body: {error}")));
-                }
-                Ok(None) => break,
-                Err(_) if received_data => break,
-                Err(_) => {
-                    sender.abort();
-                    return Err(CursorError::internal(
-                        "Cursor upstream timed out before sending a response",
-                    ));
-                }
-            }
-        }
+        let collected = collect_turn(response.bytes_stream(), IDLE_TIMEOUT).await;
         sender.abort();
+        let (body_bytes, finished) = collected?;
 
         if status >= 400 {
             let detail = parse_error_body(&body_bytes, &headers);
             return Err(CursorError::new(status, "Cursor upstream error", detail));
+        }
+        if !finished {
+            return Err(CursorError::internal(
+                "Cursor closed the connection before the answer was finished. Retry this turn.",
+            ));
         }
 
         Ok(CursorUpstreamResponse {
@@ -328,24 +312,46 @@ fn heartbeat_frame() -> Bytes {
     encode_connect_frame(field_bytes(7, &[]), 0)
 }
 
-fn contains_end_frame(body: &[u8]) -> bool {
-    let mut offset = 0;
-    while body.len().saturating_sub(offset) >= 5 {
-        let length = u32::from_be_bytes([
-            body[offset + 1],
-            body[offset + 2],
-            body[offset + 3],
-            body[offset + 4],
-        ]) as usize;
-        if body.len().saturating_sub(offset) < 5 + length {
-            return false;
+/// Read Cursor's response until its turn ends.
+///
+/// Returns the bytes and whether the turn finished. The stream closing first
+/// is not a finish. Neither is a pause: Cursor can go quiet mid-answer for a
+/// long think, so only `idle_timeout` with no bytes at all fails the read.
+async fn collect_turn<E: std::fmt::Display>(
+    stream: impl Stream<Item = Result<Bytes, E>>,
+    idle_timeout: std::time::Duration,
+) -> Result<(Vec<u8>, bool), CursorError> {
+    let mut stream = std::pin::pin!(stream);
+    let mut body = Vec::new();
+    let mut decoder = ConnectFrameDecoder::new();
+    loop {
+        match tokio::time::timeout(idle_timeout, stream.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                body.extend_from_slice(&chunk);
+                // `turn_ended` ends the read as well as the end frame: our
+                // side of the stream stays open with heartbeats, so the end
+                // frame may not come until it closes. A body that is not
+                // Connect frames (an HTTP error page) never matches and is
+                // read to the end.
+                if decoder
+                    .push(&chunk)
+                    .is_ok_and(|frames| frames.iter().any(frame_ends_turn))
+                {
+                    return Ok((body, true));
+                }
+            }
+            Ok(Some(Err(error))) => {
+                return Err(CursorError::internal(format!("read body: {error}")));
+            }
+            Ok(None) => return Ok((body, false)),
+            Err(_) => {
+                return Err(CursorError::internal(format!(
+                    "Cursor sent nothing for {} seconds, so the request was stopped. Retry this turn.",
+                    idle_timeout.as_secs()
+                )));
+            }
         }
-        if body[offset] & FLAG_END != 0 {
-            return true;
-        }
-        offset += 5 + length;
     }
-    false
 }
 
 fn parse_error_body(body_bytes: &[u8], _headers: &reqwest::header::HeaderMap) -> Option<String> {
@@ -450,3 +456,79 @@ impl std::fmt::Display for CursorError {
 }
 
 impl std::error::Error for CursorError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::cursor::response::{CursorStreamEvent, decode_upstream_response};
+    use crate::providers::cursor::test_frames;
+    use futures_util::stream;
+
+    fn chunks(frames: Vec<Vec<u8>>) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
+        stream::iter(frames.into_iter().map(|frame| Ok(Bytes::from(frame))))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn turn_ended_finishes_the_read_while_the_stream_stays_open() {
+        let stream = chunks(vec![
+            test_frames::text_frame("hi"),
+            test_frames::usage_frame(1, 1),
+        ])
+        .chain(stream::pending());
+        let started = tokio::time::Instant::now();
+
+        let (_, finished) = collect_turn(stream, IDLE_TIMEOUT).await.unwrap();
+
+        assert!(finished);
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_closes_mid_answer_is_not_finished() {
+        let stream = chunks(vec![test_frames::text_frame("half an ans")]);
+
+        let (_, finished) = collect_turn(stream, IDLE_TIMEOUT).await.unwrap();
+
+        assert!(!finished);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn long_pauses_between_chunks_are_not_the_end() {
+        // A 45-second think between deltas used to read as a finished answer
+        // after 5 seconds.
+        let stream = chunks(vec![
+            test_frames::text_frame("first"),
+            test_frames::text_frame(" second"),
+            test_frames::usage_frame(1, 1),
+        ])
+        .then(|chunk| async {
+            tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+            chunk
+        });
+
+        let (body, finished) = collect_turn(stream, IDLE_TIMEOUT).await.unwrap();
+
+        assert!(finished);
+        let text: String = decode_upstream_response(&body)
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| match event {
+                CursorStreamEvent::TextDelta { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "first second");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silence_for_the_idle_timeout_fails_the_read() {
+        let stream = chunks(vec![test_frames::text_frame("thinking")]).chain(stream::pending());
+        let started = tokio::time::Instant::now();
+
+        let error = collect_turn(stream, IDLE_TIMEOUT).await.unwrap_err();
+
+        assert_eq!(started.elapsed(), IDLE_TIMEOUT);
+        assert_eq!(error.status, 502);
+        assert!(error.message.contains("60 seconds"), "{}", error.message);
+    }
+}

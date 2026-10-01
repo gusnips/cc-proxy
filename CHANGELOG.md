@@ -37,6 +37,16 @@ description: Release notes for cc-proxy.
 - Grok no longer fails a turn on a stream event type it does not know.
 - On the OpenAI routes, `prompt_tokens` now counts cache writes, Kimi
   reports its reasoning tokens, and a refusal reads `content_filter`.
+- Cursor now reads the result of each tool call. Before, the reply after a
+  tool call was rebuilt from text Cursor wrote before it had the result, so
+  the answer ignored the result, and a second tool call in the same turn was
+  lost. Now the result goes back to Cursor with the rest of the conversation,
+  and Cursor answers from it.
+- Cursor answers no longer stop early. A pause of 5 seconds used to end the
+  answer and mark it finished, so a long think came back cut off. Now an
+  answer ends only when Cursor says it is done. If Cursor sends nothing for 60
+  seconds, or closes the connection before it is done, the request fails
+  with an error that Claude Code retries.
 
 ## v0.1.47 (2026-09-30)
 
