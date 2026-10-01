@@ -243,7 +243,7 @@ pub fn classify(status: Option<u16>, text: &str) -> FailureKind {
     match status {
         Some(529) => return FailureKind::Overloaded,
         Some(status) if status >= 500 => {
-            return if OVERLOAD.is_match(text) || OVERLOAD_EXACT.is_match(text) {
+            return if OVERLOAD.is_match(text) {
                 FailureKind::Overloaded
             } else {
                 FailureKind::Server
@@ -257,7 +257,7 @@ pub fn classify(status: Option<u16>, text: &str) -> FailureKind {
     if RATE.is_match(text) {
         return FailureKind::RateLimit;
     }
-    if OVERLOAD.is_match(text) || OVERLOAD_EXACT.is_match(text) {
+    if OVERLOAD.is_match(text) {
         return FailureKind::Overloaded;
     }
     match status {
@@ -394,12 +394,11 @@ static OVERLOAD: LazyLock<Regex> = LazyLock::new(|| {
         r"|high demand",
         r#"|"code"\s*:\s*5\d\d"#,
         r"|(?:try|retry) your request again",
+        // Google's status enum is upper-case by contract. Matched exactly so it
+        // does not swallow the word in ordinary prose.
+        r"|(?-i:\bINTERNAL\b)",
     ))
 });
-
-// Google's status enum is upper-case by contract. Matched exactly so it does
-// not swallow the word in ordinary prose.
-static OVERLOAD_EXACT: LazyLock<Regex> = LazyLock::new(|| pattern(r"\bINTERNAL\b"));
 
 #[cfg(test)]
 mod tests {
@@ -456,6 +455,16 @@ mod tests {
                 FailureKind::Invalid,
             ),
             (500, r#"{"error":{"message":"boom"}}"#, FailureKind::Server),
+            (
+                500,
+                r#"{"error":{"status":"INTERNAL"}}"#,
+                FailureKind::Overloaded,
+            ),
+            (
+                500,
+                r#"{"error":{"message":"an internal fault"}}"#,
+                FailureKind::Server,
+            ),
             (
                 503,
                 r#"{"error":{"message":"Model overloaded"}}"#,

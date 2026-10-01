@@ -31,7 +31,7 @@ use crate::logging::create_logger;
 use crate::monitor::usage_from_anthropic_sse;
 use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::request_identity::ConversationIdentity;
-use crate::retry::{compute_backoff_delay, sleep};
+use crate::retry::{compute_backoff_delay, should_retry_status, sleep};
 
 use self::auth::browser_login::run_browser_login;
 use self::auth::device::DeviceAuthClient;
@@ -1641,12 +1641,12 @@ fn retryable_live_start_codex_error(err: &client::CodexError) -> bool {
         if err.detail.as_deref() == Some(websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL) {
             return false;
         }
-        return err.status == 0 || matches!(err.status, 429 | 500 | 502 | 503 | 504 | 529);
+        return err.status == 0 || should_retry_status(err.status);
     }
     if err.detail.as_deref() == Some(websocket::WEBSOCKET_KEEPALIVE_FAILURE_DETAIL) {
         return true;
     }
-    matches!(err.status, 429 | 500 | 502 | 503 | 504 | 529)
+    should_retry_status(err.status)
         || (err.status == 0 && retryable_live_message(codex_error_message(err)))
 }
 

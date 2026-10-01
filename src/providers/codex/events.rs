@@ -132,9 +132,10 @@ pub(crate) fn response_is_incomplete_terminal(payload: &Value) -> bool {
 /// attached, a status other than `incomplete`, no reason or an unknown one)
 /// stays a failure, because nothing says the answer ended on purpose.
 pub(crate) fn incomplete_stop_reason(payload: &Value) -> Option<StopReason> {
-    let status = payload.pointer("/response/status");
     if payload.get("type").and_then(Value::as_str) != Some("response.incomplete")
-        || !(status.is_none() || status.and_then(Value::as_str) == Some("incomplete"))
+        || payload
+            .pointer("/response/status")
+            .is_some_and(|status| status.as_str() != Some("incomplete"))
         || event_error(payload).is_some()
     {
         return None;

@@ -4,6 +4,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     anthropic::schema::{Message, MessagesRequest},
+    providers::translate_shared::EFFORT_LEVELS,
     registry::normalize_incoming_model,
 };
 
@@ -325,7 +326,7 @@ fn parse_effort(
             }),
         )
     })?;
-    if ["none", "low", "medium", "high", "xhigh", "max"].contains(&effort) {
+    if EFFORT_LEVELS.contains(&effort) {
         Ok(Some(effort.to_string()))
     } else {
         Err(OpenAiError::invalid(

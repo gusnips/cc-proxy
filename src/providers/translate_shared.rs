@@ -66,6 +66,10 @@ pub fn parallel_tool_calls(req: &MessagesRequest) -> Option<bool> {
         .map(|disabled| !disabled)
 }
 
+/// Every effort a caller may ask for, on either API surface. One list, so a
+/// level one surface accepts is never refused by the backend's translator.
+pub const EFFORT_LEVELS: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
+
 /// The reasoning effort the caller asked for. `thinking: {"type":"disabled"}`
 /// reads as "none" and outranks output_config.effort. Ignoring it sent the
 /// same request as saying nothing, and every backend's default thinks
@@ -79,13 +83,8 @@ pub fn read_effort(req: &MessagesRequest) -> Result<Option<&str>, anyhow::Error>
         .get("output_config")
         .and_then(|config| config.get("effort"))
     {
-        Some(Value::String(s)) => {
-            if ["none", "low", "medium", "high", "xhigh", "max"].contains(&s.as_str()) {
-                Some(s.as_str())
-            } else {
-                anyhow::bail!("Invalid output_config.effort: {s}")
-            }
-        }
+        Some(Value::String(s)) if EFFORT_LEVELS.contains(&s.as_str()) => Some(s.as_str()),
+        Some(Value::String(s)) => anyhow::bail!("Invalid output_config.effort: {s}"),
         _ => None,
     };
     let thinking_disabled = req

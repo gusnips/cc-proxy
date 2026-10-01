@@ -151,9 +151,9 @@ impl Provider for GrokProvider {
                 }
                 Err(error) => {
                     write_error(ctx.traffic.as_deref(), "accumulate", "invalid_response");
-                    match upstream_error::carried(&error) {
-                        Some(failure) => failure.clone().response(),
-                        None => json_error(
+                    match error.downcast::<ProviderError>() {
+                        Ok(failure) => failure.response(),
+                        Err(_) => json_error(
                             StatusCode::BAD_GATEWAY,
                             "api_error",
                             "Grok response is invalid",

@@ -298,23 +298,14 @@ pub(crate) fn resolve_effort_override(
     effort: Option<Effort>,
     override_effort: Option<&str>,
 ) -> Result<Option<Effort>, anyhow::Error> {
-    if let Some(val) = override_effort {
-        let valid = ["none", "low", "medium", "high", "xhigh", "max"];
-        if !valid.contains(&val) {
-            anyhow::bail!(
-                "Invalid effort override: \"{val}\". Use one of: none, low, medium, high, xhigh, max"
-            );
-        }
-        return Ok(Some(match val {
-            "max" => Effort::Max,
-            "xhigh" => Effort::Xhigh,
-            "high" => Effort::High,
-            "medium" => Effort::Medium,
-            "low" => Effort::Low,
-            _ => Effort::None,
-        }));
-    }
-    Ok(effort)
+    let Some(val) = override_effort else {
+        return Ok(effort);
+    };
+    to_codex_effort(Some(val)).map(Some).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid effort override: \"{val}\". Use one of: none, low, medium, high, xhigh, max"
+        )
+    })
 }
 
 fn reasoning_summary_requested(summary: Option<&str>) -> bool {
