@@ -71,6 +71,7 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 | `CCP_CONFIG_DIR` | none | Platform config directory | Replaces the configuration and file-backed auth root. |
 | `CCP_ALIAS_PROVIDER` | `aliasProvider` | `codex` | Routes recognized Anthropic-style aliases through `codex` or `kimi`. |
 | `CCP_AUTO_REVIEW_MODEL` | `autoReviewModel` | `gpt-6-luna` for Codex | Routes Claude Code's non-streaming, tool-free Bash security-review classifier through a routable model. |
+| none | `claude.enabled` | `true` | Whether plain `claude` uses the proxy, once `cc-proxy shell install` has added the hook. `cc-proxy on` and `cc-proxy off` set it. |
 | none | `claude.model` | unset | The model `cc-proxy claude` starts Claude Code on, as `ANTHROPIC_MODEL`. |
 | none | `claude.fastModel` | unset | The model for Claude Code's small background requests under `cc-proxy claude`, as `ANTHROPIC_DEFAULT_HAIKU_MODEL`. |
 | `CCP_AUTO_REVIEW_EFFORT` | `autoReviewEffort` | unset | Sets `none`, `low`, `medium`, `high`, `xhigh`, or `max` only for auto-review requests routed to Codex. `off` inherits ordinary effort. |

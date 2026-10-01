@@ -10,7 +10,7 @@ Claude Code binds its base URL and client auth when the process starts. A **back
 | Start one session on the proxy | `cc-proxy claude`, with any `claude` flags |
 | Always use the proxy | Put client variables in `~/.claude/settings.json` |
 | Try one model once | Prefix `claude` with environment variables or use an alias |
-| Toggle between proxy and direct Anthropic | Use a launch wrapper controlled by a flag |
+| Toggle between proxy and direct Anthropic | `cc-proxy shell install` once, then `cc-proxy on` / `cc-proxy off` |
 | Stay on the proxy and change provider or model | Use `/model`, `--model`, or a new `ANTHROPIC_MODEL` |
 
 ## One-shot aliases
@@ -22,45 +22,29 @@ alias cgrok='ANTHROPIC_BASE_URL=http://127.0.0.1:18765 ANTHROPIC_AUTH_TOKEN=unus
 
 These affect only the launched process.
 
-## Flag-controlled wrapper
-
-Put a wrapper named `claude` ahead of the real binary on `PATH`. Set `REAL_CLAUDE` to a path that cannot resolve back to the wrapper.
-
-```bash
-#!/usr/bin/env bash
-# Route Claude Code through the proxy when the flag file exists.
-set -euo pipefail
-
-real_claude="${REAL_CLAUDE:-$HOME/.local/bin/claude-real}"
-flag="$HOME/.claude/cc-proxy-enabled"
-model_file="$HOME/.claude/cc-proxy-model"
-
-if [ -f "$flag" ]; then
-  model="gpt-6-sol[1m]"
-  [ ! -f "$model_file" ] || model="$(tr -d '[:space:]' <"$model_file")"
-
-  export ANTHROPIC_BASE_URL="http://127.0.0.1:18765"
-  export ANTHROPIC_AUTH_TOKEN="unused"
-  export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-$model}"
-  export ANTHROPIC_DEFAULT_HAIKU_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL:-$model}"
-  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-  export CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1
-fi
-
-exec "$real_claude" "$@"
-```
-
-Toggle it with ordinary file operations:
+## Switch plain `claude` on and off
 
 ```sh
-mkdir -p ~/.claude
-touch ~/.claude/cc-proxy-enabled
-printf '%s\n' 'k3[1m]' > ~/.claude/cc-proxy-model
-# Disable for future sessions
-rm ~/.claude/cc-proxy-enabled
+cc-proxy shell install
 ```
 
-New processes read the flag and model. Running processes retain their launch environment.
+It adds one line to the file your shell reads when a terminal opens:
+`~/.zshrc` for zsh, `~/.bashrc` for bash on Linux, `~/.bash_profile` for bash
+on macOS. fish gets `~/.config/fish/functions/claude.fish` instead. That line
+defines a `claude` command that runs `cc-proxy claude` while cc-proxy is on,
+and plain Claude Code while it's off. It sets no environment variables, so
+nothing else on your machine sees the proxy.
+
+```sh
+cc-proxy off   # plain claude, in every terminal
+cc-proxy on    # claude through the proxy again
+```
+
+`on` and `off` reach every terminal at once, because the `claude` command
+asks cc-proxy each time it runs. A terminal that was already open when you
+ran `shell install` needs `exec zsh` (or your shell's name) once. A Claude
+Code session that's already open keeps its connection until you quit it.
+`cc-proxy shell uninstall` removes the line and turns cc-proxy off.
 
 ## In-session model changes
 

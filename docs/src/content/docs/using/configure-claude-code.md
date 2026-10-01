@@ -26,6 +26,32 @@ cc-proxy config set claude.model k3[1m]
 
 `--model` on the command line still wins for that session.
 
+## Plain `claude` through the proxy
+
+```sh
+cc-proxy shell install
+```
+
+It adds one line to the file your shell reads when a terminal opens:
+`~/.zshrc` for zsh, `~/.bashrc` for bash on Linux, `~/.bash_profile` for bash
+on macOS. fish gets `~/.config/fish/functions/claude.fish` instead. That line
+defines a `claude` command that runs `cc-proxy claude` while cc-proxy is on,
+and plain Claude Code while it's off. It sets no environment variables, so
+nothing else on your machine sees the proxy.
+
+```sh
+cc-proxy off   # plain claude, in every terminal
+cc-proxy on    # claude through the proxy again
+```
+
+`on` and `off` reach every terminal at once, because the `claude` command
+asks cc-proxy each time it runs. A terminal that was already open when you
+ran `shell install` needs `exec zsh` (or your shell's name) once. A Claude
+Code session that's already open keeps its connection until you quit it.
+`cc-proxy shell uninstall` removes the line and turns cc-proxy off.
+
+The hook works with zsh, bash and fish. On Windows, run `cc-proxy claude`.
+
 ## Minimal client contract
 
 ```sh
