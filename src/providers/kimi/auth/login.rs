@@ -39,7 +39,7 @@ pub fn run_device_login() -> Result<TokenResponse, anyhow::Error> {
 
     let init_resp = client
         .post(format!("{}/api/oauth/device_authorization", oauth_host()))
-        .headers(build_header_map(&headers))
+        .headers(headers.clone())
         .form(&[("client_id", CLIENT_ID)])
         .send()?;
 
@@ -60,7 +60,7 @@ pub fn run_device_login() -> Result<TokenResponse, anyhow::Error> {
     loop {
         let resp = client
             .post(format!("{}/api/oauth/token", oauth_host()))
-            .headers(build_header_map(&headers))
+            .headers(headers.clone())
             .form(&[
                 ("client_id", CLIENT_ID),
                 ("device_code", &auth.device_code),
@@ -107,19 +107,4 @@ pub fn run_device_login() -> Result<TokenResponse, anyhow::Error> {
             }
         }
     }
-}
-
-fn build_header_map(
-    headers: &std::collections::HashMap<String, String>,
-) -> reqwest::header::HeaderMap {
-    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-    let mut map = HeaderMap::new();
-    for (k, v) in headers {
-        if let Ok(name) = HeaderName::from_bytes(k.as_bytes())
-            && let Ok(value) = HeaderValue::from_str(v)
-        {
-            map.insert(name, value);
-        }
-    }
-    map
 }

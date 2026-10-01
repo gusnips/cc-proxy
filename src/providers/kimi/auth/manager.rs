@@ -138,7 +138,7 @@ impl<S: AuthStorage<StoredAuth>> KimiAuthManager<S> {
 
             let resp = match client
                 .post(format!("{}/api/oauth/token", oauth_host()))
-                .headers(build_headers_map(&headers))
+                .headers(headers.clone())
                 .form(&form)
                 .send()
             {
@@ -232,20 +232,6 @@ impl<S: AuthStorage<StoredAuth>> KimiAuthManager<S> {
             *guard = None;
         }
     }
-}
-
-fn build_headers_map(
-    headers: &std::collections::HashMap<String, String>,
-) -> reqwest::header::HeaderMap {
-    let mut map = reqwest::header::HeaderMap::new();
-    for (k, v) in headers {
-        if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-            && let Ok(value) = reqwest::header::HeaderValue::from_str(v)
-        {
-            map.insert(name, value);
-        }
-    }
-    map
 }
 
 #[cfg(test)]

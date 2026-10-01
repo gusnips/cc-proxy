@@ -103,22 +103,17 @@ impl KimiHttpClient {
         body: &KimiChatRequest,
     ) -> Result<reqwest::Response, KimiError> {
         let headers = common_headers().map_err(|e| KimiError::new(500, e))?;
-        let mut request = self
+        let response = self
             .client
             .post(format!("{}/chat/completions", api_base_url()))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .header("Authorization", format!("Bearer {access_token}"))
-            .json(body);
-        for (k, v) in &headers {
-            if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-                && let Ok(value) = reqwest::header::HeaderValue::from_str(v)
-            {
-                request = request.header(name, value);
-            }
-        }
-
-        let response = request.send().await.map_err(|e| KimiError::new(0, e))?;
+            .headers(headers)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| KimiError::new(0, e))?;
         if response.status().is_success() {
             return Ok(response);
         }
