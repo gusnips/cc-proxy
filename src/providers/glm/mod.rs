@@ -323,6 +323,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_done_terminator_after_message_stop_finishes_cleanly() {
+        let reply = concat!(
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        assert_eq!(relay(vec![Ok(reply)], &ctx(None)).await, reply);
+    }
+
+    #[tokio::test]
     async fn a_reply_cut_off_partway_ends_in_an_error_not_a_finished_answer() {
         let sent = &REPLY[..REPLY.find("event: message_delta").unwrap()];
         for reads in [

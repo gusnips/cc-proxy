@@ -122,6 +122,15 @@ where
         let mut output_tokens = None;
         let mut terminal = false;
         for event in events {
+            // Some Anthropic-compatible gateways end with OpenAI's `data:
+            // [DONE]`, even after message_stop. GLM forwarded z.ai's bytes
+            // raw before it came through here, so nothing shows z.ai never
+            // sends one, and failing a finished answer over a terminator
+            // costs the whole turn. It is skipped, not parsed, and still
+            // forwarded in the raw bytes, as GLM always did.
+            if event.data.trim() == "[DONE]" {
+                continue;
+            }
             if terminal {
                 return Some(self.fail_at("protocol", "event_after_message_stop"));
             }
