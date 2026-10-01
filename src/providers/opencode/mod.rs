@@ -107,7 +107,7 @@ impl OpenCodeProvider {
                     Err(error) => return map_error(error),
                 };
                 capture_buffered_upstream(&ctx, &bytes, "sse");
-                match chat::accumulate_response(&bytes, &message_id, requested) {
+                match chat::accumulate_response(chat::OPENCODE_GO, &bytes, &message_id, requested) {
                     Ok(value) => value,
                     Err(error) => {
                         return upstream_error::translation_error(
@@ -284,7 +284,8 @@ impl Provider for OpenCodeProvider {
                     .await
                     .map_err(opencode_provider_error)?;
                 chat::stream_body(
-                    upstream,
+                    chat::OPENCODE_GO,
+                    upstream.into_stream(),
                     message_id,
                     requested.to_string(),
                     ctx.monitor.clone(),

@@ -4,11 +4,10 @@ use std::sync::Arc;
 use axum::body::Body;
 use base64::Engine;
 use bytes::Bytes;
-use futures_util::StreamExt;
+use futures_util::TryStreamExt;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::client::{OpenCodeError, OpenCodeResponse};
 use crate::anthropic::{
     schema::MessagesRequest,
     sse::{encode_sse_event, parse_sse_events},
@@ -24,6 +23,20 @@ use crate::providers::{
 use crate::traffic::{StreamTrafficCapture, TrafficCapture};
 
 const DEFAULT_MAX_TOKENS: u32 = 32_000;
+
+/// Who is on the other end of a chat-completions stream. OpenCode Go and Kimi
+/// speak the same wire, so one translator serves both; `name` goes in the
+/// errors a user reads, `slug` in thinking signatures and capture file names.
+#[derive(Debug, Clone, Copy)]
+pub struct ChatUpstream {
+    pub name: &'static str,
+    pub slug: &'static str,
+}
+
+pub const OPENCODE_GO: ChatUpstream = ChatUpstream {
+    name: "OpenCode Go",
+    slug: "opencode",
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatRequest {
@@ -544,6 +557,7 @@ enum ToolBlockState {
 }
 
 struct TranslationState {
+    upstream: ChatUpstream,
     message_id: String,
     model: String,
     message_started: bool,
@@ -558,8 +572,9 @@ struct TranslationState {
 }
 
 impl TranslationState {
-    fn new(message_id: String, model: String) -> Self {
+    fn new(upstream: ChatUpstream, message_id: String, model: String) -> Self {
         Self {
+            upstream,
             message_id,
             model,
             message_started: false,
@@ -576,12 +591,12 @@ impl TranslationState {
 
     fn apply_chunk(&mut self, chunk: StreamChunk) -> anyhow::Result<Vec<u8>> {
         if self.finished {
-            anyhow::bail!("OpenCode Go event after terminal completion");
+            anyhow::bail!("event after terminal completion");
         }
         // A failure after the 200 keeps its kind: a throttle reported as a
         // broken stream is retried straight back into the same limit.
         if let Some(error) = chunk.error {
-            return Err(upstream_error::from_stream(&error, "OpenCode Go").into());
+            return Err(upstream_error::from_stream(&error, self.upstream.name).into());
         }
         if let Some(usage) = chunk.usage {
             self.usage = usage;
@@ -593,7 +608,7 @@ impl TranslationState {
             return Ok(Vec::new());
         }
         if choices.len() != 1 {
-            anyhow::bail!("OpenCode Go stream returned multiple choices");
+            anyhow::bail!("stream returned multiple choices");
         }
         let choice = choices.into_iter().next().expect("one choice");
         let mut out = Vec::new();
@@ -603,7 +618,7 @@ impl TranslationState {
         if let Some(reason) = choice.finish_reason {
             let reason = parse_finish_reason(&reason)?;
             if self.pending_stop.is_some_and(|current| current != reason) {
-                anyhow::bail!("OpenCode Go stream changed finish_reason");
+                anyhow::bail!("stream changed finish_reason");
             }
             self.pending_stop = Some(reason);
         }
@@ -723,7 +738,7 @@ impl TranslationState {
         };
         if self.tools[position].state == ToolBlockState::Closed {
             anyhow::bail!(
-                "OpenCode Go tool call {} continued after its content block was closed",
+                "tool call {} continued after its content block was closed",
                 upstream_index
             );
         }
@@ -819,7 +834,7 @@ impl TranslationState {
         for slot in &self.tools {
             if slot.state == ToolBlockState::Pending {
                 anyhow::bail!(
-                    "OpenCode Go tool call {} ended without id or function name",
+                    "tool call {} ended without id or function name",
                     slot.upstream_index
                 );
             }
@@ -827,9 +842,9 @@ impl TranslationState {
         for block in &self.blocks {
             if let BlockKind::Tool { args, .. } = &block.kind {
                 let value: Value = serde_json::from_str(if args.is_empty() { "{}" } else { args })
-                    .map_err(|_| anyhow::anyhow!("OpenCode Go tool arguments are invalid JSON"))?;
+                    .map_err(|_| anyhow::anyhow!("tool arguments are invalid JSON"))?;
                 if !value.is_object() {
-                    anyhow::bail!("OpenCode Go tool arguments must be a JSON object");
+                    anyhow::bail!("tool arguments must be a JSON object");
                 }
             }
         }
@@ -850,7 +865,7 @@ impl TranslationState {
 
     fn response(&self) -> anyhow::Result<Value> {
         if !self.finished {
-            anyhow::bail!("OpenCode Go response is not complete");
+            anyhow::bail!("response is not complete");
         }
         let mut content = Vec::new();
         for block in &self.blocks {
@@ -858,7 +873,7 @@ impl TranslationState {
                 BlockKind::Thinking { text } => content.push(json!({
                     "type":"thinking",
                     "thinking":text,
-                    "signature":make_thinking_signature(&self.message_id, block.index),
+                    "signature":make_thinking_signature(self.upstream, &self.message_id, block.index),
                 })),
                 BlockKind::Text { text } => {
                     content.push(json!({"type":"text", "text":text}));
@@ -924,7 +939,7 @@ impl TranslationState {
         emit(
             out,
             "content_block_delta",
-            json!({"type":"content_block_delta","index":index,"delta":{"type":"signature_delta","signature":make_thinking_signature(&self.message_id, index)}}),
+            json!({"type":"content_block_delta","index":index,"delta":{"type":"signature_delta","signature":make_thinking_signature(self.upstream, &self.message_id, index)}}),
         );
         emit(
             out,
@@ -963,14 +978,14 @@ fn parse_finish_reason(reason: &str) -> anyhow::Result<StopReason> {
         "stop" => Ok(StopReason::EndTurn),
         "tool_calls" | "function_call" => Ok(StopReason::ToolUse),
         "length" => Ok(StopReason::MaxTokens),
-        "content_filter" => anyhow::bail!("OpenCode Go response was blocked by a content filter"),
-        other => anyhow::bail!("unsupported OpenCode Go finish_reason: {other}"),
+        "content_filter" => anyhow::bail!("response was blocked by a content filter"),
+        other => anyhow::bail!("unsupported finish_reason: {other}"),
     }
 }
 
-fn make_thinking_signature(message_id: &str, index: usize) -> String {
+fn make_thinking_signature(upstream: ChatUpstream, message_id: &str, index: usize) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(format!("ccp:opencode:v1:{message_id}:{index}"))
+        .encode(format!("ccp:{}:v1:{message_id}:{index}", upstream.slug))
 }
 
 fn make_tool_use_id(message_id: &str, upstream_index: usize) -> String {
@@ -993,10 +1008,10 @@ pub struct LiveStreamTranslator {
 }
 
 impl LiveStreamTranslator {
-    pub fn new(message_id: String, model: String) -> Self {
+    pub fn new(upstream: ChatUpstream, message_id: String, model: String) -> Self {
         Self {
             decoder: SseDecoder::default(),
-            state: TranslationState::new(message_id, model),
+            state: TranslationState::new(upstream, message_id, model),
         }
     }
 
@@ -1012,8 +1027,8 @@ impl LiveStreamTranslator {
                 validate_post_done_metadata(data)?;
                 continue;
             }
-            let chunk: StreamChunk = serde_json::from_str(data)
-                .map_err(|_| anyhow::anyhow!("malformed OpenCode Go SSE event"))?;
+            let chunk: StreamChunk =
+                serde_json::from_str(data).map_err(|_| anyhow::anyhow!("malformed SSE event"))?;
             out.extend(self.state.apply_chunk(chunk)?);
         }
         Ok(out)
@@ -1025,7 +1040,7 @@ impl LiveStreamTranslator {
             return Ok(Vec::new());
         }
         if self.state.pending_stop.is_none() {
-            anyhow::bail!("OpenCode Go stream ended without [DONE] or finish_reason");
+            anyhow::bail!("stream ended without [DONE] or finish_reason");
         }
         self.state.finalize()
     }
@@ -1037,10 +1052,10 @@ impl LiveStreamTranslator {
 
 fn validate_post_done_metadata(data: &str) -> anyhow::Result<()> {
     let value: Value = serde_json::from_str(data)
-        .map_err(|_| anyhow::anyhow!("malformed OpenCode Go SSE event after [DONE]"))?;
+        .map_err(|_| anyhow::anyhow!("malformed SSE event after [DONE]"))?;
     let object = value
         .as_object()
-        .ok_or_else(|| anyhow::anyhow!("OpenCode Go event after terminal completion"))?;
+        .ok_or_else(|| anyhow::anyhow!("event after terminal completion"))?;
     let has_empty_choices = object
         .get("choices")
         .and_then(Value::as_array)
@@ -1057,11 +1072,16 @@ fn validate_post_done_metadata(data: &str) -> anyhow::Result<()> {
     if has_empty_choices && has_cost && known_keys {
         return Ok(());
     }
-    anyhow::bail!("OpenCode Go event after terminal completion")
+    anyhow::bail!("event after terminal completion")
 }
 
-pub fn accumulate_response(input: &[u8], message_id: &str, model: &str) -> anyhow::Result<Value> {
-    let mut translator = LiveStreamTranslator::new(message_id.into(), model.into());
+pub fn accumulate_response(
+    upstream: ChatUpstream,
+    input: &[u8],
+    message_id: &str,
+    model: &str,
+) -> anyhow::Result<Value> {
+    let mut translator = LiveStreamTranslator::new(upstream, message_id.into(), model.into());
     translator.push(input)?;
     translator.finish()?;
     translator.state.response()
@@ -1074,17 +1094,21 @@ pub fn stream_error(error_type: &str, message: &str) -> Vec<u8> {
     )
 }
 
-pub fn stream_body(
-    upstream: OpenCodeResponse,
+pub fn stream_body<S>(
+    upstream: ChatUpstream,
+    response: S,
     message_id: String,
     model: String,
     monitor: Option<MonitorHandle>,
     req_id: String,
     traffic: Option<Arc<TrafficCapture>>,
-) -> Body {
-    let state = OpenCodeChatStreamState {
-        upstream: upstream.into_stream(),
-        translator: LiveStreamTranslator::new(message_id, model),
+) -> Body
+where
+    S: futures_util::TryStream<Ok = Bytes> + Send + Unpin + 'static,
+{
+    let state = ChatStreamState {
+        upstream: response,
+        translator: LiveStreamTranslator::new(upstream, message_id, model),
         capture_decoder: SseDecoder::default(),
         terminal: false,
         error_sent: false,
@@ -1104,7 +1128,7 @@ pub fn stream_body(
     Body::from_stream(stream)
 }
 
-struct OpenCodeChatStreamState<S> {
+struct ChatStreamState<S> {
     upstream: S,
     translator: LiveStreamTranslator,
     capture_decoder: SseDecoder,
@@ -1118,9 +1142,9 @@ struct OpenCodeChatStreamState<S> {
     traffic: Option<Arc<TrafficCapture>>,
 }
 
-impl<S> OpenCodeChatStreamState<S>
+impl<S> ChatStreamState<S>
 where
-    S: futures_util::Stream<Item = Result<Bytes, OpenCodeError>> + Unpin,
+    S: futures_util::TryStream<Ok = Bytes> + Unpin,
 {
     async fn next_output(&mut self) -> Option<Vec<u8>> {
         if self.terminal {
@@ -1131,10 +1155,10 @@ where
             return None;
         }
         loop {
-            let chunk = match self.upstream.next().await {
-                Some(Ok(chunk)) => chunk,
-                Some(Err(_)) => return Some(self.fail_at("transport", "upstream_stream")),
-                None => {
+            let chunk = match self.upstream.try_next().await {
+                Ok(Some(chunk)) => chunk,
+                Err(_) => return Some(self.fail_at("transport", "upstream_stream")),
+                Ok(None) => {
                     let output = match self.translator.finish() {
                         Ok(output) => output,
                         Err(_) => return Some(self.fail_at("decoder", "incomplete_stream")),
@@ -1233,11 +1257,8 @@ where
     }
 
     fn fail_at(&mut self, stage: &str, kind: &str) -> Vec<u8> {
-        self.fail(
-            stage,
-            kind,
-            stream_error("api_error", "OpenCode Go stream is invalid"),
-        )
+        let message = format!("{} stream is invalid", self.translator.state.upstream.name);
+        self.fail(stage, kind, stream_error("api_error", &message))
     }
 
     fn fail(&mut self, stage: &str, kind: &str, output: Vec<u8>) -> Vec<u8> {
@@ -1260,13 +1281,13 @@ where
                     "bytes":self.bytes,
                     "chunks":self.chunks,
                 }),
-                "061-opencode-stream-summary",
+                &format!("061-{}-stream-summary", self.translator.state.upstream.slug),
             );
         }
     }
 }
 
-impl<S> Drop for OpenCodeChatStreamState<S> {
+impl<S> Drop for ChatStreamState<S> {
     fn drop(&mut self) {
         if self.terminal || self.stream_capture.is_none() {
             return;
@@ -1281,7 +1302,7 @@ impl<S> Drop for OpenCodeChatStreamState<S> {
                     "bytes":self.bytes,
                     "chunks":self.chunks,
                 }),
-                "061-opencode-stream-summary",
+                &format!("061-{}-stream-summary", self.translator.state.upstream.slug),
             );
         }
     }
@@ -1495,7 +1516,8 @@ mod tests {
             "data: [DONE]\n\n"
         );
         for split in 0..=upstream.len() {
-            let mut translator = LiveStreamTranslator::new("msg_1".into(), "glm-5.2".into());
+            let mut translator =
+                LiveStreamTranslator::new(OPENCODE_GO, "msg_1".into(), "glm-5.2".into());
             let mut output = translator.push(&upstream.as_bytes()[..split]).unwrap();
             output.extend(translator.push(&upstream.as_bytes()[split..]).unwrap());
             output.extend(translator.finish().unwrap());
@@ -1543,8 +1565,11 @@ mod tests {
             ),
         ] {
             for split in 0..=upstream.len() {
-                let mut translator =
-                    LiveStreamTranslator::new("msg_after_tool".into(), "glm-5.2".into());
+                let mut translator = LiveStreamTranslator::new(
+                    OPENCODE_GO,
+                    "msg_after_tool".into(),
+                    "glm-5.2".into(),
+                );
                 let mut output = translator.push(&upstream.as_bytes()[..split]).unwrap();
                 output.extend(translator.push(&upstream.as_bytes()[split..]).unwrap());
                 output.extend(translator.finish().unwrap());
@@ -1591,9 +1616,13 @@ mod tests {
                 assert!(rendered.contains("message_stop"), "split {split}");
             }
 
-            let response =
-                accumulate_response(upstream.as_bytes(), "msg_after_tool_buffered", "glm-5.2")
-                    .unwrap();
+            let response = accumulate_response(
+                OPENCODE_GO,
+                upstream.as_bytes(),
+                "msg_after_tool_buffered",
+                "glm-5.2",
+            )
+            .unwrap();
             assert_eq!(response["content"][0]["type"], "tool_use");
             assert_eq!(response["content"][1]["type"], expected_type);
             let value_field = if expected_type == "text" {
@@ -1613,7 +1642,7 @@ mod tests {
             "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n"
         );
-        let error = accumulate_response(upstream.as_bytes(), "msg_missing", "glm-5.2")
+        let error = accumulate_response(OPENCODE_GO, upstream.as_bytes(), "msg_missing", "glm-5.2")
             .unwrap_err()
             .to_string();
         assert!(error.contains("ended without id or function name"));
@@ -1626,7 +1655,7 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{\"content\":\"after tool\"}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\" \"}}]}}]}\n\n"
         );
-        let error = accumulate_response(upstream.as_bytes(), "msg_resumed", "glm-5.2")
+        let error = accumulate_response(OPENCODE_GO, upstream.as_bytes(), "msg_resumed", "glm-5.2")
             .unwrap_err()
             .to_string();
         assert!(error.contains("continued after its content block was closed"));
@@ -1641,7 +1670,9 @@ mod tests {
             "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n"
         );
-        let response = accumulate_response(upstream.as_bytes(), "msg_new_tool", "glm-5.2").unwrap();
+        let response =
+            accumulate_response(OPENCODE_GO, upstream.as_bytes(), "msg_new_tool", "glm-5.2")
+                .unwrap();
         assert_eq!(response["content"][0]["type"], "tool_use");
         assert_eq!(response["content"][1]["type"], "text");
         assert_eq!(response["content"][2]["type"], "tool_use");
@@ -1655,8 +1686,10 @@ mod tests {
             "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n"
         );
-        let main = accumulate_response(upstream.as_bytes(), "msg_main", "kimi-k3").unwrap();
-        let child = accumulate_response(upstream.as_bytes(), "msg_child", "kimi-k3").unwrap();
+        let main =
+            accumulate_response(OPENCODE_GO, upstream.as_bytes(), "msg_main", "kimi-k3").unwrap();
+        let child =
+            accumulate_response(OPENCODE_GO, upstream.as_bytes(), "msg_child", "kimi-k3").unwrap();
         let main_id = main["content"][0]["id"].as_str().unwrap();
         let child_id = child["content"][0]["id"].as_str().unwrap();
 
@@ -1673,7 +1706,8 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
             "data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1}}\n\n"
         );
-        let response = accumulate_response(upstream.as_bytes(), "msg_2", "glm-5.2").unwrap();
+        let response =
+            accumulate_response(OPENCODE_GO, upstream.as_bytes(), "msg_2", "glm-5.2").unwrap();
         assert_eq!(response["content"][0]["text"], "hello");
         assert_eq!(response["stop_reason"], "end_turn");
         assert_eq!(response["usage"]["output_tokens"], 1);
@@ -1687,11 +1721,11 @@ mod tests {
         let filtered = b"data: {\"choices\":[{\"finish_reason\":\"content_filter\"}]}\n\n";
         let unknown = b"data: {\"choices\":[{\"finish_reason\":\"mystery\"}]}\n\n";
 
-        assert!(accumulate_response(malformed, "m", "model").is_err());
-        assert!(accumulate_response(incomplete, "m", "model").is_err());
-        assert!(accumulate_response(partial_frame, "m", "model").is_err());
-        assert!(accumulate_response(filtered, "m", "model").is_err());
-        assert!(accumulate_response(unknown, "m", "model").is_err());
+        assert!(accumulate_response(OPENCODE_GO, malformed, "m", "model").is_err());
+        assert!(accumulate_response(OPENCODE_GO, incomplete, "m", "model").is_err());
+        assert!(accumulate_response(OPENCODE_GO, partial_frame, "m", "model").is_err());
+        assert!(accumulate_response(OPENCODE_GO, filtered, "m", "model").is_err());
+        assert!(accumulate_response(OPENCODE_GO, unknown, "m", "model").is_err());
     }
 
     #[test]
@@ -1706,7 +1740,8 @@ mod tests {
         ] {
             let upstream =
                 format!("{delta}data: {{\"choices\":[{{\"finish_reason\":\"{finish}\"}}]}}\n\n");
-            let response = accumulate_response(upstream.as_bytes(), "m", "model").unwrap();
+            let response =
+                accumulate_response(OPENCODE_GO, upstream.as_bytes(), "m", "model").unwrap();
             assert_eq!(response["stop_reason"], expected, "{finish}");
         }
     }
@@ -1717,7 +1752,8 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
             "data: [DONE]\n\n"
         );
-        let response = accumulate_response(upstream.as_bytes(), "msg_3", "model").unwrap();
+        let response =
+            accumulate_response(OPENCODE_GO, upstream.as_bytes(), "msg_3", "model").unwrap();
         assert_eq!(response["stop_reason"], "end_turn");
     }
 
@@ -1729,7 +1765,8 @@ mod tests {
             "data: [DONE]\n\n",
             "data: {\"choices\":[],\"cost\":\"0\"}\n\n"
         );
-        let response = accumulate_response(upstream.as_bytes(), "msg_4", "glm-5.2").unwrap();
+        let response =
+            accumulate_response(OPENCODE_GO, upstream.as_bytes(), "msg_4", "glm-5.2").unwrap();
         assert_eq!(response["content"][0]["text"], "hello");
         assert_eq!(response["usage"]["output_tokens"], 1);
     }
@@ -1740,17 +1777,17 @@ mod tests {
             "data: [DONE]\n\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n"
         );
-        assert!(accumulate_response(upstream.as_bytes(), "msg_5", "glm-5.2").is_err());
+        assert!(accumulate_response(OPENCODE_GO, upstream.as_bytes(), "msg_5", "glm-5.2").is_err());
     }
 
     #[tokio::test]
     async fn live_stream_rejects_an_incomplete_frame_after_done() {
-        let upstream = futures_util::stream::iter([Ok::<Bytes, OpenCodeError>(
+        let upstream = futures_util::stream::iter([Ok::<Bytes, std::io::Error>(
             Bytes::from_static(b"data: [DONE]\n\ndata: {"),
         )]);
-        let mut state = OpenCodeChatStreamState {
+        let mut state = ChatStreamState {
             upstream,
-            translator: LiveStreamTranslator::new("msg_4".into(), "model".into()),
+            translator: LiveStreamTranslator::new(OPENCODE_GO, "msg_4".into(), "model".into()),
             capture_decoder: SseDecoder::default(),
             terminal: false,
             error_sent: false,
@@ -1767,14 +1804,14 @@ mod tests {
 
     #[tokio::test]
     async fn live_stream_forwards_the_kind_of_an_in_band_error() {
-        let upstream = futures_util::stream::iter([Ok::<Bytes, OpenCodeError>(
+        let upstream = futures_util::stream::iter([Ok::<Bytes, std::io::Error>(
             Bytes::from_static(
                 b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"error\":{\"code\":429,\"message\":\"Rate limit reached for requests\"}}\n\n",
             ),
         )]);
-        let mut state = OpenCodeChatStreamState {
+        let mut state = ChatStreamState {
             upstream,
-            translator: LiveStreamTranslator::new("msg_5".into(), "model".into()),
+            translator: LiveStreamTranslator::new(OPENCODE_GO, "msg_5".into(), "model".into()),
             capture_decoder: SseDecoder::default(),
             terminal: false,
             error_sent: false,
@@ -1797,7 +1834,8 @@ mod tests {
     fn buffered_in_band_context_overflow_is_a_compactable_400() {
         let upstream =
             "data: {\"error\":{\"message\":\"maximum context length is 202752 tokens\"}}\n\n";
-        let error = accumulate_response(upstream.as_bytes(), "msg_6", "glm-5.2").unwrap_err();
+        let error =
+            accumulate_response(OPENCODE_GO, upstream.as_bytes(), "msg_6", "glm-5.2").unwrap_err();
         let failure = upstream_error::carried(&error).expect("classified upstream error");
         assert_eq!(failure.status, http::StatusCode::BAD_REQUEST);
         assert!(failure.message.starts_with("prompt is too long"));
