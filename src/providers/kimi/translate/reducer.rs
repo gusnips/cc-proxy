@@ -146,6 +146,12 @@ struct ToolSlot {
 
 /// Fails with a classified `ProviderError` when Kimi reports an error inside
 /// the stream, so the caller can answer with the upstream's own kind.
+///
+/// Also fails on a stream that is not whole: no `[DONE]` and no
+/// finish_reason, a frame that is not JSON, or a tool call that starts
+/// without an id or name. Each used to be skipped, so a connection cut
+/// mid-answer came back as a finished end_turn and a lost tool call as a
+/// turn with nothing to run; Claude Code took both as the model's answer.
 pub fn reduce_upstream_bytes(input: &[u8]) -> anyhow::Result<Vec<ReducerEvent>> {
     let sse_events = parse_sse_events(input);
     let mut out = Vec::new();
@@ -156,17 +162,20 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> anyhow::Result<Vec<ReducerEvent>> 
     let mut saw_tool_calls = false;
     let mut finish_reason: Option<String> = None;
     let mut final_usage: Option<KimiUsage> = None;
+    let mut saw_done = false;
 
     for evt in &sse_events {
         let data = evt.data.trim();
-        if data.is_empty() || data == "[DONE]" {
+        if data.is_empty() {
+            continue;
+        }
+        if data == "[DONE]" {
+            saw_done = true;
             continue;
         }
 
-        let chunk: StreamChunk = match serde_json::from_str(data) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        let chunk: StreamChunk =
+            serde_json::from_str(data).map_err(|_| anyhow::anyhow!("malformed Kimi SSE event"))?;
 
         // A throttle or a spent balance that lands after the 200 arrives here.
         // Reported as a generic failure it was a 502, which Claude Code
@@ -259,7 +268,10 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> anyhow::Result<Vec<ReducerEvent>> 
                         .and_then(|f| f.name.clone())
                         .unwrap_or_default();
                     if id.is_empty() || name.is_empty() {
-                        continue;
+                        anyhow::bail!(
+                            "Kimi tool call {} started without an id or function name",
+                            tc.index
+                        );
                     }
                     saw_tool_calls = true;
                     let bi = next_block_index;
@@ -296,6 +308,10 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> anyhow::Result<Vec<ReducerEvent>> 
                 final_usage = chunk.usage.map(|u| kimi_usage_from_stream(&u));
             }
         }
+    }
+
+    if finish_reason.is_none() && !saw_done {
+        anyhow::bail!("Kimi stream ended without [DONE] or finish_reason");
     }
 
     // Close any open blocks
@@ -378,7 +394,7 @@ mod tests {
         let upstream = concat!(
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"search\",\"arguments\":\"{\\\"q\\\"\"}}]}}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"search\",\"arguments\":\"{\\\"q\\\"\"}}]}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"rust\\\"}\"}}]}}]}\n\n",
             "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n",
             "data: [DONE]\n\n"
@@ -389,6 +405,14 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, ReducerEvent::ThinkingDelta { text, .. } if text == "think"))
         );
+        let arguments: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ReducerEvent::ToolDelta { partial_json, .. } => Some(partial_json.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(arguments, r#"{"q":"rust"}"#);
         assert!(events.iter().any(|e| matches!(
             e,
             ReducerEvent::Finish {
@@ -447,21 +471,47 @@ mod tests {
     }
 
     #[test]
-    fn reducer_ignores_invalid_json() {
+    fn reducer_rejects_a_stream_that_is_not_whole() {
+        for (upstream, message) in [
+            (
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"valid\"}}]}\n\n",
+                    "data: not json\n\n",
+                    "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+                ),
+                "malformed",
+            ),
+            (
+                "data: {\"choices\":[{\"delta\":{\"content\":\"cut off\"}}]}\n\n",
+                "without [DONE]",
+            ),
+            (
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]}}]}\n\n",
+                    "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+                ),
+                "without an id",
+            ),
+        ] {
+            let error = reduce_upstream_bytes(upstream.as_bytes()).unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn done_without_finish_reason_ends_the_turn() {
         let upstream = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"valid\"}}]}\n\n",
-            "data: not json\n\n",
-            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: [DONE]\n\n"
         );
         let events = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
-        let texts: Vec<&str> = events
-            .iter()
-            .filter_map(|e| match e {
-                ReducerEvent::TextDelta { text, .. } => Some(text.as_str()),
-                _ => None,
+        assert!(matches!(
+            events.last(),
+            Some(ReducerEvent::Finish {
+                stop_reason: StopReason::EndTurn,
+                ..
             })
-            .collect();
-        assert_eq!(texts, vec!["valid"]);
+        ));
     }
 
     #[test]
