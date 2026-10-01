@@ -410,6 +410,7 @@ enum StopReason {
     EndTurn,
     ToolUse,
     MaxTokens,
+    Refusal,
 }
 
 impl StopReason {
@@ -418,6 +419,7 @@ impl StopReason {
             Self::EndTurn => "end_turn",
             Self::ToolUse => "tool_use",
             Self::MaxTokens => "max_tokens",
+            Self::Refusal => "refusal",
         }
     }
 }
@@ -904,11 +906,12 @@ impl TranslationState {
 
     /// A turn that called tools ends on tool_use even when finish_reason says
     /// `stop`: end_turn reaches an OpenAI client as finish_reason `stop`,
-    /// which says there is nothing to run. Only a length cut outranks the
-    /// tools, because their arguments may be the part that was cut.
+    /// which says there is nothing to run. Only a length cut or a content
+    /// filter outranks the tools, because their arguments may be the part
+    /// that was cut.
     fn stop_reason(&self) -> StopReason {
         match self.pending_stop {
-            Some(StopReason::MaxTokens) => StopReason::MaxTokens,
+            Some(stop @ (StopReason::MaxTokens | StopReason::Refusal)) => stop,
             _ if !self.tools.is_empty() => StopReason::ToolUse,
             stop => stop.unwrap_or(StopReason::EndTurn),
         }
@@ -978,7 +981,9 @@ fn parse_finish_reason(reason: &str) -> anyhow::Result<StopReason> {
         "stop" => Ok(StopReason::EndTurn),
         "tool_calls" | "function_call" => Ok(StopReason::ToolUse),
         "length" => Ok(StopReason::MaxTokens),
-        "content_filter" => anyhow::bail!("response was blocked by a content filter"),
+        // Anthropic's own value for a filtered turn, as on Codex and the
+        // Responses route. An error would be retried into the same filter.
+        "content_filter" => Ok(StopReason::Refusal),
         other => anyhow::bail!("unsupported finish_reason: {other}"),
     }
 }
@@ -1711,14 +1716,29 @@ mod tests {
         let malformed = b"data: not-json\n\n";
         let incomplete = b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n";
         let partial_frame = b"data: {\"choices\":[]}";
-        let filtered = b"data: {\"choices\":[{\"finish_reason\":\"content_filter\"}]}\n\n";
         let unknown = b"data: {\"choices\":[{\"finish_reason\":\"mystery\"}]}\n\n";
+        let mut streamed = LiveStreamTranslator::new(OPENCODE_GO, "m".into(), "model".into());
 
         assert!(accumulate_response(OPENCODE_GO, malformed, "m", "model").is_err());
         assert!(accumulate_response(OPENCODE_GO, incomplete, "m", "model").is_err());
         assert!(accumulate_response(OPENCODE_GO, partial_frame, "m", "model").is_err());
-        assert!(accumulate_response(OPENCODE_GO, filtered, "m", "model").is_err());
         assert!(accumulate_response(OPENCODE_GO, unknown, "m", "model").is_err());
+        assert!(streamed.push(unknown).is_err());
+    }
+
+    #[test]
+    fn content_filter_is_a_refusal_streamed_and_buffered() {
+        let filtered = b"data: {\"choices\":[{\"finish_reason\":\"content_filter\"}]}\n\n";
+        let response = accumulate_response(OPENCODE_GO, filtered, "m", "model").unwrap();
+        assert_eq!(response["stop_reason"], "refusal");
+
+        let mut streamed = LiveStreamTranslator::new(OPENCODE_GO, "m".into(), "model".into());
+        let mut output = streamed.push(filtered).unwrap();
+        output.extend(streamed.finish().unwrap());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(r#""stop_reason":"refusal""#));
+        assert!(output.contains("event: message_stop"));
+        assert!(!output.contains("event: error"));
     }
 
     #[test]
@@ -1728,6 +1748,7 @@ mod tests {
         for (delta, finish, expected) in [
             (tool, "stop", "tool_use"),
             (tool, "length", "max_tokens"),
+            (tool, "content_filter", "refusal"),
             (text, "length", "max_tokens"),
             (text, "stop", "end_turn"),
         ] {

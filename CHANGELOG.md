@@ -54,10 +54,13 @@ description: Release notes for cc-proxy.
 - When Kimi rejects the login token, the proxy now refreshes it and tries
   once more. It used to return the 401.
 - Kimi tool call ids are now unique to each reply, as OpenCode Go's already
-  are. A Kimi reply stopped by a content filter now fails instead of
-  ending as a normal answer.
+  are.
 - A turn that calls a tool now ends with `tool_use` on OpenCode Go's chat
   models even when the model reports `stop`, as Kimi already did.
+- When a content filter stops a reply on Kimi or on OpenCode Go's chat
+  models, the reply now ends with `stop_reason` `refusal`, as on Codex and
+  on OpenCode Go's GPT models. On OpenCode Go it used to fail with an error,
+  and a retry hit the same filter. On Kimi it used to end as a normal answer.
 
 ## v0.1.47 (2026-09-30)
 
