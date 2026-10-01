@@ -28,14 +28,14 @@ OpenCode login flow.
 To see the current percentage used and reset time for each account limit, run:
 
 ```sh
-cc-proxy opencode usage
-cc-proxy opencode usage --json
+cc-proxy usage opencode
+cc-proxy usage opencode --json
 ```
 
 This fetches OpenCode Go's rolling five-hour, weekly, and monthly windows. The
 upstream `/usage` endpoint is implemented by OpenCode but is not yet listed in
-its public API table, so its response format may evolve. The JSON form preserves
-additional upstream fields for scripting.
+its public API table, so its response format may evolve. The JSON form keeps
+OpenCode Go's reply, extra fields included, under the `opencode` key.
 
 The proxy also exposes the same limits in the standard Claude Code Router
 account format. In Claude Code Router, enable **Fetch usage** for the proxy
