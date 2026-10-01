@@ -7,8 +7,8 @@ use futures_util::StreamExt;
 
 use crate::anthropic::schema::MessagesRequest;
 use crate::monitor::{MonitorHandle, usage_from_anthropic_sse};
+pub use crate::providers::codex::translate::accumulate::accumulate_response;
 use crate::providers::codex::translate::{
-    IncompleteResponsePolicy, accumulate::accumulate_response_with_policy,
     live_stream::LiveStreamTranslator, request::translate_openai_compatible_request,
 };
 use crate::providers::grok::translate::stream::SseDecoder;
@@ -29,19 +29,6 @@ pub fn prepare_request(
     Ok(value)
 }
 
-pub fn accumulate_response(
-    upstream: &[u8],
-    message_id: &str,
-    model: &str,
-) -> anyhow::Result<serde_json::Value> {
-    accumulate_response_with_policy(
-        upstream,
-        message_id,
-        model,
-        IncompleteResponsePolicy::AllowMaxOutputTokens,
-    )
-}
-
 pub fn stream_body(
     upstream: OpenCodeResponse,
     message_id: String,
@@ -53,8 +40,7 @@ pub fn stream_body(
     let state = ResponsesStreamState {
         upstream: upstream.into_stream(),
         decoder: SseDecoder::default(),
-        translator: LiveStreamTranslator::new(message_id, model)
-            .with_incomplete_response_policy(IncompleteResponsePolicy::AllowMaxOutputTokens),
+        translator: LiveStreamTranslator::new(message_id, model),
         pending_completion: None,
         done_seen: false,
         terminal: false,

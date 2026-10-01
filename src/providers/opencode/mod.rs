@@ -912,7 +912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn responses_content_filter_is_not_misreported_as_max_tokens() {
+    async fn responses_content_filter_is_a_refusal_not_max_tokens() {
         let (provider, server) = mock_provider().await;
         let body: MessagesRequest = serde_json::from_value(json!({
             "model": "opencode-go/gpt-5.6-luna",
@@ -922,18 +922,13 @@ mod tests {
         }))
         .unwrap();
         let response = provider.handle_messages(body, context()).await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["error"]["type"], "api_error");
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("content_filter")
-        );
+        assert_eq!(value["stop_reason"], "refusal");
+        assert_eq!(value["usage"]["input_tokens"], 6);
         server.abort();
     }
 

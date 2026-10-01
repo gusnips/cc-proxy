@@ -1636,7 +1636,10 @@ fn is_empty_codex_success_completion(upstream_sse: &[u8]) -> bool {
 }
 
 fn is_codex_success_terminal_event(payload: &serde_json::Value) -> bool {
-    events::event_is_success_terminal(payload)
+    // An incomplete response names why it is short; retrying it as an empty
+    // completion re-spends the turn to reach the same cut. The buffered check
+    // (is_empty_codex_success_completion) counts only completed/done as well.
+    events::event_is_success_terminal(payload) && !events::response_is_incomplete_terminal(payload)
 }
 
 fn retryable_live_start_codex_error(err: &client::CodexError) -> bool {

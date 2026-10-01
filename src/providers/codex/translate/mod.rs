@@ -8,9 +8,3 @@ pub mod reducer;
 pub mod request;
 pub mod stream;
 pub mod web_search_compat;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IncompleteResponsePolicy {
-    Error,
-    AllowMaxOutputTokens,
-}

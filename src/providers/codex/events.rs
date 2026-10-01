@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+use super::translate::reducer::{STOP_MAX_TOKENS, STOP_REFUSAL, StopReason};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodexFailureKind {
     RateLimit,
@@ -53,7 +55,10 @@ pub(crate) fn classify_stream_event(payload: &Value) -> CodexStreamEventKind {
         return CodexStreamEventKind::TerminalFailure;
     }
     match payload.get("type").and_then(Value::as_str) {
-        Some("response.completed" | "response.done") => CodexStreamEventKind::TerminalSuccess,
+        // An incomplete response gets here only when it names its stop reason.
+        Some("response.completed" | "response.done" | "response.incomplete") => {
+            CodexStreamEventKind::TerminalSuccess
+        }
         Some(
             "keepalive"
             | "response.created"
@@ -119,15 +124,29 @@ pub(crate) fn response_is_incomplete_terminal(payload: &Value) -> bool {
         || incomplete_details.is_some_and(|details| !details.is_null()))
 }
 
-pub(crate) fn is_standard_max_output_tokens_incomplete(payload: &Value) -> bool {
+/// The Anthropic stop reason for an incomplete response that names why it
+/// stopped. A length cut or a filtered answer is an answer with a stop reason,
+/// not a failed request: as a retryable 503 it re-ran the whole turn, which
+/// spent the same budget to reach the same cap (or the same filter) and threw
+/// away the partial output and its usage. An inconsistent terminal (an error
+/// attached, a status other than `incomplete`, no reason or an unknown one)
+/// stays a failure, because nothing says the answer ended on purpose.
+pub(crate) fn incomplete_stop_reason(payload: &Value) -> Option<StopReason> {
     let status = payload.pointer("/response/status");
-    payload.get("type").and_then(Value::as_str) == Some("response.incomplete")
-        && (status.is_none() || status.and_then(Value::as_str) == Some("incomplete"))
-        && payload
-            .pointer("/response/incomplete_details/reason")
-            .and_then(Value::as_str)
-            == Some("max_output_tokens")
-        && event_error(payload).is_none()
+    if payload.get("type").and_then(Value::as_str) != Some("response.incomplete")
+        || !(status.is_none() || status.and_then(Value::as_str) == Some("incomplete"))
+        || event_error(payload).is_some()
+    {
+        return None;
+    }
+    match payload
+        .pointer("/response/incomplete_details/reason")
+        .and_then(Value::as_str)?
+    {
+        "max_output_tokens" => Some(STOP_MAX_TOKENS),
+        "content_filter" => Some(STOP_REFUSAL),
+        _ => None,
+    }
 }
 
 pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailure> {
@@ -136,7 +155,7 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
     if event_type == "codex.rate_limits" {
         return None;
     }
-    if response_is_incomplete_terminal(payload) {
+    if response_is_incomplete_terminal(payload) && incomplete_stop_reason(payload).is_none() {
         let reason = payload
             .pointer("/response/incomplete_details/reason")
             .and_then(Value::as_str)
@@ -1081,7 +1100,7 @@ data: {"type":"response.completed","response":{"status":"completed"}}
     }
 
     #[test]
-    fn incomplete_policy_only_accepts_consistent_max_output_terminal() {
+    fn only_a_consistent_incomplete_with_a_known_reason_is_a_stop() {
         let allowed = serde_json::json!({
             "type":"response.incomplete",
             "response": {
@@ -1091,21 +1110,40 @@ data: {"type":"response.completed","response":{"status":"completed"}}
             }
         });
         assert!(response_is_incomplete_terminal(&allowed));
-        assert!(is_standard_max_output_tokens_incomplete(&allowed));
+        assert_eq!(incomplete_stop_reason(&allowed), Some(STOP_MAX_TOKENS));
+        assert!(classify_event_failure(&allowed).is_none());
+        assert_eq!(
+            classify_stream_event(&allowed),
+            CodexStreamEventKind::TerminalSuccess
+        );
         let allowed_without_status = serde_json::json!({
             "type":"response.incomplete",
             "response": {
                 "incomplete_details":{"reason":"max_output_tokens"}
             }
         });
-        assert!(is_standard_max_output_tokens_incomplete(
-            &allowed_without_status
-        ));
+        assert_eq!(
+            incomplete_stop_reason(&allowed_without_status),
+            Some(STOP_MAX_TOKENS)
+        );
+        let filtered = serde_json::json!({
+            "type":"response.incomplete",
+            "response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}}
+        });
+        assert_eq!(incomplete_stop_reason(&filtered), Some(STOP_REFUSAL));
 
         for rejected in [
             serde_json::json!({
                 "type":"response.incomplete",
-                "response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}}
+                "response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}
+            }),
+            serde_json::json!({
+                "type":"response.incomplete",
+                "response":{
+                    "status":"incomplete",
+                    "error":{"message":"stream broke"},
+                    "incomplete_details":{"reason":"max_output_tokens"}
+                }
             }),
             serde_json::json!({
                 "type":"response.incomplete",
@@ -1133,7 +1171,7 @@ data: {"type":"response.completed","response":{"status":"completed"}}
             }),
         ] {
             assert!(response_is_incomplete_terminal(&rejected));
-            assert!(!is_standard_max_output_tokens_incomplete(&rejected));
+            assert_eq!(incomplete_stop_reason(&rejected), None);
             assert!(classify_event_failure(&rejected).is_some());
         }
     }

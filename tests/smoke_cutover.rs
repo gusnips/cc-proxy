@@ -2506,7 +2506,7 @@ async fn smoke_codex_http_retries_parallel_partial_tools_in_output_order() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn smoke_codex_http_incomplete_after_text_is_an_error() {
+async fn smoke_codex_http_filtered_after_text_is_a_refusal() {
     let _guard = env_lock();
     clear_all_continuations_for_tests();
     let config = TempDir::new().unwrap();
@@ -2541,13 +2541,12 @@ async fn smoke_codex_http_incomplete_after_text_is_an_error() {
         .unwrap();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("partial output"), "stream body: {text}");
-    assert!(text.contains("event: error"), "stream body: {text}");
-    assert!(text.contains("content_filter"), "stream body: {text}");
-    assert!(!text.contains("event: message_stop"), "stream body: {text}");
+    assert!(!text.contains("event: error"), "stream body: {text}");
     assert!(
-        !text.contains("\"stop_reason\":\"max_tokens\""),
+        text.contains("\"stop_reason\":\"refusal\""),
         "stream body: {text}"
     );
+    assert!(text.contains("event: message_stop"), "stream body: {text}");
 }
 
 #[allow(clippy::await_holding_lock)]
