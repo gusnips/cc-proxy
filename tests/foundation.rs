@@ -201,14 +201,23 @@ fn traffic_capture_helpers() {
 #[test]
 fn retry_backoff_decisions() {
     let outcome = compute_backoff_delay(0, None);
-    assert!(outcome.wait_ms >= RETRY_INITIAL_DELAY_MS / 2);
-    assert!(outcome.wait_ms <= RETRY_MAX_DELAY_MS);
+    assert!(outcome.wait_ms <= RETRY_INITIAL_DELAY_MS);
+    assert!(!outcome.exceeds_budget);
+    assert!(compute_backoff_delay(10, None).wait_ms <= RETRY_MAX_DELAY_MS);
 
     let outcome_num = compute_backoff_delay(0, Some("5"));
     assert_eq!(outcome_num.wait_ms, 5000);
 
     let too_long = compute_backoff_delay(0, Some("120"));
     assert!(too_long.exceeds_budget);
+
+    let dated = (time::OffsetDateTime::now_utc() + time::Duration::minutes(10))
+        .format(&time::format_description::well_known::Rfc2822)
+        .unwrap()
+        .replace("+0000", "GMT");
+    assert!(compute_backoff_delay(0, Some(&dated)).exceeds_budget);
+
+    assert!(cc_proxy::retry::should_retry_status(529));
 }
 
 #[tokio::test]

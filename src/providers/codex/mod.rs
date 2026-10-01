@@ -930,18 +930,7 @@ pub(super) async fn wait_for_recovery_retry(
     }
     let deadline =
         *deadline.get_or_insert_with(|| tokio::time::Instant::now() + RECOVERY_RETRY_BUDGET);
-    let retry_after_seconds = retry_after
-        .filter(|value| value.parse::<f64>().is_err())
-        .and_then(|value| {
-            time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc2822).ok()
-        })
-        .map(|reset| {
-            (reset - time::OffsetDateTime::now_utc())
-                .as_seconds_f64()
-                .max(0.0)
-                .to_string()
-        });
-    let delay = compute_backoff_delay(attempt, retry_after_seconds.as_deref().or(retry_after));
+    let delay = compute_backoff_delay(attempt, retry_after);
     if delay.exceeds_budget
         || tokio::time::Instant::now() + Duration::from_millis(delay.wait_ms) >= deadline
     {

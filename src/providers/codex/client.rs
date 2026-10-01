@@ -1195,9 +1195,7 @@ impl CodexHttpClient {
                     .map_err(auth_refresh_error)?;
                 continue;
             }
-            if should_retry_codex_status(response.status)
-                && retries < MAX_BUFFERED_TRANSPORT_RETRIES
-            {
+            if should_retry_status(response.status) && retries < MAX_BUFFERED_TRANSPORT_RETRIES {
                 let retry_after = response
                     .headers
                     .iter()
@@ -2133,7 +2131,7 @@ impl CodexHttpClient {
                         origin: CodexErrorOrigin::Http,
                     });
                 }
-                Ok(response) if should_retry_codex_status(response.status) => {
+                Ok(response) if should_retry_status(response.status) => {
                     if transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
                         let retry_after = response
                             .headers
@@ -3185,7 +3183,7 @@ fn retryable_http_stream_error(error: &CodexError) -> bool {
     if error.usage_limit.is_some() {
         return false;
     }
-    if should_retry_codex_status(error.status) || is_retryable_transport_error(error) {
+    if should_retry_status(error.status) || is_retryable_transport_error(error) {
         return true;
     }
     if error.status != 0 {
@@ -3447,10 +3445,6 @@ fn codex_status_error_message(body: &[u8]) -> Option<String> {
         })
 }
 
-fn should_retry_codex_status(status: u16) -> bool {
-    should_retry_status(status) || status == 529
-}
-
 fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str {
     match origin {
         CodexErrorOrigin::Http => "http",
@@ -3520,10 +3514,10 @@ fn is_retryable_transport_error(err: &CodexError) -> bool {
         if err.detail.as_deref() == Some(super::websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL) {
             return false;
         }
-        return err.status == 0 || should_retry_codex_status(err.status);
+        return err.status == 0 || should_retry_status(err.status);
     }
     if err.detail.as_deref() == Some("websocket_pre_request") {
-        return err.status == 0 || should_retry_codex_status(err.status);
+        return err.status == 0 || should_retry_status(err.status);
     }
     if err.detail.as_deref() == Some(super::websocket::WEBSOCKET_KEEPALIVE_FAILURE_DETAIL) {
         return true;

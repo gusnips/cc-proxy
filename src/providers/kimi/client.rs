@@ -5,6 +5,7 @@ use crate::providers::kimi::auth::headers::common_headers;
 use crate::providers::kimi::auth::manager::KimiAuthManager;
 use crate::providers::kimi::auth::token_store::{StoredAuth, file_store};
 use crate::providers::kimi::translate::request::KimiChatRequest;
+use crate::providers::upstream_error::{self, FailureKind};
 use crate::retry::{MAX_RATE_LIMIT_RETRIES, compute_backoff_delay};
 
 #[derive(Debug)]
@@ -77,13 +78,12 @@ impl KimiHttpClient {
                 }
                 Ok(response) => return Ok(response),
                 Err(err @ KimiError { status: 429, .. }) => {
-                    if attempt < MAX_RATE_LIMIT_RETRIES {
-                        let delay = compute_backoff_delay(attempt, err.retry_after.as_deref());
-                        std::thread::sleep(std::time::Duration::from_millis(delay.wait_ms));
-                        attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
+                    let Some(wait_ms) = rate_limit_retry_wait(attempt, &err) else {
+                        return Err(err);
+                    };
+                    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                    attempt += 1;
+                    continue;
                 }
                 Err(err) => return Err(err),
             }
@@ -186,4 +186,53 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// How long to wait before retrying a 429, or None when a retry cannot help.
+/// A server that asks for longer than the retry budget was retried after 30s
+/// anyway, into the same 429; and a spent balance or plan quota was retried
+/// three times, which no wait inside one request clears. Both now return the
+/// 429 so the caller sees the real wait.
+fn rate_limit_retry_wait(attempt: u32, err: &KimiError) -> Option<u64> {
+    if attempt >= MAX_RATE_LIMIT_RETRIES {
+        return None;
+    }
+    let body = err.detail.as_deref().unwrap_or_default();
+    if upstream_error::classify(Some(err.status), body) == FailureKind::Quota {
+        return None;
+    }
+    let delay = compute_backoff_delay(attempt, err.retry_after.as_deref());
+    (!delay.exceeds_budget).then_some(delay.wait_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rate_limited(detail: &str, retry_after: Option<&str>) -> KimiError {
+        KimiError {
+            status: 429,
+            detail: Some(detail.to_string()),
+            retry_after: retry_after.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_429_is_retried_only_when_a_wait_can_clear_it() {
+        let throttle = rate_limited(r#"{"error":{"message":"rate limit exceeded"}}"#, Some("2"));
+        assert_eq!(rate_limit_retry_wait(0, &throttle), Some(2000));
+        assert_eq!(
+            rate_limit_retry_wait(MAX_RATE_LIMIT_RETRIES, &throttle),
+            None
+        );
+
+        let long_wait = rate_limited("rate limit exceeded", Some("600"));
+        assert_eq!(rate_limit_retry_wait(0, &long_wait), None);
+
+        let quota = rate_limited(
+            r#"{"error":{"message":"Your account balance is insufficient"}}"#,
+            None,
+        );
+        assert_eq!(rate_limit_retry_wait(0, &quota), None);
+    }
 }
