@@ -8,12 +8,14 @@ use super::request::ServiceTier;
 /// Baseline allowlist compiled into the binary. At runtime the Codex CLI's
 /// model cache (`model_catalog`) extends it, so models OpenAI ships to Codex
 /// work before a proxy release lists them.
+///
+/// The backend also retires models without notice. On 2026-10-01 it answered
+/// 400 "not supported when using Codex with a ChatGPT account" for gpt-5.2,
+/// gpt-5.3-codex, gpt-5.3-codex-spark, gpt-5.4 and gpt-5.4-mini, so `models`
+/// was advertising five ids that could only fail. It checks the model before
+/// the quota, so a spent account still tells them apart: 400 for a retired
+/// model, 429 for a live one.
 pub const ALLOWED_MODELS: &[&str] = &[
-    "gpt-5.2",
-    "gpt-5.3-codex",
-    "gpt-5.3-codex-spark",
-    "gpt-5.4",
-    "gpt-5.4-mini",
     "gpt-5.5",
     "gpt-5.6-luna",
     "gpt-5.6-sol",
@@ -516,7 +518,7 @@ mod tests {
 
     #[test]
     fn allowed_models_accept_base() {
-        assert!(assert_allowed_model("gpt-5.4").is_ok());
+        assert!(assert_allowed_model("gpt-5.5").is_ok());
         assert!(assert_allowed_model("gpt-5.6-sol").is_ok());
         assert!(assert_allowed_model("gpt-5.6-terra").is_ok());
         assert!(assert_allowed_model("gpt-6-astra").is_ok());
@@ -526,6 +528,7 @@ mod tests {
     #[test]
     fn not_allowed_rejected() {
         assert!(assert_allowed_model("gpt-7").is_err());
+        assert!(assert_allowed_model("gpt-5.4").is_err());
         assert!(assert_allowed_model("gpt-7-fast").is_err());
     }
 

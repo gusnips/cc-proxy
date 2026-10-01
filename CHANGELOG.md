@@ -22,6 +22,10 @@ description: Release notes for cc-proxy.
 - `cc-proxy opencode usage` moved to `cc-proxy usage opencode`. The old
   command is gone. With `--json`, OpenCode Go's reply now sits under an
   `opencode` key.
+- `cc-proxy models` no longer lists five Codex models that ChatGPT
+  accounts can't use: gpt-5.2, gpt-5.3-codex, gpt-5.3-codex-spark, gpt-5.4
+  and gpt-5.4-mini. The backend answers each with a 400. On the OpenAI
+  routes they now fail at once with the list of models that work.
 
 ## v0.1.48 (2026-10-01)
 

@@ -536,7 +536,7 @@ mod tests {
         );
 
         let mut full = base();
-        full["model"] = json!("gpt-5.4");
+        full["model"] = json!("gpt-5.5");
         full["temperature"] = json!(0.2);
         full["top_p"] = json!(0.9);
         let translated = translate_request(full).unwrap();
