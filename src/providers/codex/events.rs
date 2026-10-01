@@ -318,9 +318,25 @@ pub(crate) fn limit_reached_failure(payload: &Value) -> Option<CodexEventFailure
     {
         return None;
     }
+    // Both windows ride every snapshot, and usually only one is spent. Taking
+    // the primary first reported the 5-hour reset while the weekly window
+    // held the wall for days. The fuller window binds; on a tie (both spent)
+    // the later reset does, because the request passes only once both clear.
     let retry_after = ["primary", "secondary"]
         .into_iter()
-        .find_map(|window| scalar_string(limits.get(window)?.get("reset_after_seconds")));
+        .filter_map(|name| {
+            let window = limits.get(name)?;
+            let reset = scalar_string(window.get("reset_after_seconds"))?;
+            let used = window.get("used_percent").and_then(Value::as_f64);
+            Some((used.unwrap_or(0.0), reset))
+        })
+        .max_by(|(used_a, reset_a), (used_b, reset_b)| {
+            let seconds = |reset: &str| reset.parse::<f64>().unwrap_or(0.0);
+            used_a
+                .total_cmp(used_b)
+                .then_with(|| seconds(reset_a).total_cmp(&seconds(reset_b)))
+        })
+        .map(|(_, reset)| reset);
     Some(CodexEventFailure {
         kind: CodexFailureKind::Permanent,
         explicit_status: Some(429),
@@ -884,6 +900,31 @@ data: {"type":"response.completed","response":{"status":"completed"}}
         assert!(!failure.retryable());
         assert_eq!(failure.status, 429);
         assert_eq!(failure.retry_after.as_deref(), Some("518773"));
+    }
+
+    #[test]
+    fn limit_reached_snapshot_reports_the_spent_window() {
+        let weekly_spent = limit_reached_failure(&serde_json::json!({
+            "type": "codex.rate_limits",
+            "rate_limits": {
+                "limit_reached": true,
+                "primary": {"used_percent": 12.5, "reset_after_seconds": 3600},
+                "secondary": {"used_percent": 100, "reset_after_seconds": 518773}
+            }
+        }))
+        .expect("limit_reached snapshot");
+        assert_eq!(weekly_spent.retry_after.as_deref(), Some("518773"));
+
+        let both_spent = limit_reached_failure(&serde_json::json!({
+            "type": "codex.rate_limits",
+            "rate_limits": {
+                "limit_reached": true,
+                "primary": {"used_percent": 100, "reset_after_seconds": 900000},
+                "secondary": {"used_percent": 100, "reset_after_seconds": 518773}
+            }
+        }))
+        .expect("limit_reached snapshot");
+        assert_eq!(both_spent.retry_after.as_deref(), Some("900000"));
     }
 
     #[test]
