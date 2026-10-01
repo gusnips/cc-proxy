@@ -3,6 +3,35 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## Unreleased
+
+- Upstream errors keep their meaning on Kimi, GLM, OpenCode Go and Grok. A
+  prompt that is too long now returns a 400 that says "prompt is too long",
+  so Claude Code compacts. A spent balance or plan quota returns a 429 that
+  Claude Code does not retry. A short rate limit returns a 429 with the
+  provider's own `Retry-After`. An overloaded provider returns a 529.
+- The same applies to an error that arrives in the middle of a stream. It
+  used to come through as a generic `api_error`, or a 502 on the OpenAI
+  routes.
+- Codex answers cut short by length or by a content filter now end with
+  `stop_reason` `max_tokens` or `refusal`, with their usage. They used to
+  fail with a 503 and run again from the start.
+- Turning thinking off now works. Codex and Grok get reasoning effort
+  `none`. Kimi and OpenCode Go's GLM, DeepSeek and MiMo models get their
+  lowest effort, because the proxy has no way to turn their thinking off.
+  The OpenAI routes accept `reasoning_effort: "none"` for every provider.
+- A Codex quota wall now reports when the spent window resets. With the
+  weekly window spent, it used to report the 5-hour reset.
+- Retries wait a random time up to the backoff step, read `Retry-After` as
+  a date as well as seconds, and retry a 529. Kimi no longer retries a
+  spent balance, or a 429 that asks for longer than 30 seconds.
+- A Kimi stream that is cut off, has a frame that is not JSON, or has a
+  tool call without an id or name now fails with a 502. It used to come
+  back as a finished answer.
+- Grok no longer fails a turn on a stream event type it does not know.
+- On the OpenAI routes, `prompt_tokens` now counts cache writes, Kimi
+  reports its reasoning tokens, and a refusal reads `content_filter`.
+
 ## v0.1.47 (2026-09-30)
 
 - Codex streams that drop mid-response now recover more safely. HTTP streams
