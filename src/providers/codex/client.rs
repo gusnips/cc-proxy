@@ -355,6 +355,34 @@ pub fn build_codex_transcription_headers(
     Ok(headers)
 }
 
+/// Headers for ChatGPT's usage endpoint: the token, the account it belongs
+/// to, and the user agent every other Codex call sends.
+pub fn build_codex_usage_headers(auth: &StoredAuth) -> Result<http::HeaderMap, CodexError> {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::ACCEPT,
+        header_value("accept", "application/json")?,
+    );
+    headers.insert(
+        http::header::AUTHORIZATION,
+        header_value("authorization", &format!("Bearer {}", auth.access))?,
+    );
+    if let Some(account_id) = auth.account_id.as_deref() {
+        headers.insert(
+            "ChatGPT-Account-Id",
+            header_value("ChatGPT-Account-Id", account_id)?,
+        );
+    }
+    let user_agent = config::codex_user_agent(&default_user_agent(false));
+    if !user_agent.is_empty() {
+        headers.insert(
+            http::header::USER_AGENT,
+            header_value("user-agent", &user_agent)?,
+        );
+    }
+    Ok(headers)
+}
+
 fn header_value(name: &str, value: &str) -> Result<http::HeaderValue, CodexError> {
     http::HeaderValue::from_str(value).map_err(|e| CodexError {
         status: 500,
@@ -372,6 +400,16 @@ fn search_endpoint(base_url: &str) -> String {
         Some(api_root) => format!("{api_root}/alpha/search"),
         None => format!("{base_url}/alpha/search"),
     }
+}
+
+/// ChatGPT's usage endpoint sits beside the Codex one:
+/// `.../backend-api/codex/responses` becomes `.../backend-api/wham/usage`.
+pub fn codex_usage_endpoint(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    let backend = base_url
+        .strip_suffix("/codex/responses")
+        .unwrap_or(base_url);
+    format!("{backend}/wham/usage")
 }
 
 // ---------------------------------------------------------------------------

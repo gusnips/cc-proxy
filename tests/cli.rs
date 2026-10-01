@@ -65,29 +65,13 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
         "Manage Cursor authentication",
         "Manage Grok authentication",
         "Manage GLM authentication",
-        "Inspect OpenCode Go account state",
+        "Manage the OpenCode Go API key",
+        "Show how much of your Codex, Kimi and OpenCode Go plans you have used",
     ] {
         assert!(stdout.contains(description), "missing: {description}");
     }
     assert!(!stdout.contains("demo"));
     assert!(!stdout.contains("mock data and no proxy server"));
-    Ok(())
-}
-
-#[test]
-fn opencode_usage_missing_key_is_actionable() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let mut cmd = Command::cargo_bin("cc-proxy")?;
-    cmd.args(["opencode", "usage"])
-        .env("CCP_CONFIG_DIR", temp.path())
-        .env("HOME", temp.path())
-        .env("USERPROFILE", temp.path())
-        .env_remove("CCP_OPENCODE_API_KEY")
-        .env_remove("OPENCODE_API_KEY")
-        .assert()
-        .failure()
-        .code(1)
-        .stderr(contains("OPENCODE_API_KEY"));
     Ok(())
 }
 
@@ -395,5 +379,189 @@ fn update_check_with_pinned_version_is_offline() -> Result<(), Box<dyn std::erro
         .assert()
         .success()
         .stdout(contains("available"));
+    Ok(())
+}
+
+/// Writes a sign-in that never needs renewing, the way `auth login` would.
+fn write_usage_auth(config_dir: &std::path::Path, provider: &str, access: &str) {
+    let dir = config_dir.join(provider);
+    std::fs::create_dir_all(&dir).unwrap();
+    let expires = 4102444800000_i64;
+    let auth = if provider == "codex" {
+        serde_json::json!({"access": access, "refresh": "test-refresh", "expires": expires, "account_id": "acct_test"})
+    } else {
+        serde_json::json!({"access": access, "refresh": "test-refresh", "expires": expires, "scope": "openid", "userId": "user_test"})
+    };
+    std::fs::write(dir.join("auth.json"), serde_json::to_vec(&auth).unwrap()).unwrap();
+}
+
+/// Serves the usage fixtures where ChatGPT and Kimi serve usage, but only to
+/// a caller that sends the test sign-in and the provider's own headers.
+fn serve_usage_fixtures() -> String {
+    use axum::{
+        http::{HeaderMap, StatusCode},
+        routing::get,
+    };
+
+    fn reply(headers: &HeaderMap, fixture: &str, required: (&str, &str)) -> (StatusCode, String) {
+        let sent = |name: &str, value: &str| headers.get(name).is_some_and(|sent| sent == value);
+        if !sent("authorization", "Bearer test-access") || !sent(required.0, required.1) {
+            return (StatusCode::UNAUTHORIZED, String::new());
+        }
+        let path = format!(
+            "{}/tests/fixtures/usage/{fixture}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        (StatusCode::OK, std::fs::read_to_string(path).unwrap())
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new()
+        .route(
+            "/backend-api/wham/usage",
+            get(|headers: HeaderMap| async move {
+                reply(
+                    &headers,
+                    "chatgpt.json",
+                    ("chatgpt-account-id", "acct_test"),
+                )
+            }),
+        )
+        .route(
+            "/coding/v1/usages",
+            get(|headers: HeaderMap| async move {
+                reply(&headers, "kimi.json", ("x-msh-platform", "kimi_cli"))
+            }),
+        );
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, app).await.unwrap();
+            });
+    });
+    base_url
+}
+
+fn usage_command(temp: &TempDir, base_url: &str) -> Command {
+    let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
+    isolated_opencode_env(&mut cmd, temp);
+    cmd.env(
+        "CCP_CODEX_BASE_URL",
+        format!("{base_url}/backend-api/codex/responses"),
+    )
+    .env("CCP_KIMI_BASE_URL", format!("{base_url}/coding/v1"))
+    .env("NO_PROXY", "127.0.0.1,localhost")
+    .env("no_proxy", "127.0.0.1,localhost")
+    // The fixtures' resets are in the past, so the text never changes.
+    .env("TZ", "UTC");
+    cmd
+}
+
+#[test]
+fn usage_shows_every_signed_in_plan_and_how_to_sign_in_to_the_rest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let config = temp.path().join("config");
+    write_usage_auth(&config, "codex", "test-access");
+    write_usage_auth(&config, "kimi", "test-access");
+    let base_url = serve_usage_fixtures();
+
+    let output = usage_command(&temp, &base_url).arg("usage").output()?;
+    assert_eq!(String::from_utf8(output.stderr)?, "");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        concat!(
+            "Codex (plus)\n",
+            "  5-hour window: 45% used, already reset (Aug 9 17:00)\n",
+            "  Weekly: 7% used, already reset (Aug 15 00:00)\n",
+            "\n",
+            "Kimi (allegretto)\n",
+            "  5-hour window: 28% used, already reset (Aug 9 09:00)\n",
+            "  Weekly: 12% used, already reset (Aug 14 16:00)\n",
+            "\n",
+            "opencode: no API key set. Run `cc-proxy opencode auth login` or set OPENCODE_API_KEY.\n",
+        )
+    );
+
+    let output = usage_command(&temp, &base_url)
+        .args(["usage", "--json"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stderr)?,
+        "opencode: no API key set. Run `cc-proxy opencode auth login` or set OPENCODE_API_KEY.\n"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "codex": {
+                "plan": "plus",
+                "five_hour": {"used_percent": 45.0, "resets_at_ms": 1786294800000_i64},
+                "weekly": {"used_percent": 7.0, "resets_at_ms": 1786752000000_i64}
+            },
+            "kimi": {
+                "plan": "allegretto",
+                "five_hour": {"used_percent": 28.0, "resets_at_ms": 1786266000000_i64},
+                "weekly": {"used_percent": 12.0, "resets_at_ms": 1786723200000_i64}
+            }
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn usage_for_a_provider_that_is_not_signed_in_names_the_login_and_exits_one()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    for (provider, line) in [
+        (
+            "codex",
+            "codex: not signed in. Run `cc-proxy codex auth login`.\n",
+        ),
+        (
+            "kimi",
+            "kimi: not signed in. Run `cc-proxy kimi auth login`.\n",
+        ),
+        (
+            "opencode",
+            "opencode: no API key set. Run `cc-proxy opencode auth login` or set OPENCODE_API_KEY.\n",
+        ),
+    ] {
+        let mut cmd = Command::cargo_bin("cc-proxy")?;
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.args(["usage", provider])
+            .assert()
+            .failure()
+            .code(1)
+            .stdout("")
+            .stderr(line);
+    }
+    Ok(())
+}
+
+#[test]
+fn usage_with_a_rejected_sign_in_says_how_to_fix_it_and_exits_two()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    write_usage_auth(&temp.path().join("config"), "codex", "revoked-access");
+    let base_url = serve_usage_fixtures();
+
+    usage_command(&temp, &base_url)
+        .args(["usage", "codex"])
+        .assert()
+        .failure()
+        .code(2)
+        .stdout("")
+        .stderr(
+            "Codex didn't accept the sign-in when asked for usage. Run `cc-proxy codex auth login` to sign in again.\n",
+        );
     Ok(())
 }

@@ -1,0 +1,1 @@
+{"user":{"membership":{"level":"allegretto"}},"usage":{"limit":"1000","used":"120","resetTime":"2026-08-15T00:00:00+08:00"},"limits":[{"window":{"duration":300,"timeUnit":"MINUTE"},"detail":{"limit":"100","used":"28","resetTime":"2026-08-09T17:00:00+08:00"}}]}
