@@ -30,6 +30,12 @@ struct Cli {
 enum Commands {
     /// Print version information
     Version,
+    /// Start Claude Code on the proxy, passing every argument to claude
+    #[command(disable_help_flag = true)]
+    Claude {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Start the proxy as a background service (default)
     Serve {
         #[arg(long)]
@@ -174,6 +180,7 @@ fn main() -> Result<()> {
             println!("cc-proxy {}", VERSION);
             Ok(())
         }
+        Commands::Claude { args } => cc_proxy::claude::run(args),
         Commands::Serve {
             port,
             no_monitor,
@@ -618,12 +625,12 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     }
     print_models(registry, false);
     println!();
-    println!("Configure Claude Code (pick a model from above):");
-    println!("  export ANTHROPIC_BASE_URL=\"http://localhost:{port}\"");
-    println!("  export ANTHROPIC_AUTH_TOKEN=\"anything\"");
-    println!("  export ANTHROPIC_MODEL=\"gpt-6-sol\"");
-    println!("  export ANTHROPIC_SMALL_FAST_MODEL=\"gpt-6-luna\"");
-    println!("  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1");
+    println!("Start Claude Code on the proxy (pick a model from above, any claude flag works):");
+    println!("  cc-proxy claude --model gpt-6-sol");
+    println!("Or set these yourself before you run claude:");
+    for (name, value) in cc_proxy::claude::env(&daemon::client_url(bind_address, port)) {
+        println!("  export {name}=\"{value}\"");
+    }
 }
 
 #[allow(dead_code)]
@@ -664,6 +671,19 @@ mod tests {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
         }
         assert!(Cli::try_parse_from(["cc-proxy", "serve", "--monitor", "--no-monitor"]).is_err());
+    }
+
+    #[test]
+    fn claude_passes_every_argument_through() {
+        let cli = Cli::try_parse_from([
+            "cc-proxy", "claude", "--resume", "abc", "-p", "hi", "-v", "--help", "--",
+        ])
+        .unwrap();
+
+        let Some(Commands::Claude { args }) = cli.command else {
+            panic!("expected the claude command");
+        };
+        assert_eq!(args, ["--resume", "abc", "-p", "hi", "-v", "--help", "--"]);
     }
 
     #[test]

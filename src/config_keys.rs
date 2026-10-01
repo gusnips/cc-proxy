@@ -76,6 +76,20 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "effort for routed Codex security reviews (none|low|medium|high|xhigh|max; off inherits)",
     },
     ConfigKey {
+        path: "claude.model",
+        kind: ConfigKind::Str,
+        env: &[],
+        default: None,
+        blurb: "model `cc-proxy claude` starts Claude Code on",
+    },
+    ConfigKey {
+        path: "claude.fastModel",
+        kind: ConfigKind::Str,
+        env: &[],
+        default: None,
+        blurb: "model for Claude Code's small background requests",
+    },
+    ConfigKey {
         path: "log.verbose",
         kind: ConfigKind::Bool,
         env: &["CCP_LOG_VERBOSE"],

@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod auth;
+pub mod claude;
 pub mod config;
 pub mod config_keys;
 pub mod daemon;

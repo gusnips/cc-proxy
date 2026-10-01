@@ -48,6 +48,7 @@ struct FileConfig {
     pub grok: Option<GrokConfig>,
     pub opencode: Option<OpenCodeConfig>,
     pub glm: Option<GlmConfig>,
+    pub claude: Option<ClaudeConfig>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -129,6 +130,14 @@ struct OpenCodeConfig {
 struct GlmConfig {
     #[serde(rename = "baseUrl")]
     pub base_url: Option<String>,
+}
+
+/// What `cc-proxy claude` starts Claude Code on.
+#[derive(Deserialize, Clone)]
+struct ClaudeConfig {
+    pub model: Option<String>,
+    #[serde(rename = "fastModel")]
+    pub fast_model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1087,6 +1096,21 @@ pub fn codex_model() -> Option<String> {
         return codex.model;
     }
     None
+}
+
+/// Main model for `cc-proxy claude`. Unset, Claude Code picks its own and
+/// the proxy routes it like any other Claude model id.
+pub fn claude_model() -> Option<String> {
+    read_file_config(&paths::config_dir())
+        .and_then(|file| file.claude?.model)
+        .filter(|model| !model.is_empty())
+}
+
+/// Model for Claude Code's small background requests (titles, summaries).
+pub fn claude_fast_model() -> Option<String> {
+    read_file_config(&paths::config_dir())
+        .and_then(|file| file.claude?.fast_model)
+        .filter(|model| !model.is_empty())
 }
 
 pub fn auto_review_model() -> Option<String> {
