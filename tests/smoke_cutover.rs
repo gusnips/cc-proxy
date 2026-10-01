@@ -16,7 +16,7 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,60 +24,12 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use tower::util::ServiceExt;
 
+mod common;
+use common::{EnvGuard, call_messages_body_with_headers, env_lock, write_auth};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-/// Serialize all env-var-mutating tests so they never run concurrently.
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    // Recover from a poisoned mutex so a failing test doesn't cascade
-    let m = ENV_LOCK.get_or_init(|| Mutex::new(()));
-    match m.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-/// Write a valid auth.json for `provider` under `config_dir`.
-fn write_auth(config_dir: &std::path::Path, provider: &str) {
-    let dir = config_dir.join(provider);
-    std::fs::create_dir_all(&dir).unwrap();
-    let expires: i64 = 4102444800000;
-    let auth = if provider == "codex" {
-        json!({"access":"test-access","refresh":"test-refresh","expires":expires,"account_id":"acct_test"})
-    } else {
-        json!({"access":"test-access","refresh":"test-refresh","expires":expires,"scope":"openid","userId":"user_test"})
-    };
-    std::fs::write(dir.join("auth.json"), serde_json::to_vec(&auth).unwrap()).unwrap();
-}
-
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
 
 /// Send a minimal `POST /v1/messages` through the in-process app.
 async fn call_messages(model: &str) -> Response {
@@ -90,34 +42,7 @@ async fn call_messages(model: &str) -> Response {
 }
 
 async fn call_messages_body(body: Value) -> Response {
-    let _no_proxy_env = EnvGuard::set("NO_PROXY", "127.0.0.1,localhost");
-    app(Arc::new(Registry::with_default_alias()))
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/v1/messages")
-                .header("content-type", "application/json")
-                .header("x-claude-code-session-id", "smoke-session")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-}
-
-async fn call_messages_body_with_headers(body: Value, headers: &[(&str, &str)]) -> Response {
-    let _no_proxy_env = EnvGuard::set("NO_PROXY", "127.0.0.1,localhost");
-    let mut request = Request::builder()
-        .method(Method::POST)
-        .uri("/v1/messages")
-        .header("content-type", "application/json");
-    for (name, value) in headers {
-        request = request.header(*name, *value);
-    }
-    app(Arc::new(Registry::with_default_alias()))
-        .oneshot(request.body(Body::from(body.to_string())).unwrap())
-        .await
-        .unwrap()
+    call_messages_body_with_headers(body, &[("x-claude-code-session-id", "smoke-session")]).await
 }
 
 async fn call_responses_body(body: Value) -> Response {
