@@ -1,12 +1,16 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::Duration;
 
+use crate::auth::FileAuthStore;
 use crate::providers::kimi::auth::constants::api_base_url;
 use crate::providers::kimi::auth::headers::common_headers;
 use crate::providers::kimi::auth::manager::KimiAuthManager;
 use crate::providers::kimi::auth::token_store::{StoredAuth, file_store};
 use crate::providers::kimi::translate::request::KimiChatRequest;
 use crate::providers::upstream_error::{self, FailureKind};
-use crate::retry::{MAX_RATE_LIMIT_RETRIES, compute_backoff_delay};
+use crate::retry::{self, MAX_RATE_LIMIT_RETRIES, compute_backoff_delay};
+
+type AuthManager = KimiAuthManager<FileAuthStore<StoredAuth>>;
 
 #[derive(Debug)]
 pub struct KimiError {
@@ -15,15 +19,19 @@ pub struct KimiError {
     pub retry_after: Option<String>,
 }
 
-pub struct KimiResponse {
-    pub body: Vec<u8>,
-    pub status: u16,
-    pub request_start_time: u64,
+impl KimiError {
+    pub(super) fn new(status: u16, detail: impl ToString) -> Self {
+        Self {
+            status,
+            detail: Some(detail.to_string()),
+            retry_after: None,
+        }
+    }
 }
 
 pub struct KimiHttpClient {
-    client: reqwest::blocking::Client,
-    auth_manager: KimiAuthManager<crate::auth::FileAuthStore<StoredAuth>>,
+    client: reqwest::Client,
+    auth_manager: Arc<AuthManager>,
 }
 
 impl Default for KimiHttpClient {
@@ -35,157 +43,98 @@ impl Default for KimiHttpClient {
 impl KimiHttpClient {
     pub fn new() -> Self {
         Self {
-            client: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+            // An idle bound, not a total one: a streamed answer can take
+            // minutes to write and a total timeout cuts it off. 120s with no
+            // byte at all still fails a hung upstream.
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(120))
                 .build()
                 .expect("failed to create HTTP client"),
-            auth_manager: KimiAuthManager::new(file_store()),
+            auth_manager: Arc::new(KimiAuthManager::new(file_store())),
         }
     }
 
-    pub fn auth_manager(&self) -> &KimiAuthManager<crate::auth::FileAuthStore<StoredAuth>> {
-        &self.auth_manager
-    }
-
-    pub fn post_kimi(&self, body: &KimiChatRequest) -> Result<KimiResponse, KimiError> {
-        let mut auth = self.auth_manager.get_auth().map_err(|e| KimiError {
-            status: 401,
-            detail: Some(e.to_string()),
-            retry_after: None,
-        })?;
-
+    /// Sends the request and returns the response once Kimi has accepted it
+    /// with a 2xx, so the caller can read the body as it streams.
+    pub async fn post_kimi(&self, body: &KimiChatRequest) -> Result<reqwest::Response, KimiError> {
+        let mut auth = self.auth(AuthManager::get_auth).await?;
+        let mut refreshed = false;
         let mut attempt = 0u32;
         loop {
-            let result = self.attempt_post(&auth.access, body);
-
-            match result {
-                Ok(response) if response.status == 401 && attempt == 0 => {
-                    // First 401: try refresh
-                    match self.auth_manager.force_refresh() {
-                        Ok(new_auth) => {
-                            auth = new_auth;
-                            attempt += 1;
-                            continue;
-                        }
-                        Err(e) => {
-                            return Err(KimiError {
-                                status: 401,
-                                detail: Some(e.to_string()),
-                                retry_after: None,
-                            });
-                        }
-                    }
+            match self.attempt_post(&auth.access, body).await {
+                // A token can be rejected before its expiry, for example after
+                // a peer sharing the login (the Kimi CLI) refreshed it. One
+                // refresh and replay recovers that; a second 401 is a real one.
+                Err(KimiError { status: 401, .. }) if !refreshed => {
+                    auth = self.auth(AuthManager::force_refresh).await?;
+                    refreshed = true;
                 }
-                Ok(response) => return Ok(response),
                 Err(err @ KimiError { status: 429, .. }) => {
                     let Some(wait_ms) = rate_limit_retry_wait(attempt, &err) else {
                         return Err(err);
                     };
-                    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                    retry::sleep(wait_ms).await;
                     attempt += 1;
-                    continue;
                 }
-                Err(err) => return Err(err),
+                result => return result,
             }
         }
     }
 
-    fn attempt_post(
+    /// The auth manager reads the token file and refreshes over a blocking
+    /// client, so it runs on a blocking thread rather than stalling the
+    /// runtime that carries every other stream.
+    async fn auth(
+        &self,
+        load: fn(&AuthManager) -> anyhow::Result<StoredAuth>,
+    ) -> Result<StoredAuth, KimiError> {
+        let manager = self.auth_manager.clone();
+        match tokio::task::spawn_blocking(move || load(&manager)).await {
+            Ok(Ok(auth)) => Ok(auth),
+            Ok(Err(error)) => Err(KimiError::new(401, error)),
+            Err(error) => Err(KimiError::new(500, error)),
+        }
+    }
+
+    async fn attempt_post(
         &self,
         access_token: &str,
         body: &KimiChatRequest,
-    ) -> Result<KimiResponse, KimiError> {
-        let headers = common_headers().map_err(|e| KimiError {
-            status: 500,
-            detail: Some(e.to_string()),
-            retry_after: None,
-        })?;
-
-        let url = format!("{}/chat/completions", api_base_url());
-        let body_json = serde_json::to_string(body).map_err(|e| KimiError {
-            status: 500,
-            detail: Some(e.to_string()),
-            retry_after: None,
-        })?;
-
-        let request_start_time = now_ms();
-
-        let mut req_builder = self
+    ) -> Result<reqwest::Response, KimiError> {
+        let headers = common_headers().map_err(|e| KimiError::new(500, e))?;
+        let mut request = self
             .client
-            .post(&url)
+            .post(format!("{}/chat/completions", api_base_url()))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .header("Authorization", format!("Bearer {access_token}"));
-
-        // Add common headers
+            .header("Authorization", format!("Bearer {access_token}"))
+            .json(body);
         for (k, v) in &headers {
             if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes())
                 && let Ok(value) = reqwest::header::HeaderValue::from_str(v)
             {
-                req_builder = req_builder.header(name, value);
+                request = request.header(name, value);
             }
         }
 
-        let resp = match req_builder.body(body_json).send() {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(KimiError {
-                    status: 0,
-                    detail: Some(e.to_string()),
-                    retry_after: None,
-                });
-            }
-        };
-
-        let status = resp.status().as_u16();
-
-        if status == 429 {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let text = resp.text().unwrap_or_default();
-            return Err(KimiError {
-                status: 429,
-                detail: if text.is_empty() { None } else { Some(text) },
-                retry_after,
-            });
+        let response = request.send().await.map_err(|e| KimiError::new(0, e))?;
+        if response.status().is_success() {
+            return Ok(response);
         }
-
-        if status == 401 || status == 403 {
-            let text = resp.text().unwrap_or_default();
-            return Err(KimiError {
-                status,
-                detail: if text.is_empty() { None } else { Some(text) },
-                retry_after: None,
-            });
-        }
-
-        if !resp.status().is_success() {
-            let text = resp.text().unwrap_or_default();
-            return Err(KimiError {
-                status,
-                detail: if text.is_empty() { None } else { Some(text) },
-                retry_after: None,
-            });
-        }
-
-        let body_bytes = resp.bytes().map(|b| b.to_vec()).unwrap_or_default();
-
-        Ok(KimiResponse {
-            body: body_bytes,
+        let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let text = response.text().await.unwrap_or_default();
+        Err(KimiError {
             status,
-            request_start_time,
+            detail: (!text.is_empty()).then_some(text),
+            retry_after,
         })
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 /// How long to wait before retrying a 429, or None when a retry cannot help.

@@ -1156,9 +1156,6 @@ async fn smoke_codex_model_routes_to_real_provider() {
 
 #[test]
 fn smoke_kimi_model_is_registered() {
-    // Kimi uses reqwest::blocking::Client internally, which panics when
-    // dropped from an async context (it joins a dedicated runtime thread).
-    // Test routing at the Registry level instead of through the HTTP stack.
     let registry = Registry::with_default_alias();
     let provider = registry.provider_for_model("kimi-for-coding", None);
     assert!(
@@ -1174,8 +1171,8 @@ fn smoke_kimi_model_is_registered() {
 
 // ---------------------------------------------------------------------------
 // Kimi smoke: mock upstream verifies request shape and returns a valid
-// streaming response. Uses multi-thread runtime because KimiHttpClient uses
-// reqwest::blocking::Client internally.
+// streaming response. Multi-thread runtime because the token store and refresh
+// still run on a blocking thread.
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::await_holding_lock)]
@@ -1220,6 +1217,64 @@ async fn smoke_kimi_messages_uses_mock_upstream() {
     assert_eq!(sent["stream"], true);
     assert!(sent.get("input").is_none());
     assert!(!sent.to_string().contains("compaction_trigger"));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_kimi_refreshes_a_rejected_token_and_streams() {
+    use axum::response::IntoResponse;
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "kimi");
+
+    let app = axum::Router::new()
+        .route(
+            "/api/oauth/token",
+            axum::routing::post(|| async {
+                axum::Json(json!({"access_token":"fresh-access","refresh_token":"fresh-refresh","expires_in":900}))
+            }),
+        )
+        .route(
+            "/chat/completions",
+            axum::routing::post(|headers: http::HeaderMap| async move {
+                if headers["authorization"] != "Bearer fresh-access" {
+                    return (StatusCode::UNAUTHORIZED, "token expired").into_response();
+                }
+                (
+                    [("content-type", "text/event-stream")],
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"kimi live\"}}]}\n\n",
+                        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+                    .into_response()
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_KIMI_BASE_URL", &upstream);
+    let _oauth_env = EnvGuard::set("CCP_KIMI_OAUTH_HOST", &upstream);
+    let response = call_messages_body(json!({
+        "model": "kimi-for-coding",
+        "max_tokens": 64,
+        "stream": true,
+        "messages": [{"role":"user","content":"hello"}]
+    }))
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("\"text\":\"kimi live\""), "{body}");
+    assert!(body.contains("message_stop"), "{body}");
+    let saved = std::fs::read_to_string(config.path().join("kimi/auth.json")).unwrap();
+    assert!(saved.contains("fresh-refresh"), "{saved}");
 }
 
 // ---------------------------------------------------------------------------

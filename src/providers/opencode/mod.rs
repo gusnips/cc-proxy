@@ -405,13 +405,13 @@ fn mark_upstream_started(ctx: &RequestContext) {
     }
 }
 
-fn capture_buffered_upstream(ctx: &RequestContext, bytes: &[u8], extension: &str) {
+pub(crate) fn capture_buffered_upstream(ctx: &RequestContext, bytes: &[u8], extension: &str) {
     if let Some(traffic) = ctx.traffic.as_ref() {
         traffic.write_bytes(&format!("032-upstream-response-body.{extension}"), bytes);
     }
 }
 
-fn update_buffered_usage(ctx: &RequestContext, value: &serde_json::Value) {
+pub(crate) fn update_buffered_usage(ctx: &RequestContext, value: &serde_json::Value) {
     if let Some(monitor) = ctx.monitor.as_ref() {
         monitor.usage_updated(
             &ctx.req_id,
@@ -425,7 +425,7 @@ fn update_buffered_usage(ctx: &RequestContext, value: &serde_json::Value) {
     }
 }
 
-fn sse_response(body: GenerationBody) -> Response {
+pub(crate) fn sse_response(body: GenerationBody) -> Response {
     let body = match body {
         GenerationBody::BufferedSse(bytes) => Body::from(bytes),
         GenerationBody::LiveSse(body) => body,
