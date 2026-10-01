@@ -368,6 +368,7 @@ mod tests {
                 Err(OpenCodeError {
                     status: http::StatusCode::BAD_GATEWAY,
                     retry_after: None,
+                    body: None,
                     message: "disconnected".into(),
                 }),
             ],

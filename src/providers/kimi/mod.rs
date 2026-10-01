@@ -23,6 +23,7 @@ use crate::providers::kimi::translate::model_allowlist::{
 };
 use crate::providers::kimi::translate::request::{TranslateOptions, translate_request};
 use crate::providers::kimi::translate::stream::translate_stream_bytes;
+use crate::providers::upstream_error;
 use crate::registry::KIMI_MODELS;
 
 fn now_ms() -> u64 {
@@ -111,7 +112,7 @@ impl Provider for KimiProvider {
         {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
-                return map_kimi_error_to_response(&e);
+                return kimi_error(&e).response();
             }
             Err(join_err) => {
                 return json_error(
@@ -251,7 +252,7 @@ impl Provider for KimiProvider {
                 format!("Blocking task join error: {error}"),
             )
         })?
-        .map_err(kimi_provider_error)?;
+        .map_err(|error| kimi_error(&error))?;
         if let Some(traffic) = ctx.traffic.as_ref() {
             traffic.write_bytes("032-upstream-response-body.sse", &upstream.body);
         }
@@ -288,43 +289,13 @@ fn count_sse_events(bytes: &[u8]) -> u64 {
     String::from_utf8_lossy(bytes).matches("event:").count() as u64
 }
 
-fn kimi_provider_error(err: client::KimiError) -> ProviderError {
-    let (status, kind) = match err.status {
-        401 | 403 => (StatusCode::UNAUTHORIZED, ProviderErrorKind::Authentication),
-        429 => (StatusCode::TOO_MANY_REQUESTS, ProviderErrorKind::RateLimit),
-        _ => (StatusCode::BAD_GATEWAY, ProviderErrorKind::Api),
-    };
-    let mut error = ProviderError::new(status, kind, err.detail.unwrap_or(err.message));
-    if err.status == 429 {
-        error.retry_after = Some(err.retry_after.unwrap_or_else(|| "5".to_string()));
-    }
-    error
-}
-
-fn map_kimi_error_to_response(err: &client::KimiError) -> Response {
-    match err.status {
-        401 | 403 => json_error(
-            StatusCode::UNAUTHORIZED,
-            "authentication_error",
-            err.detail.as_deref().unwrap_or("Authentication failed"),
-        ),
-        429 => {
-            let retry_after = err.retry_after.as_deref().unwrap_or("5");
-            let resp = json_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate_limit_error",
-                &err.message,
-            );
-            // Forward retry-after header
-            let headers = [(http::header::RETRY_AFTER, retry_after)];
-            (headers, resp).into_response()
-        }
-        _ => json_error(
-            StatusCode::BAD_GATEWAY,
-            "api_error",
-            err.detail.as_deref().unwrap_or("Upstream error"),
-        ),
-    }
+fn kimi_error(err: &client::KimiError) -> ProviderError {
+    upstream_error::from_http(
+        err.status,
+        err.detail.as_deref().unwrap_or_default(),
+        err.retry_after.as_deref(),
+        "Kimi",
+    )
 }
 
 // ---------------------------------------------------------------------------

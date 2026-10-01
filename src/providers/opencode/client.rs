@@ -71,6 +71,9 @@ pub struct OpenCodeError {
     pub status: StatusCode,
     pub retry_after: Option<String>,
     pub message: String,
+    /// The upstream's rejection body, redacted. Its codes and types (for
+    /// example `insufficient_quota`) say what failed when the prose does not.
+    pub body: Option<String>,
 }
 
 impl OpenCodeResponse {
@@ -81,6 +84,7 @@ impl OpenCodeResponse {
             chunk.map_err(|_| OpenCodeError {
                 status: StatusCode::BAD_GATEWAY,
                 retry_after: None,
+                body: None,
                 message: "OpenCode Go upstream stream failed".to_string(),
             })
         })
@@ -107,6 +111,7 @@ impl OpenCodeResponse {
                 return Err(OpenCodeError {
                     status: StatusCode::BAD_GATEWAY,
                     retry_after: None,
+                    body: None,
                     message: size_error.to_string(),
                 });
             }
@@ -196,6 +201,7 @@ impl OpenCodeClient {
         let response = request.send().await.map_err(|_| OpenCodeError {
             status: StatusCode::BAD_GATEWAY,
             retry_after: None,
+            body: None,
             message: "OpenCode Go upstream request failed".to_string(),
         })?;
 
@@ -232,6 +238,7 @@ impl OpenCodeClient {
                     StatusCode::BAD_GATEWAY
                 },
                 retry_after: None,
+                body: None,
                 message: if error.is_timeout() {
                     "OpenCode Go usage request timed out"
                 } else {
@@ -252,12 +259,14 @@ impl OpenCodeClient {
             serde_json::from_slice(&bytes).map_err(|_| OpenCodeError {
                 status: StatusCode::BAD_GATEWAY,
                 retry_after: None,
+                body: None,
                 message: "OpenCode Go usage response was invalid".to_string(),
             })?;
         if !parsed.usage.has_known_data() {
             return Err(OpenCodeError {
                 status: StatusCode::BAD_GATEWAY,
                 retry_after: None,
+                body: None,
                 message: "OpenCode Go usage response contained no recognized windows".to_string(),
             });
         }
@@ -271,6 +280,7 @@ impl OpenCodeClient {
             .ok_or_else(|| OpenCodeError {
                 status: StatusCode::UNAUTHORIZED,
                 retry_after: None,
+                body: None,
                 message: "OpenCode Go API key is not configured; set CCP_OPENCODE_API_KEY, OPENCODE_API_KEY, or opencode.apiKey in config.json".to_string(),
             })
     }
@@ -325,13 +335,16 @@ async fn rejected_response(response: reqwest::Response, secret: Option<&str>) ->
         })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("OpenCode Go upstream returned HTTP {status}"));
+    let mut body = String::from_utf8_lossy(&body).into_owned();
     if let Some(secret) = secret.filter(|secret| !secret.is_empty()) {
         message = message.replace(secret, "[redacted]");
+        body = body.replace(secret, "[redacted]");
     }
     OpenCodeError {
         status,
         retry_after,
         message,
+        body: Some(body),
     }
 }
 

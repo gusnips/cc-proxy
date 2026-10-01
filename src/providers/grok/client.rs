@@ -26,6 +26,10 @@ pub struct GrokError {
     pub status: StatusCode,
     pub retry_after: Option<String>,
     pub message: String,
+    /// The upstream's rejection body. Read on every rejection, not only when
+    /// traffic is captured: it is what tells a context overflow or a spent
+    /// balance apart from a bad request.
+    pub body: Option<String>,
 }
 
 impl GrokResponse {
@@ -40,6 +44,7 @@ impl GrokResponse {
             chunk.map_err(|_| GrokError {
                 status: StatusCode::BAD_GATEWAY,
                 retry_after: None,
+                body: None,
                 message: "Grok upstream stream failed".into(),
             })
         })
@@ -54,6 +59,7 @@ impl GrokResponse {
                 return Err(GrokError {
                     status: StatusCode::BAD_GATEWAY,
                     retry_after: None,
+                    body: None,
                     message: "Grok upstream response exceeds the size limit".into(),
                 });
             }
@@ -181,6 +187,7 @@ impl GrokClient {
                 GrokError {
                     status: StatusCode::BAD_GATEWAY,
                     retry_after: None,
+                    body: None,
                     message: "Grok upstream request failed".into(),
                 }
             })?;
@@ -194,8 +201,8 @@ impl GrokClient {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
+            let (body, truncated) = read_rejected_body(response, 64 * 1024).await;
             if let Some(capture) = traffic {
-                let (body, truncated) = read_rejected_body(response, 64 * 1024).await;
                 let detail = serde_json::from_slice::<serde_json::Value>(&body)
                     .unwrap_or_else(|_| serde_json::json!({"body_bytes": body.len()}));
                 capture.write_json(
@@ -207,6 +214,7 @@ impl GrokClient {
                 status,
                 retry_after,
                 message: "Grok upstream rejected the request".into(),
+                body: Some(String::from_utf8_lossy(&body).into_owned()),
             });
         }
         Ok(response)
@@ -291,6 +299,7 @@ fn auth_error(_: anyhow::Error) -> GrokError {
     GrokError {
         status: StatusCode::UNAUTHORIZED,
         retry_after: None,
+        body: None,
         message: "Grok authentication requires login; run `cc-proxy grok auth login` and retry the request".into(),
     }
 }

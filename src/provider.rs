@@ -72,6 +72,7 @@ pub enum ProviderErrorKind {
     Permission,
     RateLimit,
     InvalidRequest,
+    Overloaded,
     Api,
 }
 
@@ -83,6 +84,9 @@ pub struct ProviderError {
     pub retry_after: Option<String>,
     pub param: Option<String>,
     pub code: Option<String>,
+    /// Sent as `x-should-retry`. `Some(false)` stops a client's retry loop for
+    /// a failure no backoff can fix, such as a spent balance.
+    pub should_retry: Option<bool>,
 }
 
 impl ProviderError {
@@ -94,6 +98,7 @@ impl ProviderError {
             retry_after: None,
             param: None,
             code: None,
+            should_retry: None,
         }
     }
 
@@ -103,10 +108,50 @@ impl ProviderError {
             ProviderErrorKind::Permission => "permission_error",
             ProviderErrorKind::RateLimit => "rate_limit_error",
             ProviderErrorKind::InvalidRequest => "invalid_request_error",
+            ProviderErrorKind::Overloaded => "overloaded_error",
             ProviderErrorKind::Api => "api_error",
         }
     }
+
+    /// The Anthropic error response, with the retry headers the client reads.
+    pub fn response(self) -> Response {
+        let mut response =
+            crate::anthropic::error::json_error(self.status, self.error_type(), self.message);
+        let headers = response.headers_mut();
+        if let Some(retry_after) = self
+            .retry_after
+            .and_then(|value| http::HeaderValue::from_str(&value).ok())
+        {
+            headers.insert(http::header::RETRY_AFTER, retry_after);
+        }
+        if self.should_retry == Some(false) {
+            headers.insert("x-should-retry", http::HeaderValue::from_static("false"));
+        }
+        response
+    }
+
+    /// The Anthropic `error` event, for a stream that already answered 200.
+    pub fn sse_event(&self) -> Vec<u8> {
+        crate::anthropic::sse::encode_sse_event(
+            Some("error"),
+            &serde_json::json!({
+                "type": "error",
+                "error": {"type": self.error_type(), "message": self.message},
+            })
+            .to_string(),
+        )
+    }
 }
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Lets a classified failure ride inside an `anyhow::Error` through the stream
+/// translators and be recovered with `downcast_ref` where the response is built.
+impl std::error::Error for ProviderError {}
 
 pub trait CliHandlers: Send + Sync {
     fn login(&self) -> Result<()>;

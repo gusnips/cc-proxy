@@ -10,7 +10,6 @@ use crate::retry::{MAX_RATE_LIMIT_RETRIES, compute_backoff_delay};
 #[derive(Debug)]
 pub struct KimiError {
     pub status: u16,
-    pub message: String,
     pub detail: Option<String>,
     pub retry_after: Option<String>,
 }
@@ -50,7 +49,6 @@ impl KimiHttpClient {
     pub fn post_kimi(&self, body: &KimiChatRequest) -> Result<KimiResponse, KimiError> {
         let mut auth = self.auth_manager.get_auth().map_err(|e| KimiError {
             status: 401,
-            message: "Auth error".to_string(),
             detail: Some(e.to_string()),
             retry_after: None,
         })?;
@@ -71,7 +69,6 @@ impl KimiHttpClient {
                         Err(e) => {
                             return Err(KimiError {
                                 status: 401,
-                                message: "Unauthorized".to_string(),
                                 detail: Some(e.to_string()),
                                 retry_after: None,
                             });
@@ -100,7 +97,6 @@ impl KimiHttpClient {
     ) -> Result<KimiResponse, KimiError> {
         let headers = common_headers().map_err(|e| KimiError {
             status: 500,
-            message: "Failed to build headers".to_string(),
             detail: Some(e.to_string()),
             retry_after: None,
         })?;
@@ -108,7 +104,6 @@ impl KimiHttpClient {
         let url = format!("{}/chat/completions", api_base_url());
         let body_json = serde_json::to_string(body).map_err(|e| KimiError {
             status: 500,
-            message: "Failed to serialize request".to_string(),
             detail: Some(e.to_string()),
             retry_after: None,
         })?;
@@ -136,7 +131,6 @@ impl KimiHttpClient {
             Err(e) => {
                 return Err(KimiError {
                     status: 0,
-                    message: "Network error".to_string(),
                     detail: Some(e.to_string()),
                     retry_after: None,
                 });
@@ -154,7 +148,6 @@ impl KimiHttpClient {
             let text = resp.text().unwrap_or_default();
             return Err(KimiError {
                 status: 429,
-                message: "Rate limited".to_string(),
                 detail: if text.is_empty() { None } else { Some(text) },
                 retry_after,
             });
@@ -164,12 +157,6 @@ impl KimiHttpClient {
             let text = resp.text().unwrap_or_default();
             return Err(KimiError {
                 status,
-                message: if status == 401 {
-                    "Unauthorized"
-                } else {
-                    "Forbidden"
-                }
-                .to_string(),
                 detail: if text.is_empty() { None } else { Some(text) },
                 retry_after: None,
             });
@@ -179,7 +166,6 @@ impl KimiHttpClient {
             let text = resp.text().unwrap_or_default();
             return Err(KimiError {
                 status,
-                message: "Upstream error".to_string(),
                 detail: if text.is_empty() { None } else { Some(text) },
                 retry_after: None,
             });

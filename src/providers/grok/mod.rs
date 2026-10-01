@@ -26,6 +26,7 @@ use crate::provider::{
     CliHandlers, Generation, GenerationBody, Provider, ProviderError, ProviderErrorKind,
     RequestContext,
 };
+use crate::providers::upstream_error;
 use crate::{registry::GROK_MODELS, traffic::StreamTrafficCapture};
 
 use self::auth::token_store::file_store;
@@ -496,45 +497,16 @@ fn write_error(traffic: Option<&crate::traffic::TrafficCapture>, stage: &str, ki
 }
 
 fn grok_provider_error(error: client::GrokError) -> ProviderError {
-    let kind = match error.status {
-        StatusCode::UNAUTHORIZED => ProviderErrorKind::Authentication,
-        StatusCode::TOO_MANY_REQUESTS => ProviderErrorKind::RateLimit,
-        StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN => ProviderErrorKind::Permission,
-        _ => ProviderErrorKind::Api,
-    };
-    let status = match kind {
-        ProviderErrorKind::Api => StatusCode::BAD_GATEWAY,
-        _ => error.status,
-    };
-    let mut mapped = ProviderError::new(status, kind, error.message);
-    mapped.retry_after = error.retry_after;
-    mapped
+    upstream_error::from_http(
+        error.status.as_u16(),
+        error.body.as_deref().unwrap_or(&error.message),
+        error.retry_after.as_deref(),
+        "Grok",
+    )
 }
 
 fn map_error(error: client::GrokError) -> Response {
-    match error.status {
-        StatusCode::UNAUTHORIZED => json_error(
-            StatusCode::UNAUTHORIZED,
-            "authentication_error",
-            error.message,
-        ),
-        StatusCode::TOO_MANY_REQUESTS => {
-            let response = json_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate_limit_error",
-                error.message,
-            );
-            if let Some(retry_after) = error.retry_after {
-                ([(http::header::RETRY_AFTER, retry_after)], response).into_response()
-            } else {
-                response
-            }
-        }
-        StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN => {
-            json_error(error.status, "permission_error", error.message)
-        }
-        _ => json_error(StatusCode::BAD_GATEWAY, "api_error", error.message),
-    }
+    grok_provider_error(error).response()
 }
 
 pub struct GrokCli;

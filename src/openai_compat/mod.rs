@@ -9,7 +9,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use crate::provider::{ProviderError, ProviderErrorKind};
+use crate::provider::ProviderError;
 
 pub const MAX_OPENAI_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PROVIDER_STREAM_BYTES: usize = 32 * 1024 * 1024;
@@ -118,14 +118,7 @@ impl From<ProviderError> for OpenAiError {
     fn from(error: ProviderError) -> Self {
         Self {
             status: error.status,
-            kind: match error.kind {
-                ProviderErrorKind::Authentication => "authentication_error",
-                ProviderErrorKind::Permission => "permission_error",
-                ProviderErrorKind::RateLimit => "rate_limit_error",
-                ProviderErrorKind::InvalidRequest => "invalid_request_error",
-                ProviderErrorKind::Api => "api_error",
-            }
-            .into(),
+            kind: error.error_type().into(),
             message: error.message.into(),
             param: error.param.map(Into::into),
             code: error.code.map(Into::into),

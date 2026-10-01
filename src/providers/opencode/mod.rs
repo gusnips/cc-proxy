@@ -24,6 +24,7 @@ use crate::provider::{
     RequestContext,
 };
 use crate::providers::kimi::count_tokens;
+use crate::providers::upstream_error;
 
 use self::client::{OpenCodeClient, OpenCodeError};
 use self::model::EndpointKind;
@@ -210,7 +211,7 @@ impl Provider for OpenCodeProvider {
         }
         match self.generate_anthropic_stream(body, ctx).await {
             Ok(generation) => sse_response(generation.body),
-            Err(error) => map_provider_error(error),
+            Err(error) => error.response(),
         }
     }
 
@@ -346,33 +347,16 @@ fn invalid_request_provider_error(error: impl std::fmt::Display) -> ProviderErro
 }
 
 fn opencode_provider_error(error: OpenCodeError) -> ProviderError {
-    let (status, kind) = match error.status {
-        StatusCode::UNAUTHORIZED => (StatusCode::UNAUTHORIZED, ProviderErrorKind::Authentication),
-        StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN => {
-            (error.status, ProviderErrorKind::Permission)
-        }
-        StatusCode::TOO_MANY_REQUESTS => {
-            (StatusCode::TOO_MANY_REQUESTS, ProviderErrorKind::RateLimit)
-        }
-        status if status.is_client_error() => (status, ProviderErrorKind::InvalidRequest),
-        _ => (StatusCode::BAD_GATEWAY, ProviderErrorKind::Api),
-    };
-    let mut mapped = ProviderError::new(status, kind, error.message);
-    mapped.retry_after = error.retry_after;
-    mapped
+    upstream_error::from_http(
+        error.status.as_u16(),
+        error.body.as_deref().unwrap_or(&error.message),
+        error.retry_after.as_deref(),
+        "OpenCode Go",
+    )
 }
 
 fn map_error(error: OpenCodeError) -> Response {
-    map_provider_error(opencode_provider_error(error))
-}
-
-fn map_provider_error(error: ProviderError) -> Response {
-    let response = json_error(error.status, error.error_type(), error.message);
-    if let Some(retry_after) = error.retry_after {
-        ([(http::header::RETRY_AFTER, retry_after)], response).into_response()
-    } else {
-        response
-    }
+    opencode_provider_error(error).response()
 }
 
 fn unsupported_model(requested: &str) -> Response {
@@ -1009,6 +993,7 @@ mod tests {
             let error = opencode_provider_error(OpenCodeError {
                 status,
                 retry_after: None,
+                body: None,
                 message: "denied".into(),
             });
             assert_eq!(error.status, status);

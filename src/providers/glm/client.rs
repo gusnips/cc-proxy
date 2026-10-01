@@ -5,7 +5,6 @@ use crate::config;
 #[derive(Debug)]
 pub struct GlmError {
     pub status: u16,
-    pub message: String,
     pub detail: Option<String>,
     pub retry_after: Option<String>,
 }
@@ -48,7 +47,6 @@ impl GlmHttpClient {
             .await
             .map_err(|e| GlmError {
                 status: 0,
-                message: "Network error".to_string(),
                 detail: Some(e.to_string()),
                 retry_after: None,
             })?;
@@ -64,7 +62,6 @@ impl GlmHttpClient {
             let text = resp.text().await.unwrap_or_default();
             return Err(GlmError {
                 status: 429,
-                message: "Rate limited".to_string(),
                 detail: if text.is_empty() { None } else { Some(text) },
                 retry_after,
             });
@@ -74,12 +71,6 @@ impl GlmHttpClient {
             let text = resp.text().await.unwrap_or_default();
             return Err(GlmError {
                 status,
-                message: if status == 401 {
-                    "Unauthorized"
-                } else {
-                    "Forbidden"
-                }
-                .to_string(),
                 detail: if text.is_empty() { None } else { Some(text) },
                 retry_after: None,
             });
@@ -89,7 +80,6 @@ impl GlmHttpClient {
             let text = resp.text().await.unwrap_or_default();
             return Err(GlmError {
                 status,
-                message: "Upstream error".to_string(),
                 detail: if text.is_empty() { None } else { Some(text) },
                 retry_after: None,
             });

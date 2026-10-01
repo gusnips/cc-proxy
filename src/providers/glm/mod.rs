@@ -11,6 +11,7 @@ use crate::anthropic::schema::{CountTokensResponse, MessagesRequest};
 use crate::auth::AuthStorage;
 use crate::monitor::usage_from_anthropic_sse;
 use crate::provider::{CliHandlers, Provider, RequestContext};
+use crate::providers::upstream_error;
 use crate::registry::{GLM_MODELS, normalize_incoming_model};
 
 use self::auth::{
@@ -161,33 +162,13 @@ fn count_sse_events(bytes: &[u8]) -> u64 {
 }
 
 fn map_glm_error(err: &GlmError) -> Response {
-    match err.status {
-        401 | 403 => json_error(
-            StatusCode::UNAUTHORIZED,
-            "authentication_error",
-            err.detail.as_deref().unwrap_or("Authentication failed"),
-        ),
-        429 => {
-            let retry_after = err.retry_after.as_deref().unwrap_or("5");
-            let resp = json_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate_limit_error",
-                &err.message,
-            );
-            let headers = [(http::header::RETRY_AFTER, retry_after)];
-            (headers, resp).into_response()
-        }
-        0 => json_error(
-            StatusCode::BAD_GATEWAY,
-            "api_error",
-            err.detail.as_deref().unwrap_or(&err.message),
-        ),
-        _ => json_error(
-            StatusCode::BAD_GATEWAY,
-            "api_error",
-            err.detail.as_deref().unwrap_or("Upstream error"),
-        ),
-    }
+    upstream_error::from_http(
+        err.status,
+        err.detail.as_deref().unwrap_or_default(),
+        err.retry_after.as_deref(),
+        "GLM",
+    )
+    .response()
 }
 
 // ---------------------------------------------------------------------------

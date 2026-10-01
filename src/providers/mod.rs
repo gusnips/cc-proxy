@@ -5,3 +5,4 @@ pub mod grok;
 pub mod kimi;
 pub mod opencode;
 pub mod translate_shared;
+pub mod upstream_error;
