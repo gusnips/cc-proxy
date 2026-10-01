@@ -22,7 +22,7 @@ use super::{
     response::{
         AnthropicAccumulator, BlockKind, SseEvent, buffered_response, chat_citation,
         chat_finish_reason, hosted_search_action, normalized_arguments, responses_citation,
-        responses_response,
+        responses_incomplete_reason, responses_response,
     },
 };
 
@@ -623,11 +623,12 @@ impl Renderer {
                     self.created,
                     &self.response_metadata,
                 );
-                let kind = if self.state.stop_reason.as_deref() == Some("max_tokens") {
-                    "response.incomplete"
-                } else {
-                    "response.completed"
-                };
+                let kind =
+                    if responses_incomplete_reason(self.state.stop_reason.as_deref()).is_some() {
+                        "response.incomplete"
+                    } else {
+                        "response.completed"
+                    };
                 out.push(self.responses_event(kind, json!({"response":response})));
             }
             _ => {}

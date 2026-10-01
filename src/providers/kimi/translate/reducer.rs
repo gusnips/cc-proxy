@@ -1,4 +1,5 @@
 use crate::anthropic::sse::parse_sse_events;
+use crate::providers::codex::translate::reducer::OutputTokensDetails;
 use crate::providers::upstream_error;
 
 #[derive(Debug, Clone, Default)]
@@ -374,6 +375,12 @@ pub fn map_usage_to_anthropic(u: &Option<KimiUsage>) -> AnthropicUsage {
         output_tokens: usage.completion_tokens.unwrap_or(0),
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: cached,
+        output_tokens_details: usage
+            .reasoning_tokens
+            .map(|reasoning_tokens| OutputTokensDetails {
+                reasoning_tokens,
+                thinking_tokens: reasoning_tokens,
+            }),
     }
 }
 
@@ -383,6 +390,10 @@ pub struct AnthropicUsage {
     pub output_tokens: u64,
     pub cache_creation_input_tokens: u64,
     pub cache_read_input_tokens: u64,
+    /// Kimi counts reasoning inside completion_tokens and reports the share;
+    /// carried so the OpenAI routes can report it instead of a zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens_details: Option<OutputTokensDetails>,
 }
 
 #[cfg(test)]

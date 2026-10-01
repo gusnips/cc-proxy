@@ -46,25 +46,39 @@ pub struct Usage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
+    pub reasoning_tokens: Option<u64>,
 }
 
 impl Usage {
+    /// Anthropic's input_tokens excludes both cache reads and cache writes;
+    /// OpenAI's prompt count includes every input token. Leaving the writes
+    /// out under-reported every turn that wrote the cache.
+    fn prompt_tokens(&self) -> u64 {
+        self.input_tokens + self.cache_read_tokens + self.cache_creation_tokens
+    }
+
     pub fn chat_value(&self) -> Value {
-        json!({
-            "prompt_tokens": self.input_tokens + self.cache_read_tokens,
+        let mut value = json!({
+            "prompt_tokens": self.prompt_tokens(),
             "completion_tokens": self.output_tokens,
-            "total_tokens": self.input_tokens + self.cache_read_tokens + self.output_tokens,
+            "total_tokens": self.prompt_tokens() + self.output_tokens,
             "prompt_tokens_details": {"cached_tokens": self.cache_read_tokens},
-        })
+        });
+        if let Some(reasoning_tokens) = self.reasoning_tokens {
+            value["completion_tokens_details"] = json!({"reasoning_tokens": reasoning_tokens});
+        }
+        value
     }
 
     pub fn responses_value(&self) -> Value {
         json!({
-            "input_tokens": self.input_tokens + self.cache_read_tokens,
+            "input_tokens": self.prompt_tokens(),
             "input_tokens_details": {"cached_tokens": self.cache_read_tokens},
             "output_tokens": self.output_tokens,
-            "output_tokens_details": {"reasoning_tokens": 0},
-            "total_tokens": self.input_tokens + self.cache_read_tokens + self.output_tokens,
+            // The Responses schema requires this field, so a provider that
+            // reports no count still gets one: 0.
+            "output_tokens_details": {"reasoning_tokens": self.reasoning_tokens.unwrap_or(0)},
+            "total_tokens": self.prompt_tokens() + self.output_tokens,
         })
     }
 }
@@ -302,6 +316,12 @@ impl AnthropicAccumulator {
         {
             self.usage.cache_creation_tokens = value;
         }
+        if let Some(value) = usage
+            .pointer("/output_tokens_details/reasoning_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.usage.reasoning_tokens = Some(value);
+        }
     }
 }
 
@@ -464,19 +484,19 @@ pub fn responses_response(
             BlockKind::HostedResult => unreachable!(),
         }
     }
-    let incomplete = state.stop_reason.as_deref() == Some("max_tokens");
+    let incomplete_reason = responses_incomplete_reason(state.stop_reason.as_deref());
     json!({
         "id":response_id,
         "object":"response",
         "created_at":created,
-        "status":if incomplete { "incomplete" } else { "completed" },
+        "status":if incomplete_reason.is_some() { "incomplete" } else { "completed" },
         "model":model,
         "output":output,
         "parallel_tool_calls":false,
         "tool_choice":response_metadata.tool_choice,
         "tools":response_metadata.tools,
         "error":null,
-        "incomplete_details":if incomplete { json!({"reason":"max_output_tokens"}) } else { Value::Null },
+        "incomplete_details":incomplete_reason.map(|reason| json!({"reason":reason})),
         "usage":state.usage.responses_value(),
     })
 }
@@ -485,7 +505,19 @@ pub fn chat_finish_reason(reason: Option<&str>) -> &'static str {
     match reason {
         Some("tool_use") => "tool_calls",
         Some("max_tokens") => "length",
+        // A refusal reported as "stop" read as a finished answer.
+        Some("refusal") => "content_filter",
         _ => "stop",
+    }
+}
+
+/// The Responses API ends a cut or filtered answer as `incomplete` with a
+/// reason, not as `completed`.
+pub fn responses_incomplete_reason(stop_reason: Option<&str>) -> Option<&'static str> {
+    match stop_reason {
+        Some("max_tokens") => Some("max_output_tokens"),
+        Some("refusal") => Some("content_filter"),
+        _ => None,
     }
 }
 
@@ -681,6 +713,48 @@ mod tests {
             message["content"][0]["annotations"][0]["type"],
             "url_citation"
         );
+    }
+
+    #[test]
+    fn usage_counts_cache_writes_and_reported_reasoning() {
+        let usage = Usage {
+            input_tokens: 10,
+            output_tokens: 7,
+            cache_read_tokens: 20,
+            cache_creation_tokens: 30,
+            reasoning_tokens: Some(4),
+        };
+        let chat = usage.chat_value();
+        assert_eq!(chat["prompt_tokens"], 60);
+        assert_eq!(chat["total_tokens"], 67);
+        assert_eq!(chat["completion_tokens_details"]["reasoning_tokens"], 4);
+        let responses = usage.responses_value();
+        assert_eq!(responses["input_tokens"], 60);
+        assert_eq!(responses["output_tokens_details"]["reasoning_tokens"], 4);
+        assert!(
+            Usage::default()
+                .chat_value()
+                .get("completion_tokens_details")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_reported_as_a_content_filter() {
+        assert_eq!(chat_finish_reason(Some("refusal")), "content_filter");
+        let state = AnthropicAccumulator {
+            stop_reason: Some("refusal".into()),
+            ..Default::default()
+        };
+        let response = responses_response(
+            &state,
+            "resp_test",
+            "kimi-k2.6",
+            1,
+            &OpenAiResponseMetadata::default(),
+        );
+        assert_eq!(response["status"], "incomplete");
+        assert_eq!(response["incomplete_details"]["reason"], "content_filter");
     }
 
     #[test]
