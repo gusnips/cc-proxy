@@ -7,8 +7,7 @@ pub fn translate_stream_bytes(
     message_id: &str,
     model: &str,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    let events = reduce_upstream_bytes(input)
-        .map_err(|e| anyhow::anyhow!("upstream stream error: {} ({:?})", e.message, e.kind))?;
+    let events = reduce_upstream_bytes(input)?;
 
     let mut out = Vec::new();
     let mut message_started = false;

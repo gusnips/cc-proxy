@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 
 use super::{OpenAiError, OpenAiResponseMetadata, OpenAiSurface};
+use crate::providers::upstream_error::status_for_error_type;
 
 fn upstream_invalid(message: impl Into<String>, _param: Option<impl Into<String>>) -> OpenAiError {
     OpenAiError::upstream_protocol(message)
@@ -245,14 +246,23 @@ impl AnthropicAccumulator {
             "message_stop" => self.stopped = true,
             "ping" => {}
             "error" => {
+                let kind = event
+                    .data
+                    .pointer("/error/type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("api_error");
+                // The provider's error type names what failed. A 502 for all
+                // of them told an OpenAI client to retry a bad request, and to
+                // retry a rate limit at once instead of backing off.
+                let status = match status_for_error_type(kind) {
+                    None | Some(500) => http::StatusCode::BAD_GATEWAY,
+                    Some(status) => {
+                        http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::BAD_GATEWAY)
+                    }
+                };
                 return Err(OpenAiError {
-                    status: http::StatusCode::BAD_GATEWAY,
-                    kind: event
-                        .data
-                        .pointer("/error/type")
-                        .and_then(Value::as_str)
-                        .unwrap_or("api_error")
-                        .into(),
+                    status,
+                    kind: kind.into(),
                     message: event
                         .data
                         .pointer("/error/message")
@@ -671,6 +681,19 @@ mod tests {
             message["content"][0]["annotations"][0]["type"],
             "url_citation"
         );
+    }
+
+    #[test]
+    fn an_error_frame_keeps_its_status() {
+        let mut accumulator = AnthropicAccumulator::default();
+        let error = accumulator
+            .apply(&SseEvent {
+                event: Some("error".into()),
+                data: json!({"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}),
+            })
+            .unwrap_err();
+        assert_eq!(error.status, http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(&*error.kind, "rate_limit_error");
     }
 
     #[test]

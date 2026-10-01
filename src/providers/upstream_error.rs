@@ -162,6 +162,25 @@ fn provider_error(
     error
 }
 
+/// The classified upstream failure a stream translator stopped on, if that is
+/// what it failed on rather than a broken stream.
+pub fn carried(error: &anyhow::Error) -> Option<&ProviderError> {
+    error.downcast_ref::<ProviderError>()
+}
+
+/// The error for a buffered response whose translation failed: the upstream's
+/// own failure when the stream carried one, a 502 when the stream itself was
+/// broken. Nothing has reached the client yet, so the real status still can.
+pub fn translation_error(error: anyhow::Error, context: &str) -> ProviderError {
+    error.downcast::<ProviderError>().unwrap_or_else(|error| {
+        ProviderError::new(
+            StatusCode::BAD_GATEWAY,
+            ProviderErrorKind::Api,
+            format!("{context}: {error}"),
+        )
+    })
+}
+
 /// The HTTP status an error `type` stands for, when an in-band error names a
 /// type and no status. Anthropic's types first, then the OpenAI ones.
 pub fn status_for_error_type(error_type: &str) -> Option<u16> {

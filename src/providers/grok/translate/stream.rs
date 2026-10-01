@@ -243,9 +243,15 @@ pub fn translate_stream_bytes_with_blocks(
     Ok(out)
 }
 
-pub fn stream_error() -> Vec<u8> {
-    let data = serde_json::json!({"type":"error","error":{"type":"api_error","message":"Grok stream is invalid"}});
-    encode_sse_event(Some("error"), &data.to_string())
+pub fn stream_error_value(error_type: &str, message: &str) -> serde_json::Value {
+    serde_json::json!({"type":"error","error":{"type":error_type,"message":message}})
+}
+
+pub fn stream_error(error_type: &str, message: &str) -> Vec<u8> {
+    encode_sse_event(
+        Some("error"),
+        &stream_error_value(error_type, message).to_string(),
+    )
 }
 
 fn emit(out: &mut Vec<u8>, event: &str, data: serde_json::Value) {

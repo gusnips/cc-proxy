@@ -1,17 +1,5 @@
 use crate::anthropic::sse::parse_sse_events;
-
-#[derive(Debug, Clone)]
-pub struct UpstreamStreamError {
-    pub kind: UpstreamErrorKind,
-    pub message: String,
-    pub retry_after_seconds: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpstreamErrorKind {
-    RateLimit,
-    Failed,
-}
+use crate::providers::upstream_error;
 
 #[derive(Debug, Clone, Default)]
 pub struct KimiUsage {
@@ -76,7 +64,7 @@ struct StreamChunk {
     #[serde(default)]
     usage: Option<StreamUsage>,
     #[serde(default)]
-    error: Option<StreamError>,
+    error: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -148,15 +136,6 @@ struct CompletionTokensDetails {
     reasoning_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-struct StreamError {
-    #[serde(default)]
-    message: Option<String>,
-    #[allow(dead_code)]
-    #[serde(default)]
-    r#type: Option<String>,
-}
-
 #[allow(dead_code)]
 struct ToolSlot {
     tc_index: usize,
@@ -165,7 +144,9 @@ struct ToolSlot {
     name: String,
 }
 
-pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, UpstreamStreamError> {
+/// Fails with a classified `ProviderError` when Kimi reports an error inside
+/// the stream, so the caller can answer with the upstream's own kind.
+pub fn reduce_upstream_bytes(input: &[u8]) -> anyhow::Result<Vec<ReducerEvent>> {
     let sse_events = parse_sse_events(input);
     let mut out = Vec::new();
     let mut next_block_index = 0usize;
@@ -187,15 +168,11 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
             Err(_) => continue,
         };
 
+        // A throttle or a spent balance that lands after the 200 arrives here.
+        // Reported as a generic failure it was a 502, which Claude Code
+        // retries straight back into the same wall.
         if let Some(ref err) = chunk.error {
-            return Err(UpstreamStreamError {
-                kind: UpstreamErrorKind::Failed,
-                message: err
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "Upstream error".to_string()),
-                retry_after_seconds: None,
-            });
+            return Err(upstream_error::from_stream(err, "Kimi").into());
         }
 
         if chunk.usage.is_some() && chunk.choices.as_ref().map(|c| c.is_empty()).unwrap_or(true) {
@@ -488,11 +465,17 @@ mod tests {
     }
 
     #[test]
-    fn reducer_returns_error_on_upstream_error() {
+    fn reducer_keeps_the_kind_of_an_in_band_error() {
         let upstream = "data: {\"error\":{\"message\":\"rate limit exceeded\"}}\n\n";
-        let result = reduce_upstream_bytes(upstream.as_bytes());
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind, UpstreamErrorKind::Failed);
+        let error = reduce_upstream_bytes(upstream.as_bytes()).unwrap_err();
+        let failure = upstream_error::carried(&error).expect("classified upstream error");
+        assert_eq!(failure.status, http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(failure.should_retry, None);
+
+        let upstream = "data: {\"error\":{\"type\":\"exceeded_current_quota_error\",\"message\":\"Your account balance is insufficient\"}}\n\n";
+        let error = reduce_upstream_bytes(upstream.as_bytes()).unwrap_err();
+        let failure = upstream_error::carried(&error).expect("classified upstream error");
+        assert_eq!(failure.should_retry, Some(false));
     }
 
     #[test]

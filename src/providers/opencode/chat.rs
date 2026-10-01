@@ -19,6 +19,7 @@ use crate::providers::{
     translate_shared::{
         ContentBlock, flatten_system_text, image_source_to_url, normalize_content, read_effort,
     },
+    upstream_error,
 };
 use crate::traffic::{StreamTrafficCapture, TrafficCapture};
 
@@ -438,13 +439,7 @@ struct StreamChunk {
     #[serde(default)]
     usage: Option<Usage>,
     #[serde(default)]
-    error: Option<UpstreamError>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct UpstreamError {
-    #[serde(default)]
-    message: Option<String>,
+    error: Option<Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -559,11 +554,10 @@ impl TranslationState {
         if self.finished {
             anyhow::bail!("OpenCode Go event after terminal completion");
         }
+        // A failure after the 200 keeps its kind: a throttle reported as a
+        // broken stream is retried straight back into the same limit.
         if let Some(error) = chunk.error {
-            anyhow::bail!(
-                "OpenCode Go upstream error: {}",
-                error.message.unwrap_or_else(|| "unknown error".into())
-            );
+            return Err(upstream_error::from_stream(&error, "OpenCode Go").into());
         }
         if let Some(usage) = chunk.usage {
             self.usage = usage;
@@ -1051,10 +1045,10 @@ pub fn accumulate_response(input: &[u8], message_id: &str, model: &str) -> anyho
     translator.state.response()
 }
 
-pub fn stream_error(message: &str) -> Vec<u8> {
+pub fn stream_error(error_type: &str, message: &str) -> Vec<u8> {
     encode_sse_event(
         Some("error"),
-        &json!({"type":"error","error":{"type":"api_error","message":message}}).to_string(),
+        &json!({"type":"error","error":{"type":error_type,"message":message}}).to_string(),
     )
 }
 
@@ -1143,7 +1137,16 @@ where
 
             let output = match self.translator.push(&chunk) {
                 Ok(output) => output,
-                Err(_) => return Some(self.fail_at("translation", "invalid_event")),
+                Err(error) => {
+                    return Some(match upstream_error::carried(&error) {
+                        Some(failure) => self.fail(
+                            "upstream",
+                            "error_event",
+                            stream_error(failure.error_type(), &failure.message),
+                        ),
+                        None => self.fail_at("translation", "invalid_event"),
+                    });
+                }
             };
             if !output.is_empty() {
                 let (input_tokens, output_tokens) = usage_from_anthropic_sse(&output);
@@ -1208,8 +1211,15 @@ where
     }
 
     fn fail_at(&mut self, stage: &str, kind: &str) -> Vec<u8> {
+        self.fail(
+            stage,
+            kind,
+            stream_error("api_error", "OpenCode Go stream is invalid"),
+        )
+    }
+
+    fn fail(&mut self, stage: &str, kind: &str, output: Vec<u8>) -> Vec<u8> {
         self.error_sent = true;
-        let output = stream_error("OpenCode Go stream is invalid");
         if let Some(capture) = self.stream_capture.as_mut() {
             capture.malformed(stage, kind);
         }
@@ -1697,5 +1707,43 @@ mod tests {
         };
         let output = state.next_output().await.expect("error event");
         assert!(String::from_utf8_lossy(&output).contains("OpenCode Go stream is invalid"));
+    }
+
+    #[tokio::test]
+    async fn live_stream_forwards_the_kind_of_an_in_band_error() {
+        let upstream = futures_util::stream::iter([Ok::<Bytes, OpenCodeError>(
+            Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"error\":{\"code\":429,\"message\":\"Rate limit reached for requests\"}}\n\n",
+            ),
+        )]);
+        let mut state = OpenCodeChatStreamState {
+            upstream,
+            translator: LiveStreamTranslator::new("msg_5".into(), "model".into()),
+            capture_decoder: SseDecoder::default(),
+            terminal: false,
+            error_sent: false,
+            monitor: None,
+            req_id: "req".into(),
+            bytes: 0,
+            chunks: 0,
+            stream_capture: None,
+            traffic: None,
+        };
+        let output = String::from_utf8(state.next_output().await.expect("error event")).unwrap();
+        assert!(output.contains("rate_limit_error"), "{output}");
+        assert!(
+            output.contains("Rate limit reached for requests"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn buffered_in_band_context_overflow_is_a_compactable_400() {
+        let upstream =
+            "data: {\"error\":{\"message\":\"maximum context length is 202752 tokens\"}}\n\n";
+        let error = accumulate_response(upstream.as_bytes(), "msg_6", "glm-5.2").unwrap_err();
+        let failure = upstream_error::carried(&error).expect("classified upstream error");
+        assert_eq!(failure.status, http::StatusCode::BAD_REQUEST);
+        assert!(failure.message.starts_with("prompt is too long"));
     }
 }

@@ -11,8 +11,7 @@ pub fn accumulate_response(
     message_id: &str,
     model: &str,
 ) -> Result<Value, anyhow::Error> {
-    let events = reduce_upstream_bytes(input)
-        .map_err(|e| anyhow::anyhow!("upstream error: {} ({:?})", e.message, e.kind))?;
+    let events = reduce_upstream_bytes(input)?;
 
     let mut content: Vec<Value> = Vec::new();
     let mut stop_reason: Option<StopReason> = None;

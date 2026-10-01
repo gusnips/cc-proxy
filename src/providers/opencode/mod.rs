@@ -109,7 +109,13 @@ impl OpenCodeProvider {
                 capture_buffered_upstream(&ctx, &bytes, "sse");
                 match chat::accumulate_response(&bytes, &message_id, requested) {
                     Ok(value) => value,
-                    Err(error) => return invalid_upstream_response(error),
+                    Err(error) => {
+                        return upstream_error::translation_error(
+                            error,
+                            "OpenCode Go response translation failed",
+                        )
+                        .response();
+                    }
                 }
             }
             EndpointKind::Messages => {

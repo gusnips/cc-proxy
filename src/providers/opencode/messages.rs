@@ -9,6 +9,7 @@ use crate::anthropic::schema::MessagesRequest;
 use crate::anthropic::sse::encode_sse_event;
 use crate::monitor::MonitorHandle;
 use crate::providers::grok::translate::stream::SseDecoder;
+use crate::providers::upstream_error;
 use crate::traffic::{StreamTrafficCapture, TrafficCapture};
 
 use super::client::{OpenCodeError, OpenCodeResponse};
@@ -135,7 +136,19 @@ where
                 .or(output_tokens);
             let kind = value.get("type").and_then(serde_json::Value::as_str);
             if event.event.as_deref() == Some("error") || kind == Some("error") {
-                return Some(self.fail_at("upstream", "error_event"));
+                // Forward what failed, not that something did: Claude Code
+                // retries an overload, waits out a throttle, and compacts a
+                // prompt that is too long, but only when the type says so.
+                let failure = upstream_error::from_stream(
+                    value.get("error").unwrap_or(&value),
+                    "OpenCode Go",
+                );
+                return Some(self.fail(
+                    "upstream",
+                    "error_event",
+                    failure.error_type(),
+                    &failure.message,
+                ));
             }
             if event.event.as_deref() == Some("message_stop") || kind == Some("message_stop") {
                 terminal = true;
@@ -161,6 +174,15 @@ where
     }
 
     fn fail_at(&mut self, stage: &str, kind: &str) -> Bytes {
+        self.fail(
+            stage,
+            kind,
+            "api_error",
+            "OpenCode Go Messages stream is invalid",
+        )
+    }
+
+    fn fail(&mut self, stage: &str, kind: &str, error_type: &str, message: &str) -> Bytes {
         self.error_sent = true;
         if let Some(capture) = self.stream_capture.as_mut() {
             capture.malformed(stage, kind);
@@ -179,8 +201,8 @@ where
         let value = serde_json::json!({
             "type": "error",
             "error": {
-                "type": "api_error",
-                "message": "OpenCode Go Messages stream is invalid"
+                "type": error_type,
+                "message": message
             }
         });
         if let Some(capture) = self.stream_capture.as_mut() {
@@ -280,6 +302,30 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&output).contains("OpenCode Go Messages stream is invalid")
         );
+    }
+
+    #[tokio::test]
+    async fn live_stream_forwards_the_upstream_error_type() {
+        let upstream =
+            futures_util::stream::iter([Ok::<Bytes, OpenCodeError>(Bytes::from_static(
+                b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+            ))]);
+        let mut state = MessagesStreamState {
+            upstream,
+            decoder: SseDecoder::default(),
+            terminal: false,
+            error_sent: false,
+            monitor: None,
+            req_id: "req".into(),
+            bytes: 0,
+            chunks: 0,
+            stream_capture: None,
+            traffic: None,
+        };
+        let output = state.next_output().await.expect("error event");
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("overloaded_error"), "{output}");
+        assert!(output.contains("Overloaded"), "{output}");
     }
 
     #[tokio::test]

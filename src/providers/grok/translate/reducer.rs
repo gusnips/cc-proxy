@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::stream::SseDecoder;
+use crate::providers::upstream_error;
 
 const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
 const MAX_INCOMPLETE_TOOL_CALLS: usize = 128;
@@ -363,7 +364,17 @@ impl Reducer {
                 });
                 Ok(out)
             }
-            "error" | "response.failed" => anyhow::bail!("upstream Grok stream failed"),
+            "error" | "response.failed" => {
+                // Keep what failed. Reported as a broken stream, a throttle or
+                // a prompt that is too long lost the kind that says whether to
+                // wait, retry or compact.
+                let error = value
+                    .get("error")
+                    .or_else(|| value.pointer("/response/error"))
+                    .filter(|error| !error.is_null())
+                    .unwrap_or(&value);
+                Err(upstream_error::from_stream(error, "Grok").into())
+            }
             _ => anyhow::bail!("unsupported Grok stream event: {typ}"),
         }
     }
@@ -434,6 +445,14 @@ pub fn reduce_upstream_bytes(bytes: &[u8]) -> anyhow::Result<Vec<ReducerEvent>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grok_reducer_keeps_the_kind_of_an_in_band_failure() {
+        let input = b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Too many requests\"}}}\n\n";
+        let error = reduce_upstream_bytes(input).unwrap_err();
+        let failure = upstream_error::carried(&error).expect("classified upstream error");
+        assert_eq!(failure.status, http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
     #[test]
     fn grok_reducer_handles_text_tool_and_completion() {
         let input = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\"}}\n\ndata: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call_1\",\"delta\":\"{}\"}\n\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n";

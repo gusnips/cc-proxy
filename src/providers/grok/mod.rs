@@ -34,7 +34,7 @@ use self::translate::{
     accumulate::accumulate_response_with_traffic,
     model_allowlist::{assert_routable_model, resolve_model},
     request::translate_request,
-    stream::{SseDecoder, StreamTranslator, stream_error},
+    stream::{SseDecoder, StreamTranslator, stream_error, stream_error_value},
 };
 
 pub struct GrokProvider {
@@ -149,13 +149,16 @@ impl Provider for GrokProvider {
                     }
                     (StatusCode::OK, Json(value)).into_response()
                 }
-                Err(_) => {
+                Err(error) => {
                     write_error(ctx.traffic.as_deref(), "accumulate", "invalid_response");
-                    json_error(
-                        StatusCode::BAD_GATEWAY,
-                        "api_error",
-                        "Grok response is invalid",
-                    )
+                    match upstream_error::carried(&error) {
+                        Some(failure) => failure.clone().response(),
+                        None => json_error(
+                            StatusCode::BAD_GATEWAY,
+                            "api_error",
+                            "Grok response is invalid",
+                        ),
+                    }
                 }
             }
         }
@@ -373,7 +376,17 @@ where
                 }
                 let reduced = match self.reducer.push(value) {
                     Ok(events) => events,
-                    Err(_) => return Some(self.fail_at("reducer", "invalid_event")),
+                    Err(error) => {
+                        return Some(match upstream_error::carried(&error) {
+                            Some(failure) => self.fail(
+                                "upstream",
+                                "error_event",
+                                failure.error_type(),
+                                &failure.message,
+                            ),
+                            None => self.fail_at("reducer", "invalid_event"),
+                        });
+                    }
                 };
                 let usage = reduced.iter().find_map(|event| match event {
                     translate::reducer::ReducerEvent::Finish {
@@ -407,6 +420,10 @@ where
     }
 
     fn fail_at(&mut self, stage: &str, kind: &str) -> Vec<u8> {
+        self.fail(stage, kind, "api_error", "Grok stream is invalid")
+    }
+
+    fn fail(&mut self, stage: &str, kind: &str, error_type: &str, message: &str) -> Vec<u8> {
         self.error_sent = true;
         let mut fields = serde_json::Map::new();
         fields.insert("reqId".into(), serde_json::json!(self.req_id));
@@ -417,13 +434,13 @@ where
         crate::logging::create_logger("grok").warn("grok_stream_failed", Some(fields));
         if let Some(capture) = self.stream_capture.as_mut() {
             capture.malformed(stage, kind);
-            capture.downstream_event("error", serde_json::json!({"type":"error","error":{"type":"api_error","message":"Grok stream is invalid"}}));
+            capture.downstream_event("error", stream_error_value(error_type, message));
         }
         if let Some(traffic) = self.traffic.as_ref() {
             traffic.write_json("060-grok-stream-error", &serde_json::json!({"stage":stage,"kind":kind,"bytes":self.bytes,"chunks":self.chunks}));
         }
         self.finish_capture(false);
-        stream_error()
+        stream_error(error_type, message)
     }
 
     fn capture_downstream(&mut self, bytes: &[u8]) {
@@ -916,7 +933,7 @@ mod tests {
             (b"data: {bad json}\n\n".as_slice(), "json"),
             (
                 b"data: {\"type\":\"response.failed\",\"response\":{}}\n\n".as_slice(),
-                "reducer",
+                "upstream",
             ),
         ] {
             let temp = TempDir::new().unwrap();

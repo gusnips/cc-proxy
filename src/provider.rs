@@ -129,18 +129,6 @@ impl ProviderError {
         }
         response
     }
-
-    /// The Anthropic `error` event, for a stream that already answered 200.
-    pub fn sse_event(&self) -> Vec<u8> {
-        crate::anthropic::sse::encode_sse_event(
-            Some("error"),
-            &serde_json::json!({
-                "type": "error",
-                "error": {"type": self.error_type(), "message": self.message},
-            })
-            .to_string(),
-        )
-    }
 }
 
 impl std::fmt::Display for ProviderError {

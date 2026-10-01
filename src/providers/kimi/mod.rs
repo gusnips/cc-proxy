@@ -127,11 +127,8 @@ impl Provider for KimiProvider {
             let sse_bytes = match translate_stream_bytes(&upstream.body, &message_id, model) {
                 Ok(b) => b,
                 Err(e) => {
-                    return json_error(
-                        StatusCode::BAD_GATEWAY,
-                        "api_error",
-                        format!("Stream translation error: {e}"),
-                    );
+                    return upstream_error::translation_error(e, "Stream translation error")
+                        .response();
                 }
             };
             if let Some(monitor) = ctx.monitor.as_ref() {
@@ -164,11 +161,7 @@ impl Provider for KimiProvider {
                     }
                     (StatusCode::OK, Json(json)).into_response()
                 }
-                Err(e) => json_error(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    format!("Accumulation error: {e}"),
-                ),
+                Err(e) => upstream_error::translation_error(e, "Accumulation error").response(),
             }
         }
     }
@@ -259,11 +252,7 @@ impl Provider for KimiProvider {
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
         let sse =
             translate_stream_bytes(&upstream.body, &message_id, &requested).map_err(|error| {
-                ProviderError::new(
-                    StatusCode::BAD_GATEWAY,
-                    ProviderErrorKind::Api,
-                    format!("Stream translation error: {error}"),
-                )
+                upstream_error::translation_error(error, "Stream translation error")
             })?;
         if let Some(traffic) = ctx.traffic.as_ref() {
             traffic.write_bytes("050-anthropic-intermediate.sse", &sse);
