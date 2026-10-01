@@ -375,7 +375,20 @@ impl Reducer {
                     .unwrap_or(&value);
                 Err(upstream_error::from_stream(error, "Grok").into())
             }
-            _ => anyhow::bail!("unsupported Grok stream event: {typ}"),
+            // xAI adds Responses event types without notice (the doom-loop
+            // check above is one). Failing on an unknown one broke every turn
+            // that carried it, though it holds nothing we translate. It is
+            // logged and skipped; error and response.failed still fail above.
+            _ => {
+                crate::logging::create_logger("grok").debug(
+                    "grok_stream_event_ignored",
+                    Some(serde_json::Map::from_iter([(
+                        "type".to_string(),
+                        serde_json::json!(typ),
+                    )])),
+                );
+                Ok(vec![])
+            }
         }
     }
     fn delta(&mut self, kind: &str, delta: &str) -> anyhow::Result<Vec<ReducerEvent>> {
@@ -445,6 +458,17 @@ pub fn reduce_upstream_bytes(bytes: &[u8]) -> anyhow::Result<Vec<ReducerEvent>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grok_reducer_skips_an_event_it_does_not_know() {
+        let input = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\ndata: {\"type\":\"response.brand_new_event\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n";
+        let events = reduce_upstream_bytes(input).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ReducerEvent::Finish { .. }))
+        );
+    }
+
     #[test]
     fn grok_reducer_keeps_the_kind_of_an_in_band_failure() {
         let input = b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Too many requests\"}}}\n\n";
