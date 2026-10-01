@@ -1,0 +1,12 @@
+data: {"id":"chatcmpl-68dd2a03","object":"chat.completion.chunk","created":1790000000,"model":"kimi-for-coding","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-68dd2a03","object":"chat.completion.chunk","created":1790000000,"model":"kimi-for-coding","choices":[{"index":0,"delta":{"reasoning_content":"The user wants"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-68dd2a03","object":"chat.completion.chunk","created":1790000000,"model":"kimi-for-coding","choices":[{"index":0,"delta":{"reasoning_content":" notes.txt."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-68dd2a03","object":"chat.completion.chunk","created":1790000000,"model":"kimi-for-coding","choices":[{"index":0,"delta":{"content":"It says hello."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-68dd2a03","object":"chat.completion.chunk","created":1790000000,"model":"kimi-for-coding","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1200,"completion_tokens":30,"total_tokens":1230}}
+
+data: [DONE]
+

@@ -1,0 +1,6 @@
+data: {"id":"gen-1790000000-oc05","object":"chat.completion.chunk","created":1790000000,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"gen-1790000000-oc05","object":"chat.completion.chunk","created":1790000000,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"It says"},"finish_reason":null}]}
+
+data: {"id":"gen-1790000000-oc05","object":"chat.completion.chunk","created":1790000000,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":" hello."},"finish_reason":null}]}
+

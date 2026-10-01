@@ -1,0 +1,14 @@
+data: {"id":"gen-1790000000-oc03","object":"chat.completion.chunk","created":1790000000,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"gen-1790000000-oc03","object":"chat.completion.chunk","created":1790000000,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"reasoning_content":"The user wants"},"finish_reason":null}]}
+
+data: {"id":"gen-1790000000-oc03","object":"chat.completion.chunk","created":1790000000,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"reasoning_content":" notes.txt."},"finish_reason":null}]}
+
+data: {"id":"gen-1790000000-oc03","object":"chat.completion.chunk","created":1790000000,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"It says hello."},"finish_reason":null}]}
+
+data: {"id":"gen-1790000000-oc03","object":"chat.completion.chunk","created":1790000000,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1200,"completion_tokens":30,"total_tokens":1230}}
+
+data: [DONE]
+
+data: {"choices":[],"cost":"0.00042"}
+
