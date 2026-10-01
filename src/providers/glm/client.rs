@@ -2,16 +2,18 @@ use std::time::Duration;
 
 use crate::config;
 
+/// How long one read may wait for the next bytes. It bounds silence, not the
+/// answer: a stream that keeps sending runs as long as it needs, and one that
+/// goes quiet this long fails. The 300s limit on the whole request it replaces
+/// cut every longer answer off partway through. A reply that is not streamed
+/// sends nothing until it is done, so it still gets 300s in total.
+const READ_TIMEOUT: Duration = Duration::from_secs(300);
+
 #[derive(Debug)]
 pub struct GlmError {
     pub status: u16,
     pub detail: Option<String>,
     pub retry_after: Option<String>,
-}
-
-pub struct GlmResponse {
-    pub body: Vec<u8>,
-    pub status: u16,
 }
 
 /// Async HTTP client for the z.ai Anthropic-compatible endpoint.
@@ -26,12 +28,19 @@ pub struct GlmHttpClient {
 impl GlmHttpClient {
     pub fn new() -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(READ_TIMEOUT)
             .build()?;
         Ok(Self { client })
     }
 
-    pub async fn post_messages(&self, api_key: &str, body: &[u8]) -> Result<GlmResponse, GlmError> {
+    /// Sends the request and returns the reply once its status is a success.
+    /// The body is left unread, so a stream reaches Claude Code as it arrives.
+    pub async fn post_messages(
+        &self,
+        api_key: &str,
+        body: &[u8],
+    ) -> Result<reqwest::Response, GlmError> {
         let base = config::glm_base_url();
         let url = format!("{}/v1/messages", base.trim_end_matches('/'));
 
@@ -85,10 +94,6 @@ impl GlmHttpClient {
             });
         }
 
-        let body_bytes = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
-        Ok(GlmResponse {
-            body: body_bytes,
-            status,
-        })
+        Ok(resp)
     }
 }

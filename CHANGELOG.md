@@ -28,6 +28,12 @@ description: Release notes for cc-proxy.
 - A Kimi stream that is cut off, has a frame that is not JSON, or has a
   tool call without an id or name now fails with a 502. It used to come
   back as a finished answer.
+- GLM answers now stream as GLM writes them. They used to arrive all at
+  once, after the whole answer was done.
+- A GLM answer that broke off partway used to come back empty, as if it had
+  finished. Every answer that took more than 5 minutes did this. It now ends
+  with an error, and so does a GLM stream that closes before its last event.
+  The 5-minute limit now counts only time in which GLM sends nothing.
 - Grok no longer fails a turn on a stream event type it does not know.
 - On the OpenAI routes, `prompt_tokens` now counts cache writes, Kimi
   reports its reasoning tokens, and a refusal reads `content_filter`.

@@ -9,8 +9,8 @@ use http::StatusCode;
 use crate::anthropic::error::json_error;
 use crate::anthropic::schema::{CountTokensResponse, MessagesRequest};
 use crate::auth::AuthStorage;
-use crate::monitor::usage_from_anthropic_sse;
 use crate::provider::{CliHandlers, Provider, RequestContext};
+use crate::providers::opencode::messages::stream_body;
 use crate::providers::upstream_error;
 use crate::registry::{GLM_MODELS, normalize_incoming_model};
 
@@ -99,25 +99,22 @@ impl Provider for GlmProvider {
         };
 
         if want_stream {
-            let sse_bytes = upstream.body;
-            if let Some(monitor) = ctx.monitor.as_ref() {
-                let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
-                monitor.stream_progress(
-                    &ctx.req_id,
-                    sse_bytes.len() as u64,
-                    count_sse_events(&sse_bytes),
-                    input_tokens,
-                    output_tokens,
-                );
-            }
-            let headers = [
-                (http::header::CONTENT_TYPE, "text/event-stream"),
-                (http::header::CACHE_CONTROL, "no-cache"),
-                (http::header::CONNECTION, "keep-alive"),
-            ];
-            (headers, sse_bytes).into_response()
+            stream_response(upstream, &ctx)
         } else {
-            let json: serde_json::Value = match serde_json::from_slice(&upstream.body) {
+            // A read that fails partway is a failed answer, not an empty one.
+            let body = match upstream.bytes().await {
+                Ok(body) => body,
+                Err(e) => {
+                    return map_glm_error(&GlmError {
+                        status: 0,
+                        detail: Some(format!(
+                            "GLM stopped before the answer finished ({e}). Try again."
+                        )),
+                        retry_after: None,
+                    });
+                }
+            };
+            let json: serde_json::Value = match serde_json::from_slice(&body) {
                 Ok(v) => v,
                 Err(e) => {
                     return json_error(
@@ -157,8 +154,23 @@ impl Provider for GlmProvider {
     }
 }
 
-fn count_sse_events(bytes: &[u8]) -> u64 {
-    String::from_utf8_lossy(bytes).matches("event:").count() as u64
+/// Relays the SSE as it arrives. It used to be read whole first: Claude Code
+/// saw nothing until the answer was done, and a read that failed partway
+/// reached it as an empty 200.
+fn stream_response(upstream: reqwest::Response, ctx: &RequestContext) -> Response {
+    let body = stream_body(
+        upstream.bytes_stream(),
+        "GLM",
+        ctx.monitor.clone(),
+        ctx.req_id.clone(),
+        ctx.traffic.clone(),
+    );
+    let headers = [
+        (http::header::CONTENT_TYPE, "text/event-stream"),
+        (http::header::CACHE_CONTROL, "no-cache"),
+        (http::header::CONNECTION, "keep-alive"),
+    ];
+    (headers, body).into_response()
 }
 
 fn map_glm_error(err: &GlmError) -> Response {
@@ -231,6 +243,103 @@ pub(crate) static GLM_CLI: GlmCli = GlmCli;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use futures_util::StreamExt;
+
+    use crate::monitor::{EndpointKind, MonitorHandle};
+
+    // A reply in the Anthropic Messages shape z.ai streams.
+    const REPLY: &str = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[],\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":48}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+
+    /// A z.ai reply whose body arrives as these reads.
+    fn upstream(
+        reads: impl futures_util::Stream<Item = std::io::Result<&'static str>> + Send + 'static,
+    ) -> reqwest::Response {
+        let body = reqwest::Body::wrap_stream(reads.map(|read| read.map(Bytes::from)));
+        reqwest::Response::from(http::Response::new(body))
+    }
+
+    fn ctx(monitor: Option<MonitorHandle>) -> RequestContext {
+        RequestContext {
+            req_id: "req".into(),
+            session_id: None,
+            session_seq: None,
+            provider: "glm".into(),
+            traffic: None,
+            monitor,
+        }
+    }
+
+    async fn relay(reads: Vec<std::io::Result<&'static str>>, ctx: &RequestContext) -> String {
+        let response = stream_response(upstream(futures_util::stream::iter(reads)), ctx);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_first_read_reaches_claude_code_before_the_reply_is_done() {
+        let first = &REPLY[..REPLY.find("event: content_block_stop").unwrap()];
+        let reads = futures_util::stream::iter([Ok(first)]).chain(futures_util::stream::pending());
+        // A buffered relay would wait here for a body that never ends.
+        let response = stream_response(upstream(reads), &ctx(None));
+        assert_eq!(
+            response.headers()[http::header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        let mut body = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+            .await
+            .expect("the first read was held back")
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunk, first.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn a_whole_reply_passes_through_unchanged_with_its_usage() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("req", None, None, EndpointKind::Messages);
+        // Split mid-frame, the way a socket hands it over.
+        let reads = vec![Ok(&REPLY[..150]), Ok(&REPLY[150..])];
+        assert_eq!(relay(reads, &ctx(Some(monitor.clone()))).await, REPLY);
+        let state = monitor.snapshot();
+        assert_eq!(state.active[0].input_tokens, Some(12));
+        assert_eq!(state.active[0].output_tokens, Some(48));
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_off_partway_ends_in_an_error_not_a_finished_answer() {
+        let sent = &REPLY[..REPLY.find("event: message_delta").unwrap()];
+        for reads in [
+            // The read failed: the connection reset, or the read timeout fired.
+            vec![Ok(sent), Err(std::io::Error::other("connection reset"))],
+            // The body closed cleanly, but before message_stop.
+            vec![Ok(sent)],
+        ] {
+            let body = relay(reads, &ctx(None)).await;
+            let error = body.strip_prefix(sent).expect("what arrived is forwarded");
+            assert!(error.starts_with("event: error\n"), "{error}");
+            assert!(
+                error.contains("GLM stopped before the answer finished"),
+                "{error}"
+            );
+        }
+    }
 
     #[test]
     fn supported_models_lists_known_glm_models() {
