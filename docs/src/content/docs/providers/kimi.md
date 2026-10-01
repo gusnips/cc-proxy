@@ -16,6 +16,8 @@ cc-proxy kimi auth status
 
 The login prints a verification URL and user code, then polls until authorization completes. Access tokens have a short lifetime and are refreshed before expiry. A persistent device ID is created with the Kimi credential because it is bound into the issued token.
 
+To see how much of your 5-hour and weekly quotas you have used, and when they reset, run `cc-proxy usage kimi`. See [`usage`](/reference/command-reference/#usage).
+
 ## Model selection
 
 The current model is Kimi K3: use `k3` (or `kimi-k3`), sent upstream as the `k3` wire model. The older `kimi-for-coding` ID still works as a legacy alias, alongside `kimi-k2.6` and `k2.6`. Use `[1m]` as a Claude Code compaction hint only when the actual upstream context and your chosen threshold support it.

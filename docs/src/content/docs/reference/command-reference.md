@@ -136,16 +136,53 @@ A missing credential makes `auth status` exit with status 1. Other provider comm
 
 Logout removes the local proxy-owned credential. It does not call the provider to revoke a refresh token.
 
-## OpenCode Go usage
+## `usage`
 
 ```sh
-cc-proxy opencode usage [--json]
+cc-proxy usage [codex|kimi|opencode] [--json]
 ```
 
-Fetches the account's rolling five-hour, weekly, and monthly usage directly
-from OpenCode Go. The default output is human-readable; `--json` prints the
-upstream response for scripts. The command uses the same API key and base URL
-as OpenCode model requests.
+Shows how much of each plan you have used and when each limit resets, asked
+straight from the provider with the sign-in the proxy already holds:
+
+```text
+Codex (plus)
+  5-hour window: 45% used, resets in 2h 10m (17:00)
+  Weekly: 7% used, resets in 4d 9h (Mon 00:00)
+```
+
+| Provider | Asks | Shows |
+| --- | --- | --- |
+| `codex` | `GET https://chatgpt.com/backend-api/wham/usage` | 5-hour and weekly windows, plan |
+| `kimi` | `GET https://api.kimi.com/coding/v1/usages` | 5-hour and weekly quotas, plan |
+| `opencode` | `GET https://opencode.ai/zen/go/v1/usage` | Rolling 5-hour, weekly and monthly windows |
+
+Each address follows the provider's base URL (`codex.baseUrl`, `kimi.baseUrl`,
+`opencode.baseUrl`). No provider documents these endpoints, so a Codex or Kimi
+window that cc-proxy can't read shows as `not reported`.
+
+With no provider named, every provider is shown. Each one you haven't signed
+in to gets one line with its login command. Name a provider to see only that
+one. If it isn't signed in, that line goes to stderr and the command exits
+with status 1. A failed lookup exits with status 2.
+
+`--json` prints one object with a key per provider. Codex and Kimi share one
+shape:
+
+```json
+{
+  "codex": {
+    "plan": "plus",
+    "five_hour": { "used_percent": 45.0, "resets_at_ms": 1786294800000 },
+    "weekly": { "used_percent": 7.0, "resets_at_ms": 1786752000000 }
+  }
+}
+```
+
+`resets_at_ms` is a Unix time in milliseconds. A field the provider didn't
+send is left out. `opencode` holds OpenCode Go's own reply, unchanged.
+
+## OpenCode Go API key
 
 Store the key once without echoing it:
 

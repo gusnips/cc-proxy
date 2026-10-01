@@ -19,6 +19,7 @@ pub mod session;
 pub mod traffic;
 pub mod tui;
 pub mod update;
+pub mod usage;
 
 pub use crate::anthropic::error::{ErrorDetail, ErrorEnvelope, json_error};
 pub use crate::anthropic::schema::MessagesRequest;

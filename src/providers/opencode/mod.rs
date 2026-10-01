@@ -504,7 +504,7 @@ impl CliHandlers for OpenCodeCli {
                 crate::config::opencode_api_key_source().unwrap_or("env")
             );
         }
-        println!("Verify it with `cc-proxy opencode usage`.");
+        println!("Check it with `cc-proxy usage opencode`.");
         Ok(())
     }
 

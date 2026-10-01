@@ -110,11 +110,19 @@ enum Commands {
         #[command(subcommand)]
         command: ProviderGroup,
     },
-    /// Inspect OpenCode Go account state
+    /// Manage the OpenCode Go API key
     #[command(name = "opencode")]
     OpenCode {
         #[command(subcommand)]
-        command: OpenCodeGroup,
+        command: ProviderGroup,
+    },
+    /// Show how much of your Codex, Kimi and OpenCode Go plans you have used
+    Usage {
+        /// Show only this provider; leave it out to see all of them
+        provider: Option<cc_proxy::usage::UsageProvider>,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -144,21 +152,6 @@ enum ConfigCommand {
     List,
     /// Open config.json in $VISUAL or $EDITOR
     Edit,
-}
-
-#[derive(Debug, Subcommand)]
-enum OpenCodeGroup {
-    /// Manage the OpenCode Go API key
-    Auth {
-        #[command(subcommand)]
-        command: cc_proxy::provider::AuthCommand,
-    },
-    /// Show rolling, weekly, and monthly usage limits
-    Usage {
-        /// Print the upstream response as JSON
-        #[arg(long)]
-        json: bool,
-    },
 }
 
 fn main() -> Result<()> {
@@ -310,11 +303,10 @@ fn main() -> Result<()> {
         Commands::Cursor { command } => run_provider_cli("cursor", command),
         Commands::Grok { command } => run_provider_cli("grok", command),
         Commands::Glm { command } => run_provider_cli("glm", command),
-        Commands::OpenCode { command } => match command {
-            OpenCodeGroup::Auth { command } => {
-                run_provider_cli("opencode", ProviderGroup::Auth { command })
-            }
-            OpenCodeGroup::Usage { json } => run_opencode_usage(json),
+        Commands::OpenCode { command } => run_provider_cli("opencode", command),
+        Commands::Usage { provider, json } => match cc_proxy::usage::run(provider, json)? {
+            0 => Ok(()),
+            code => std::process::exit(code),
         },
     }
 }
@@ -550,28 +542,6 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
     }
 }
 
-fn run_opencode_usage(json: bool) -> Result<()> {
-    let client = cc_proxy::providers::opencode::client::OpenCodeClient::new(
-        config::opencode_base_url(),
-        config::opencode_api_key(),
-    )?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let usage = runtime
-        .block_on(client.get_usage())
-        .map_err(|error| anyhow::anyhow!(error.message))?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&usage)?);
-    } else {
-        println!(
-            "{}",
-            cc_proxy::providers::opencode::usage::format_text(&usage)
-        );
-    }
-    Ok(())
-}
-
 fn print_models(registry: &Registry, full: bool) {
     let grouped = registry.grouped_models();
     for provider in ["codex", "kimi", "grok", "opencode", "cursor", "glm"] {
@@ -705,15 +675,25 @@ mod tests {
     }
 
     #[test]
-    fn opencode_usage_command_parses_json_flag() {
-        let cli = Cli::try_parse_from(["cc-proxy", "opencode", "usage", "--json"]).unwrap();
-
+    fn usage_command_parses_provider_and_json_flag() {
+        let cli = Cli::try_parse_from(["cc-proxy", "usage", "opencode", "--json"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Commands::OpenCode {
-                command: OpenCodeGroup::Usage { json: true }
+            Some(Commands::Usage {
+                provider: Some(cc_proxy::usage::UsageProvider::OpenCode),
+                json: true
             })
         ));
+
+        let cli = Cli::try_parse_from(["cc-proxy", "usage"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Usage {
+                provider: None,
+                json: false
+            })
+        ));
+        assert!(Cli::try_parse_from(["cc-proxy", "opencode", "usage"]).is_err());
     }
 
     #[test]

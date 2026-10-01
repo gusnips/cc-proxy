@@ -16,6 +16,12 @@ description: Release notes for cc-proxy.
   `cc-proxy claude`. Their variable lists use `ANTHROPIC_DEFAULT_HAIKU_MODEL`,
   which replaced `ANTHROPIC_SMALL_FAST_MODEL` in Claude Code, and add
   `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1`.
+- `cc-proxy usage` shows how much of your Codex, Kimi and OpenCode Go plans
+  you have used, and when each limit resets. Name one provider to see only
+  that one: `cc-proxy usage kimi`. Add `--json` for scripts.
+- `cc-proxy opencode usage` moved to `cc-proxy usage opencode`. The old
+  command is gone. With `--json`, OpenCode Go's reply now sits under an
+  `opencode` key.
 
 ## v0.1.48 (2026-10-01)
 

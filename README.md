@@ -72,9 +72,12 @@ Sign in to the other providers the same way (`kimi`, `grok`, `cursor`,
 ```sh
 cc-proxy kimi auth login
 cc-proxy kimi auth status
-cc-proxy opencode usage
+cc-proxy usage
 cc-proxy models
 ```
+
+`cc-proxy usage` shows how much of your Codex, Kimi and OpenCode Go plans
+you have used, and when each limit resets.
 
 Tune the proxy without editing files by hand, and keep it current:
 

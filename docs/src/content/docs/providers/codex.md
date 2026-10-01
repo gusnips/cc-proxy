@@ -24,6 +24,8 @@ cc-proxy codex auth status
 
 The proxy owns its tokens and does not read native Codex CLI credentials. It refreshes expiring access tokens with a single-flight guard. See [Files and storage](/reference/files-and-storage/) for credential locations.
 
+To see how much of your 5-hour and weekly limits you have used, and when they reset, run `cc-proxy usage codex`. See [`usage`](/reference/command-reference/#usage).
+
 ## Models and service tiers
 
 Use `cc-proxy models` as the current catalog. Model access depends on your ChatGPT account. A model rejected by the subscription produces the upstream error verbatim.
