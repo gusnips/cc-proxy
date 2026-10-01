@@ -35,8 +35,9 @@ description: Release notes for cc-proxy.
   with an error, and so does a GLM stream that closes before its last event.
   The 5-minute limit now counts only time in which GLM sends nothing.
 - Grok no longer fails a turn on a stream event type it does not know.
-- On the OpenAI routes, `prompt_tokens` now counts cache writes, Kimi
-  reports its reasoning tokens, and a refusal reads `content_filter`.
+- On the OpenAI routes, `prompt_tokens` now counts cache writes, Kimi and
+  OpenCode Go's chat models report their reasoning tokens, and a refusal
+  reads `content_filter`.
 - Cursor now reads the result of each tool call. Before, the reply after a
   tool call was rebuilt from text Cursor wrote before it had the result, so
   the answer ignored the result, and a second tool call in the same turn was
@@ -47,6 +48,16 @@ description: Release notes for cc-proxy.
   answer ends only when Cursor says it is done. If Cursor sends nothing for 60
   seconds, or closes the connection before it is done, the request fails
   with an error that Claude Code retries.
+- Kimi replies now stream as they are written instead of arriving all at
+  once. A reply that takes longer than 120 seconds no longer fails; Kimi
+  now fails only after 120 seconds with no data at all.
+- When Kimi rejects the login token, the proxy now refreshes it and tries
+  once more. It used to return the 401.
+- Kimi tool call ids are now unique to each reply, as OpenCode Go's already
+  are. A Kimi reply stopped by a content filter now fails instead of
+  ending as a normal answer.
+- A turn that calls a tool now ends with `tool_use` on OpenCode Go's chat
+  models even when the model reports `stop`, as Kimi already did.
 
 ## v0.1.47 (2026-09-30)
 
