@@ -132,8 +132,8 @@ next request, while bind address, port, alias provider, and environment need
 `restart`. `reload` exits 1 when no service is running (after validating the
 config) and validates only on platforms without SIGHUP.
 
-When something answers on the configured port without a pidfile — a
-foreground or dashboard-attached proxy started separately, for example —
+When something answers on the configured port without a pidfile (a
+foreground or dashboard-attached proxy started separately, for example),
 `status` says so explicitly, and `stop`/`restart` refuse to touch a process
 they did not start.
 

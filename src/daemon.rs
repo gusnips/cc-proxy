@@ -355,8 +355,8 @@ pub fn serve_background(port: Option<u16>) -> anyhow::Result<ServeOutcome> {
     let port = port.unwrap_or_else(config::port);
     if probe_port_health(port) {
         anyhow::bail!(
-            "port {port} already answers health checks but has no pidfile — \
-             another proxy instance (or something else) owns it. Stop it first, \
+            "port {port} already answers health checks but has no pidfile. \
+             Another proxy instance (or something else) owns it. Stop it first, \
              or pick another port with `cc-proxy start --port <PORT>`."
         );
     }

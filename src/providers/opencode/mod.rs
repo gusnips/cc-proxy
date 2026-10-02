@@ -491,7 +491,7 @@ impl CliHandlers for OpenCodeCli {
 
     fn device(&self) -> anyhow::Result<()> {
         anyhow::bail!(
-            "opencode: API-key provider — set CCP_OPENCODE_API_KEY / OPENCODE_API_KEY or run `cc-proxy opencode auth login`"
+            "opencode: API-key provider: set CCP_OPENCODE_API_KEY / OPENCODE_API_KEY or run `cc-proxy opencode auth login`"
         )
     }
 

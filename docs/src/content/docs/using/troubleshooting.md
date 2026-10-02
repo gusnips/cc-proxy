@@ -14,8 +14,8 @@ curl http://127.0.0.1:18765/healthz
 A healthy listener returns `{"ok":true}`. Confirm `ANTHROPIC_BASE_URL` uses the same address and port. `cc-proxy start --port 11435` and `PORT=11435` change the listener port. `--port` wins for that command.
 
 `cc-proxy status` reports the background service state. If it claims a proxy
-answers without a pidfile, that process was not started by `cc-proxy start` —
-stop it directly before starting the service on the same port.
+answers without a pidfile, that process was not started by `cc-proxy start`.
+Stop it directly before starting the service on the same port.
 
 ## Authentication error
 
