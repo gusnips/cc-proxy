@@ -3,7 +3,7 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
-## Unreleased
+## v0.1.52 (2026-10-02)
 
 - `cc-proxy start` is now the name of the command that starts the proxy.
   `cc-proxy serve` still works and does the same thing, so existing service
@@ -322,7 +322,7 @@ description: Release notes for cc-proxy.
   [#105](https://github.com/raine/claude-code-proxy/pull/105))
 - Nix builds avoid dependency download failures caused by crates.io API rate limits.
 
-## Unreleased
+## v0.1.52 (2026-10-02)
 
 - Codex encrypted reasoning continuation signatures can now be disabled with
   `codex.reasoningSignatures` / `CCP_CODEX_REASONING_SIGNATURES`, reducing
