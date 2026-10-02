@@ -3,7 +3,7 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
-## Unreleased
+## v0.1.50 (2026-10-01)
 
 - Commands look better in a terminal. `serve`, `stop`, `restart`, `reload`
   and `status` print a small card with the cc-proxy face, which shows whether
