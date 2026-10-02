@@ -14,6 +14,7 @@ The model ID in each request selects its provider. One proxy listener can serve 
 | `grok-composer-2.5-fast`, `grok-4.5`, `grok-4.6`, `grok-4.7`; unlisted `grok-*` forward raw | Grok |
 | Non-conflicting OpenCode Go IDs and **every** `opencode-go/<model-id>`, registered or not | OpenCode Go |
 | `glm-5.3`, `glm-5.3-flash`, `glm-5.3-highspeed`, `glm-5.2`; unlisted `glm-*` forward raw | GLM |
+| Every `copilot/<id>` | GitHub Copilot |
 | `cursor`, Cursor legacy aliases, `cursor:<id>`, `cursor-plan:<id>`, `cursor-ask:<id>` | Cursor Agent |
 | Anthropic-style aliases such as `haiku`, `sonnet`, `opus`, `fable`, and registered `claude-*` aliases | The `aliasProvider`, Codex by default |
 

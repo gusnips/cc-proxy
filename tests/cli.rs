@@ -65,6 +65,7 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
         "List supported provider models",
         "Manage Codex authentication",
         "Manage Kimi authentication",
+        "Manage GitHub Copilot authentication",
         "Manage Cursor authentication",
         "Manage Grok authentication",
         "Manage GLM authentication",

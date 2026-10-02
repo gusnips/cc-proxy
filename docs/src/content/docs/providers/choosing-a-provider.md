@@ -12,6 +12,7 @@ One `serve` process supports every provider. Choose based on the account you hav
 | [Grok](/providers/grok/) | grok.com | Responses API | `grok-composer-2.5-fast`, `grok-4.5`, `grok-4.6`, `grok-4.7`; unlisted `grok-*` forward raw | Function tools, reasoning, web search, X search, citations |
 | [OpenCode Go](/providers/opencode-go/) | OpenCode Go subscription | OpenAI-compatible Chat Completions, OpenAI Responses, or Anthropic-compatible Messages | Non-conflicting bare IDs and `opencode-go/<model-id>` forms | Curated models tested and benchmarked for coding-agent use |
 | [GLM](/providers/glm/) | z.ai API key | Anthropic Messages, native | `glm-5.3`, `glm-5.3-flash`; unlisted `glm-*` forward raw | No translation; requests forward verbatim |
+| [GitHub Copilot](/providers/copilot/) | GitHub account with a Copilot plan | OpenAI-style chat completions | `copilot/<id>`; `cc-proxy models` lists yours | Function tools, image input, premium requests billed per turn |
 | [Cursor Agent](/providers/cursor-agent/) | Cursor account | HTTP/2 Connect stream | Cursor modes and `cursor:<model-id>` prefixes | Dynamic model catalog, effort variants, images, plan and ask modes, session continuation |
 
 ## Practical guidance
@@ -20,6 +21,7 @@ One `serve` process supports every provider. Choose based on the account you hav
 - Choose **Kimi** for the Kimi Code model and multimodal coding input.
 - Choose **Grok** for Grok models and hosted web or X search.
 - Choose **OpenCode Go** when you have a Go subscription and want its documented model catalog in Claude Code.
+- Choose **GitHub Copilot** when you already pay for a Copilot plan and want its models in Claude Code.
 - Choose **Cursor Agent** when you want Cursor's model catalog and agent modes. It depends on an installed Cursor Agent bundle for protobuf schemas.
 
 ## Shared behavior

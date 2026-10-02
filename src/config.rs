@@ -326,6 +326,15 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     if env.contains_key("CCP_KIMI_BASE_URL") {
         out.push("kimi.baseUrl (env)".to_string());
     }
+    for (key, name) in [
+        ("CCP_COPILOT_BASE_URL", "copilot.baseUrl (env)"),
+        ("CCP_COPILOT_GITHUB_URL", "copilot.githubUrl (env)"),
+        ("CCP_COPILOT_GITHUB_API_URL", "copilot.githubApiUrl (env)"),
+    ] {
+        if env.contains_key(key) {
+            out.push(name.to_string());
+        }
+    }
     if env.contains_key("CCP_GLM_BASE_URL") {
         out.push("glm.baseUrl (env)".to_string());
     }
@@ -801,6 +810,23 @@ pub fn kimi_base_url() -> String {
         return url;
     }
     "https://api.kimi.ai/coding/v1".to_string()
+}
+
+/// Where Copilot chat goes, when set. Left unset, the host the Copilot token
+/// names is used.
+pub fn copilot_base_url() -> Option<String> {
+    std::env::var("CCP_COPILOT_BASE_URL").ok()
+}
+
+/// The GitHub site that serves the device sign-in.
+pub fn copilot_github_url() -> String {
+    std::env::var("CCP_COPILOT_GITHUB_URL").unwrap_or_else(|_| "https://github.com".to_string())
+}
+
+/// The GitHub API that trades a GitHub token for a Copilot token.
+pub fn copilot_github_api_url() -> String {
+    std::env::var("CCP_COPILOT_GITHUB_API_URL")
+        .unwrap_or_else(|_| "https://api.github.com".to_string())
 }
 
 pub fn glm_base_url() -> String {

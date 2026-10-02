@@ -35,6 +35,9 @@ pub fn write_auth(config_dir: &Path, provider: &str) {
         "codex" => {
             json!({"access":"test-access","refresh":"test-refresh","expires":expires,"account_id":"acct_test"})
         }
+        "copilot" => {
+            json!({"github_token":"test-github","copilot_token":"test-copilot","expires":expires,"host":"https://api.individual.githubcopilot.com","account":"octocat"})
+        }
         "grok" => {
             json!({"access":"test-access","refresh":"test-refresh","expires_at_ms":expires,"issuer":"https://auth.x.ai","client_id":"test-client"})
         }

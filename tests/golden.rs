@@ -43,6 +43,7 @@ use Provider::*;
 enum Provider {
     Codex,
     Kimi,
+    Copilot,
     Grok,
     Glm,
     OpenCodeChat,
@@ -56,6 +57,7 @@ impl Provider {
         match self {
             Codex => "gpt-5.5",
             Kimi => "kimi-for-coding",
+            Copilot => "copilot/gpt-5.5",
             Grok => "grok-4.5",
             Glm => "glm-5.3",
             OpenCodeChat => "opencode-go/deepseek-v4-pro",
@@ -69,6 +71,7 @@ impl Provider {
         match self {
             Codex => "codex",
             Kimi => "kimi",
+            Copilot => "copilot",
             Grok => "grok",
             Glm => "glm",
             OpenCodeChat => "opencode-chat",
@@ -87,6 +90,7 @@ impl Provider {
                 "/backend-api/codex/responses",
             ),
             Kimi => ("/coding/v1", "/coding/v1/chat/completions"),
+            Copilot => ("/copilot", "/copilot/chat/completions"),
             Grok => ("/v1", "/v1/responses"),
             Glm => ("/api/anthropic", "/api/anthropic/v1/messages"),
             OpenCodeChat => ("/zen/go/v1", "/zen/go/v1/chat/completions"),
@@ -109,6 +113,10 @@ impl Provider {
             Kimi => {
                 write_auth(config, "kimi");
                 vec![EnvGuard::set("CCP_KIMI_BASE_URL", base)]
+            }
+            Copilot => {
+                write_auth(config, "copilot");
+                vec![EnvGuard::set("CCP_COPILOT_BASE_URL", base)]
             }
             Grok => {
                 write_auth(config, "grok");
@@ -572,6 +580,11 @@ fn quota(provider: Provider) -> Reply {
             r#"{"error":{"message":"You've reached your weekly usage limit. It resets on Monday.","type":"rate_limit_reached_error"}}"#,
         )
         .header("retry-after", "3600"),
+        Copilot => Reply::error(
+            429,
+            r#"{"error":{"message":"Sorry, you've hit a rate limit that restricts the number of Copilot model requests you can make within a specific time period. Please try again in 60 seconds.","code":"rate_limited"}}"#,
+        )
+        .header("retry-after", "60"),
         Grok => Reply::error(
             429,
             r#"{"code":"Some resource has been exhausted","error":"You've reached your weekly usage limit for Grok. It resets in 3 days."}"#,
@@ -610,6 +623,10 @@ fn context(provider: Provider) -> Reply {
         Kimi => Reply::error(
             400,
             r#"{"error":{"message":"Invalid request: This model's maximum context length is 262144 tokens. However, you requested 270000 tokens.","type":"invalid_request_error"}}"#,
+        ),
+        Copilot => Reply::error(
+            400,
+            r#"{"error":{"message":"prompt token count of 270000 exceeds the limit of 128000","code":"model_max_prompt_tokens_exceeded"}}"#,
         ),
         Grok => Reply::error(
             400,
@@ -865,6 +882,63 @@ async fn kimi_context() {
         run(Kimi, context(Kimi)).await,
         [
             "HTTP 400 invalid_request_error: prompt is too long: Invalid request: This model's maximum context length is 262144 tokens. However, you requested 270000 tokens.",
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GitHub Copilot
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn copilot_text() {
+    assert_eq!(run(Copilot, fixture(Copilot, "text")).await, TEXT);
+}
+
+#[tokio::test]
+async fn copilot_tool_use() {
+    assert_eq!(run(Copilot, fixture(Copilot, "tool_use")).await, TOOL_USE);
+}
+
+#[tokio::test]
+async fn copilot_error_event() {
+    assert_eq!(
+        run(Copilot, fixture(Copilot, "error_event")).await,
+        THROTTLED
+    );
+}
+
+#[tokio::test]
+async fn copilot_cut_off() {
+    assert_eq!(
+        run(Copilot, fixture(Copilot, "cut_off").dying()).await,
+        [
+            "message_start",
+            "content_block_start 0 text",
+            r#"content_block_delta 0 text "It says""#,
+            r#"content_block_delta 0 text " hello.""#,
+            "error api_error: GitHub Copilot stream is invalid",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn copilot_rate_limit() {
+    assert_eq!(
+        run(Copilot, quota(Copilot)).await,
+        [
+            "HTTP 429 rate_limit_error: Sorry, you've hit a rate limit that restricts the number of Copilot model requests you can make within a specific time period. Please try again in 60 seconds.",
+            "retry-after: 60",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn copilot_context() {
+    assert_eq!(
+        run(Copilot, context(Copilot)).await,
+        [
+            "HTTP 400 invalid_request_error: prompt is too long: prompt token count of 270000 exceeds the limit of 128000",
         ]
     );
 }

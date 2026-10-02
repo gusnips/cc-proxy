@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-68dd2a04","object":"chat.completion.chunk","created":1790000000,"model":"kimi-for-coding","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-68dd2a04","object":"chat.completion.chunk","created":1790000000,"model":"kimi-for-coding","choices":[{"index":0,"delta":{"content":"It says"},"finish_reason":null}]}
+
+data: {"error":{"message":"Rate limit reached. Try again in 20s.","type":"rate_limit_reached_error"}}
+

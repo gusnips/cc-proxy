@@ -105,6 +105,11 @@ enum Commands {
         #[command(subcommand)]
         command: ProviderGroup,
     },
+    /// Manage GitHub Copilot authentication
+    Copilot {
+        #[command(subcommand)]
+        command: ProviderGroup,
+    },
     /// Manage Cursor authentication
     Cursor {
         #[command(subcommand)]
@@ -331,6 +336,7 @@ fn run() -> Result<()> {
         Commands::Reload => reload_daemon(),
         Commands::Codex { command } => run_provider_cli("codex", command),
         Commands::Kimi { command } => run_provider_cli("kimi", command),
+        Commands::Copilot { command } => run_provider_cli("copilot", command),
         Commands::Cursor { command } => run_provider_cli("cursor", command),
         Commands::Grok { command } => run_provider_cli("grok", command),
         Commands::Glm { command } => run_provider_cli("glm", command),
@@ -630,7 +636,9 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
 fn print_models(registry: &Registry, full: bool) {
     let grouped = registry.grouped_models();
     let styled = ui::styled(&std::io::stdout());
-    for provider in ["codex", "kimi", "grok", "opencode", "cursor", "glm"] {
+    for provider in [
+        "codex", "kimi", "grok", "opencode", "copilot", "cursor", "glm",
+    ] {
         let Some(models) = grouped.get(provider) else {
             continue;
         };
