@@ -7,8 +7,9 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
-# Run project checks through checkle
+# Run project checks (no-em-dash guard, then checkle)
 check:
+    scripts/check-no-em-dash.sh
     checkle run all
 
 # Run check and fail if there are uncommitted changes for CI
