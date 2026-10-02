@@ -33,29 +33,27 @@ use tokio::sync::oneshot;
 use crate::{
     claude, config, daemon,
     monitor::{
-        MockMonitor, MonitorHandle, SESSION_TOKEN_BUCKET_SECS,
+        MockMonitor, MonitorHandle, SESSION_TOKEN_BUCKET_SECS, Throughput,
         snapshot::{
             ActiveSnapshot, CompletedSnapshot, MonitorSnapshot, SessionSnapshot, SnapshotUpdate,
         },
     },
     paths,
     registry::Registry,
+    ui::{self, DIM, DIM_WHITE, GREEN, Mood, RED, TEAL, WHITE, YELLOW},
 };
 
-const TEAL: Color = Color::Rgb(78, 201, 176);
-const WHITE: Color = Color::Rgb(240, 244, 248);
-const DIM_WHITE: Color = Color::Rgb(180, 190, 200);
 const SEPARATOR: Color = Color::Rgb(72, 74, 82);
 const BG: Color = Color::Rgb(18, 18, 22);
 const PANEL_BG: Color = Color::Rgb(22, 22, 27);
 const SELECTED_BG: Color = Color::Rgb(42, 45, 54);
-const GREEN: Color = Color::Rgb(120, 200, 120);
-const RED: Color = Color::Rgb(220, 120, 120);
-const YELLOW: Color = Color::Rgb(220, 200, 100);
 const BLUE: Color = Color::Rgb(120, 170, 230);
 const PURPLE: Color = Color::Rgb(190, 140, 240);
-const DIM: Color = Color::Rgb(100, 104, 114);
 const SESSION_SPARKLINE_MIN_WIDTH: u16 = 170;
+/// Four minutes of 10-second buckets.
+const HEADER_SPARKLINE_BUCKETS: usize = 24;
+/// How long the header face looks unsure after a failed request.
+const RECENT_ERROR: Duration = Duration::from_secs(10);
 const SESSION_SPARKLINE_MAX_TOKENS: u64 = 4_000;
 
 pub struct MonitorUiConfig<'a> {
@@ -467,6 +465,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
         &state.recent,
         app.recent_selected,
         app.focus == FocusPane::Recent,
+        state.snapshot_at,
     );
     render_events(frame, root[4], &state.recent);
     render_footer(frame, root[5], app);
@@ -490,42 +489,96 @@ fn render_header(
     app: &MonitorApp,
     state: &MonitorSnapshot,
 ) {
-    let text = Line::from(vec![
+    let (face, mood) = header_face(app, state);
+    let label = Style::default().fg(DIM);
+    let value = Style::default().fg(WHITE).add_modifier(Modifier::BOLD);
+    let left = Line::from(vec![
         Span::styled(
-            " cc-proxy",
+            format!(" {face} cc-proxy "),
             Style::default()
                 .fg(BG)
-                .bg(TEAL)
+                .bg(mood.color())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ", Style::default().fg(BG).bg(TEAL)),
-        Span::styled(&app.listen_url, Style::default().fg(BG).bg(TEAL)),
-        Span::styled("  uptime ", Style::default().fg(BG).bg(TEAL)),
         Span::styled(
-            format_duration(state.uptime),
-            Style::default()
-                .fg(BG)
-                .bg(TEAL)
-                .add_modifier(Modifier::BOLD),
+            format!("  {}", app.listen_url),
+            Style::default().fg(DIM_WHITE),
         ),
-        Span::styled("  sessions ", Style::default().fg(BG).bg(TEAL)),
-        Span::styled(
-            state.sessions.len().to_string(),
-            Style::default()
-                .fg(BG)
-                .bg(TEAL)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  active ", Style::default().fg(BG).bg(TEAL)),
-        Span::styled(
-            state.active.len().to_string(),
-            Style::default()
-                .fg(BG)
-                .bg(TEAL)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("  up ", label),
+        Span::styled(ui::duration(state.uptime), value),
+        Span::styled("  sessions ", label),
+        Span::styled(state.sessions.len().to_string(), value),
+        Span::styled("  active ", label),
+        Span::styled(state.active.len().to_string(), value),
     ]);
-    frame.render_widget(Paragraph::new(text).style(Style::default().bg(TEAL)), area);
+
+    let samples = state
+        .sessions
+        .iter()
+        .flat_map(|session| session.output_token_samples.iter().copied())
+        .collect::<Vec<_>>();
+    let streaming: f64 = state
+        .active
+        .iter()
+        .map(|request| match request.rate() {
+            Throughput::TokensPerSecond(rate) => rate,
+            _ => 0.0,
+        })
+        .sum();
+    let rate = if state.active.is_empty() {
+        Span::styled("idle ", label)
+    } else {
+        Span::styled(format!("{streaming:.0} tok/s "), value)
+    };
+    let right = Line::from(vec![
+        Span::styled("tokens ", label),
+        Span::styled(
+            token_sparkline(&samples, HEADER_SPARKLINE_BUCKETS, state.snapshot_at),
+            Style::default().fg(TEAL),
+        ),
+        Span::raw("  "),
+        rate,
+    ]);
+
+    let left_width = left.width() as u16;
+    let right_width = right.width() as u16;
+    frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
+    frame.render_widget(Paragraph::new(left), area);
+    if area.width >= left_width + right_width + 2 {
+        frame.render_widget(
+            Paragraph::new(right).alignment(Alignment::Right),
+            Rect {
+                x: area.x + area.width - right_width,
+                width: right_width,
+                ..area
+            },
+        );
+    }
+}
+
+/// The face in the header shows how the proxy is doing at a glance: it
+/// talks while requests stream, looks unsure for a few seconds after an
+/// error, sleeps while shutting down, and blinks now and then so you can
+/// tell the dashboard is live.
+fn header_face(app: &MonitorApp, state: &MonitorSnapshot) -> (&'static str, Mood) {
+    let recent_error = state.recent.iter().any(|request| {
+        !error_indicator(request).is_empty()
+            && state
+                .snapshot_at
+                .duration_since(request.finished_at)
+                .is_ok_and(|age| age < RECENT_ERROR)
+    });
+    if app.phase == MonitorPhase::ShuttingDown {
+        (Mood::Asleep.face(), Mood::Asleep)
+    } else if recent_error {
+        (Mood::Unsure.face(), Mood::Unsure)
+    } else if !state.active.is_empty() {
+        (["•ω•", "•o•"][app.tick % 2], Mood::Awake)
+    } else if app.tick.is_multiple_of(24) {
+        (Mood::Asleep.face(), Mood::Awake)
+    } else {
+        (Mood::Awake.face(), Mood::Awake)
+    }
 }
 
 fn panel(title: &'static str, focused: bool) -> Block<'static> {
@@ -565,6 +618,7 @@ fn render_empty_table_state(
     title: &'static str,
     focused: bool,
     message: &str,
+    hint: &str,
 ) {
     frame.render_widget(panel(title, focused), area);
     let content = Rect {
@@ -577,16 +631,42 @@ fn render_empty_table_state(
         return;
     }
 
-    let line = Rect {
-        y: content.y + content.height.saturating_sub(1) / 2,
-        height: 1,
+    let width = content.width.into();
+    let mut lines = vec![Line::from(Span::styled(
+        ellipsize(message, width),
+        Style::default().fg(DIM_WHITE),
+    ))];
+    // A panel too short for both keeps the message.
+    if content.height >= 2 {
+        let plain = hint.replace('`', "");
+        lines.push(if plain.chars().count() <= width {
+            Line::from(
+                hint.split('`')
+                    .enumerate()
+                    .map(|(index, part)| {
+                        let color = if index % 2 == 1 { TEAL } else { DIM };
+                        Span::styled(part.to_string(), Style::default().fg(color))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            Line::from(Span::styled(
+                ellipsize(&plain, width),
+                Style::default().fg(DIM),
+            ))
+        });
+    }
+    let height = lines.len() as u16;
+    let block = Rect {
+        y: content.y + content.height.saturating_sub(height) / 2,
+        height,
         ..content
     };
     frame.render_widget(
-        Paragraph::new(ellipsize(message, line.width.into()))
+        Paragraph::new(lines)
             .alignment(Alignment::Center)
-            .style(Style::default().fg(DIM).bg(PANEL_BG)),
-        line,
+            .style(Style::default().bg(PANEL_BG)),
+        block,
     );
 }
 
@@ -694,12 +774,10 @@ fn rate_cell(value: String) -> Cell<'static> {
 
 fn provider_cell(value: Option<&str>) -> Cell<'static> {
     let value = value.unwrap_or("-");
-    let color = match value {
-        "codex" => TEAL,
-        "kimi" => Color::Rgb(190, 150, 220),
-        "cursor" => Color::Rgb(140, 170, 230),
-        "-" => DIM,
-        _ => DIM_WHITE,
+    let color = if value == "-" {
+        DIM
+    } else {
+        ui::provider_color(value)
     };
     Cell::from(Span::styled(value.to_string(), Style::default().fg(color)))
 }
@@ -913,7 +991,14 @@ fn render_sessions(
     snapshot_at: SystemTime,
 ) {
     if sessions.is_empty() {
-        render_empty_table_state(frame, area, "Sessions", focused, "No sessions");
+        render_empty_table_state(
+            frame,
+            area,
+            "Sessions",
+            focused,
+            "No sessions yet",
+            "Run `cc-proxy claude` and its requests group here.",
+        );
         return;
     }
 
@@ -1061,7 +1146,14 @@ fn render_active(
     tick: usize,
 ) {
     if active.is_empty() {
-        render_empty_table_state(frame, area, "Active requests", false, "No active requests");
+        render_empty_table_state(
+            frame,
+            area,
+            "Active requests",
+            false,
+            "Nothing in flight",
+            "Requests show here while they stream.",
+        );
         return;
     }
 
@@ -1100,7 +1192,7 @@ fn render_active(
                     ActiveColumn::Input => number_cell(token_value(request.input_tokens)),
                     ActiveColumn::Output => number_cell(token_value(request.output_tokens)),
                     ActiveColumn::Rate => rate_cell(request.rate().label()),
-                    ActiveColumn::Elapsed => number_cell(format_duration(request.elapsed())),
+                    ActiveColumn::Elapsed => number_cell(ui::duration(request.elapsed())),
                 }
             })
             .collect::<Vec<_>>();
@@ -1214,6 +1306,7 @@ fn render_recent(
     recent: &[CompletedSnapshot],
     selected: usize,
     focused: bool,
+    snapshot_at: SystemTime,
 ) {
     if recent.is_empty() {
         render_empty_table_state(
@@ -1221,7 +1314,8 @@ fn render_recent(
             area,
             "Recent requests",
             focused,
-            "No recent requests",
+            "No requests yet",
+            "Finished requests show here, newest first.",
         );
         return;
     }
@@ -1250,7 +1344,7 @@ fn render_recent(
                     }
                     RecentColumn::Effort => text_cell(request.effort.as_deref().unwrap_or("-")),
                     RecentColumn::Endpoint => muted_cell(request.endpoint.label()),
-                    RecentColumn::Latency => number_cell(format_duration(request.latency)),
+                    RecentColumn::Latency => number_cell(ui::duration(request.latency)),
                     RecentColumn::Rate => rate_cell(request.rate().label()),
                     RecentColumn::Input => number_cell(token_value(request.input_tokens)),
                     RecentColumn::Output => number_cell(token_value(request.output_tokens)),
@@ -1262,7 +1356,7 @@ fn render_recent(
         Row::new(cells).style(if focused && index == selected {
             Style::default().bg(SELECTED_BG)
         } else {
-            Style::default().bg(PANEL_BG)
+            Style::default().bg(fresh_bg(request.finished_at, snapshot_at))
         })
     });
     let table = Table::new(rows, widths.clone())
@@ -1325,6 +1419,20 @@ fn event_columns(tier: LayoutTier) -> Vec<ColumnSpec<EventColumn>> {
     }
 }
 
+/// A request that just finished glows teal, fading out over three seconds,
+/// so new traffic catches the eye.
+fn fresh_bg(finished_at: SystemTime, snapshot_at: SystemTime) -> Color {
+    match snapshot_at
+        .duration_since(finished_at)
+        .map(|age| age.as_millis())
+    {
+        Ok(0..1000) => Color::Rgb(33, 58, 57),
+        Ok(1000..2000) => Color::Rgb(29, 43, 45),
+        Ok(2000..3000) => Color::Rgb(25, 33, 36),
+        _ => PANEL_BG,
+    }
+}
+
 fn render_events(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[CompletedSnapshot]) {
     let events = recent
         .iter()
@@ -1336,7 +1444,14 @@ fn render_events(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
         .take(12)
         .collect::<Vec<_>>();
     if events.is_empty() {
-        render_empty_table_state(frame, area, "Events", false, "No events");
+        render_empty_table_state(
+            frame,
+            area,
+            "Events",
+            false,
+            "No errors",
+            "Failed requests and HTTP errors show here.",
+        );
         return;
     }
 
@@ -1481,7 +1596,7 @@ fn render_request_detail(
             detail_line("provider", request.provider.as_deref().unwrap_or("-"), TEAL),
             detail_line("model", request.model.as_deref().unwrap_or("-"), DIM_WHITE),
             detail_line("effort", request.effort.as_deref().unwrap_or("-"), YELLOW),
-            detail_line("latency", format_duration(request.latency), DIM_WHITE),
+            detail_line("latency", ui::duration(request.latency), DIM_WHITE),
             detail_line("rate", request.rate().label(), TEAL),
             detail_line("input tokens", token_value(request.input_tokens), DIM_WHITE),
             detail_line(
@@ -1533,28 +1648,25 @@ fn detail_line<'a>(label: &'static str, value: impl Into<String>, value_color: C
 }
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
-    let spans = vec![
-        Span::raw(" "),
-        Span::styled("q", Style::default().fg(TEAL)),
-        Span::styled(
-            if app.is_attached() {
-                " detach  "
-            } else {
-                " quit  "
-            },
-            Style::default().fg(DIM),
-        ),
-        Span::styled("?", Style::default().fg(TEAL)),
-        Span::styled(" help  ", Style::default().fg(DIM)),
-        Span::styled("b", Style::default().fg(TEAL)),
-        Span::styled(" setup  ", Style::default().fg(DIM)),
-        Span::styled("arrows/j/k", Style::default().fg(TEAL)),
-        Span::styled(" navigate  ", Style::default().fg(DIM)),
-        Span::styled("Tab", Style::default().fg(TEAL)),
-        Span::styled(" pane  ", Style::default().fg(DIM)),
-        Span::styled("Enter", Style::default().fg(TEAL)),
-        Span::styled(" open", Style::default().fg(DIM)),
+    let keys = [
+        ("q", if app.is_attached() { "detach" } else { "quit" }),
+        ("?", "help"),
+        ("b", "setup"),
+        ("↑↓ j k", "navigate"),
+        ("Tab", "pane"),
+        ("Enter", "open"),
     ];
+    let mut spans = vec![Span::raw(" ")];
+    for (key, label) in keys {
+        spans.push(Span::styled(
+            format!(" {key} "),
+            Style::default().fg(WHITE).bg(SELECTED_BG),
+        ));
+        spans.push(Span::styled(
+            format!(" {label}  "),
+            Style::default().fg(DIM),
+        ));
+    }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(BG)),
         area,
@@ -1766,20 +1878,6 @@ pub fn setup_text(port: u16, registry: &Registry) -> String {
         lines.push(format!("export {name}=\"{value}\""));
     }
     lines.join("\n")
-}
-
-fn format_duration(duration: Duration) -> String {
-    let total = duration.as_secs();
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let seconds = total % 60;
-    if hours > 0 {
-        format!("{hours}h{minutes:02}m")
-    } else if minutes > 0 {
-        format!("{minutes}m{seconds:02}s")
-    } else {
-        format!("{seconds}s")
-    }
 }
 
 fn format_system_time(time: SystemTime) -> String {
@@ -2318,33 +2416,31 @@ mod tests {
 
     #[test]
     fn empty_tables_hide_columns_and_center_placeholders() {
-        let sessions = draw(40, 9, |frame| {
+        let sessions = draw(60, 9, |frame| {
             render_sessions(frame, frame.area(), &[], 0, true, SystemTime::now())
         });
         let sessions_text = buffer_text(&sessions);
-        assert_centered(&sessions, "No sessions", 4);
+        assert_centered(&sessions, "No sessions yet", 3);
+        assert!(!sessions_text.contains('`'));
         assert!(!sessions_text.contains("provider"));
-        assert!(sessions_text.contains("No sessions"));
+        assert!(sessions_text.contains("its requests group here"));
 
-        let active = draw(27, 6, |frame| render_active(frame, frame.area(), &[], 0));
-        let active_text = buffer_text(&active);
-        assert_centered(&active, "No active requests", 2);
-        assert!(!active_text.contains("started"));
-        assert!(active_text.contains("No active requests"));
+        // Too short for the hint, the message alone stays centered.
+        let active = draw(27, 3, |frame| render_active(frame, frame.area(), &[], 0));
+        assert_centered(&active, "Nothing in flight", 1);
+        assert!(!buffer_text(&active).contains("stream"));
 
-        let recent = draw(40, 9, |frame| {
-            render_recent(frame, frame.area(), &[], 0, false)
+        let recent = draw(50, 9, |frame| {
+            render_recent(frame, frame.area(), &[], 0, false, SystemTime::now())
         });
         let recent_text = buffer_text(&recent);
-        assert_centered(&recent, "No recent requests", 4);
+        assert_centered(&recent, "No requests yet", 3);
         assert!(!recent_text.contains("finished"));
-        assert!(recent_text.contains("No recent requests"));
+        assert!(recent_text.contains("newest first"));
 
-        let events = draw(40, 9, |frame| render_events(frame, frame.area(), &[]));
-        let events_text = buffer_text(&events);
-        assert_centered(&events, "No events", 4);
-        assert!(!events_text.contains("time"));
-        assert!(events_text.contains("No events"));
+        let events = draw(50, 9, |frame| render_events(frame, frame.area(), &[]));
+        assert_centered(&events, "No errors", 3);
+        assert!(buffer_text(&events).contains("Failed requests and HTTP errors"));
     }
 
     #[test]
@@ -2411,7 +2507,7 @@ mod tests {
         assert!(sessions_text.contains("Project"));
         assert!(sessions_text.contains("example-project"));
         assert!(sessions_text.contains("sess-1"));
-        assert!(!sessions_text.contains("No sessions"));
+        assert!(!sessions_text.contains("No sessions yet"));
 
         let active = draw(120, 8, |frame| {
             render_active(frame, frame.area(), &active_state.active, 0)
@@ -2419,22 +2515,29 @@ mod tests {
         let active_text = buffer_text(&active);
         assert!(active_text.contains("Started"));
         assert!(active_text.contains("gpt-5.6-sol"));
-        assert!(!active_text.contains("No active requests"));
+        assert!(!active_text.contains("Nothing in flight"));
 
         monitor.request_completed("request-1", 200, Some(100), Some(25));
         let completed_state: MonitorSnapshot = monitor.snapshot().into();
         let recent = draw(140, 8, |frame| {
-            render_recent(frame, frame.area(), &completed_state.recent, 0, false)
+            render_recent(
+                frame,
+                frame.area(),
+                &completed_state.recent,
+                0,
+                false,
+                SystemTime::now(),
+            )
         });
         let recent_text = buffer_text(&recent);
         assert!(recent_text.contains("Finished"));
         assert!(recent_text.contains("200"));
-        assert!(!recent_text.contains("No recent requests"));
+        assert!(!recent_text.contains("No requests yet"));
 
         let events = draw(100, 8, |frame| {
             render_events(frame, frame.area(), &completed_state.recent)
         });
-        assert!(buffer_text(&events).contains("No events"));
+        assert!(buffer_text(&events).contains("No errors"));
     }
 
     #[test]
@@ -2462,7 +2565,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let recent_buffer = draw(120, 6, |frame| {
-            render_recent(frame, frame.area(), &recent, 11, true)
+            render_recent(frame, frame.area(), &recent, 11, true, SystemTime::now())
         });
         let recent_text = buffer_text(&recent_buffer);
         assert!(recent_text.contains("row-0011"), "{recent_text}");
@@ -2525,7 +2628,14 @@ mod tests {
         let state: MonitorSnapshot = monitor.snapshot().into();
 
         let recent = draw(110, 8, |frame| {
-            render_recent(frame, frame.area(), &state.recent, 0, true)
+            render_recent(
+                frame,
+                frame.area(),
+                &state.recent,
+                0,
+                true,
+                SystemTime::now(),
+            )
         });
         let recent_text = buffer_text(&recent);
 
@@ -2546,7 +2656,14 @@ mod tests {
         let state: MonitorSnapshot = monitor.snapshot().into();
 
         let recent = draw(180, 8, |frame| {
-            render_recent(frame, frame.area(), &state.recent, 0, false)
+            render_recent(
+                frame,
+                frame.area(),
+                &state.recent,
+                0,
+                false,
+                SystemTime::now(),
+            )
         });
         let recent_text = buffer_text(&recent);
 
@@ -2603,7 +2720,7 @@ mod tests {
         assert!(events_text.contains("Time"));
         assert!(events_text.contains("502"));
         assert!(events_text.contains("upstream unavailable"));
-        assert!(!events_text.contains("No events"));
+        assert!(!events_text.contains("No errors"));
     }
 
     #[test]
