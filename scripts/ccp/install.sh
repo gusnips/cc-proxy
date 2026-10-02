@@ -31,7 +31,7 @@ Description=Claude Code Proxy for Codex
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/cc-proxy serve --no-monitor
+ExecStart=%h/.local/bin/cc-proxy start --no-monitor
 Restart=on-failure
 RestartSec=2
 Environment=CCP_LOG_STDERR=1

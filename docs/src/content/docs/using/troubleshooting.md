@@ -11,10 +11,10 @@ Check the process and liveness route:
 curl http://127.0.0.1:18765/healthz
 ```
 
-A healthy listener returns `{"ok":true}`. Confirm `ANTHROPIC_BASE_URL` uses the same address and port. `cc-proxy serve --port 11435` and `PORT=11435` change the listener port. `--port` wins for that command.
+A healthy listener returns `{"ok":true}`. Confirm `ANTHROPIC_BASE_URL` uses the same address and port. `cc-proxy start --port 11435` and `PORT=11435` change the listener port. `--port` wins for that command.
 
 `cc-proxy status` reports the background service state. If it claims a proxy
-answers without a pidfile, that process was not started by `cc-proxy serve` —
+answers without a pidfile, that process was not started by `cc-proxy start` —
 stop it directly before starting the service on the same port.
 
 ## Authentication error
@@ -65,7 +65,7 @@ For a non-TUN local HTTP proxy, set both destination-scheme variables before sta
 | `HTTP_PROXY` | `http://127.0.0.1:7890` |
 | `HTTPS_PROXY` | `http://127.0.0.1:7890` |
 
-Set them through the operating system, service manager, or shell, then start `cc-proxy serve` in the same environment.
+Set them through the operating system, service manager, or shell, then start `cc-proxy start` in the same environment.
 
 The default `wss://chatgpt.com` connection uses `HTTPS_PROXY`; a working proxy should show `CONNECT chatgpt.com:443`. The `http://` value is normal: it describes how to reach the proxy, while `HTTPS_PROXY` describes which destinations use it. Restart cc-proxy after changing these variables because the client and pooled WebSocket route are created at startup.
 
@@ -74,7 +74,7 @@ Check `NO_PROXY` when the proxy sees no request. Proxy connection, authenticatio
 Use HTTP SSE to isolate transport behavior:
 
 ```sh
-CCP_CODEX_TRANSPORT=http cc-proxy serve
+CCP_CODEX_TRANSPORT=http cc-proxy start
 ```
 
 `auto` falls back only when WebSocket setup fails before sending the request. It does not replay an in-flight request.
@@ -85,7 +85,7 @@ Cursor needs the installed Cursor Agent JavaScript bundle for protobuf schemas. 
 
 ```sh
 CCP_CURSOR_AGENT_BUNDLE=/path/to/cursor-agent/index.js \
-  cc-proxy serve
+  cc-proxy start
 ```
 
 ## Rate limited
@@ -109,7 +109,7 @@ It prints a random local URL, a sourceable `client.env`, and artifact paths. Kee
 ```sh
 CCP_LOG_VERBOSE=1 \
 CCP_TRAFFIC_LOG=1 \
-  cc-proxy serve --no-monitor
+  cc-proxy start --no-monitor
 ```
 
 Traffic capture writes the inbound request, translated upstream request, upstream headers and events, and downstream events in emission order. Known credentials are redacted, but prompts and tool content are preserved. Disable capture and delete artifacts after diagnosis.

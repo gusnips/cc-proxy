@@ -18,7 +18,7 @@ cc-proxy glm auth login
 
 ```sh
 export CCP_GLM_API_KEY=<your z.ai API key>
-cc-proxy serve
+cc-proxy start
 ```
 
 `CCP_GLM_API_KEY` takes precedence over `GLM_API_KEY`. A key saved with

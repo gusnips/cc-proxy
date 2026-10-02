@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 
+use crate::ui::{self, Mood};
 use crate::{config, paths};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,20 +400,23 @@ pub fn run_config_set(name: &str, raw: &str) -> Result<()> {
     let key = find_key(name)?;
     let value = parse_value(key, raw)?;
     let path = write_value(key.path, value)?;
-    if key.kind == ConfigKind::Secret {
-        println!("{} saved to {}.", key.path, path.display());
+    let saved = if key.kind == ConfigKind::Secret {
+        format!("{} saved", key.path)
     } else {
-        println!("{} = {} ({}).", key.path, raw.trim(), path.display());
-    }
-    for name in key.env {
-        if std::env::var(name).ok().filter(|v| !v.is_empty()).is_some() {
-            println!("Note: ${name} is set and takes precedence at runtime.");
-            break;
-        }
+        format!("{} = {}", key.path, raw.trim())
+    };
+    let mut lines = vec![saved, format!("Written to {}", path.display())];
+    if let Some(name) = key
+        .env
+        .iter()
+        .find(|name| std::env::var(name).is_ok_and(|v| !v.is_empty()))
+    {
+        lines.push(format!("${name} is set and wins at runtime."));
     }
     if key.path == "port" {
-        println!("Restart the service (`cc-proxy restart`) to rebind.");
+        lines.push("Run `cc-proxy restart` to move the running proxy to the new port.".into());
     }
+    ui::print_note(Mood::Glad, &lines);
     Ok(())
 }
 

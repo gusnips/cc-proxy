@@ -3,20 +3,20 @@ title: Monitor TUI
 description: Use the cc-proxy monitor to inspect sessions, active and recent requests, providers, errors, token usage, throughput, and setup.
 ---
 
-`cc-proxy serve` starts the proxy as a background service. The monitor is a
+`cc-proxy start` starts the proxy as a background service. The monitor is a
 separate view over that service — attaching or detaching never starts or
 stops the proxy.
 
 ```sh
 # Start the service (prints its pid).
-cc-proxy serve
+cc-proxy start
 
 # Attach from any terminal; repeat for additional dashboards.
 cc-proxy monitor
 ```
 
-`cc-proxy serve --monitor` starts a foreground proxy with the dashboard
-attached in one process instead. `cc-proxy serve --no-monitor` runs a
+`cc-proxy start --monitor` starts a foreground proxy with the dashboard
+attached in one process instead. `cc-proxy start --no-monitor` runs a
 foreground proxy with plain output, which suits service managers.
 
 Use `cc-proxy monitor --url http://127.0.0.1:19999` for a different port. Without `--url`, the port follows the usual proxy configuration. The attached dashboard reads the running service's existing history; it does not start a proxy or need provider credentials.
@@ -61,7 +61,7 @@ The request table changes columns as the terminal width changes.
 Use plain output when the process runs under a service manager, in CI, or through a pipe:
 
 ```sh
-cc-proxy serve --no-monitor
+cc-proxy start --no-monitor
 ```
 
 `CCP_LOG_STDERR=1` mirrors JSONL log events to stderr in plain mode.

@@ -39,13 +39,13 @@ For SSH or another headless environment, use `cc-proxy codex auth device` instea
 ## 3. Start the proxy
 
 ```sh
-cc-proxy serve
+cc-proxy start
 ```
 
 It starts in the background and prints its pid. Confirm it with
 `cc-proxy status`. It listens on `127.0.0.1:18765`. Attach the dashboard any
 time with `cc-proxy monitor`, or start foreground-with-dashboard mode with
-`cc-proxy serve --monitor`.
+`cc-proxy start --monitor`.
 
 ## 4. Start Claude Code
 

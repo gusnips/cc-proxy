@@ -211,7 +211,7 @@ fn plain_service_exits_on_second_signal(signal: &str) -> Result<(), Box<dyn std:
     )?;
     let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_cc-proxy"))
-        .args(["serve", "--no-monitor", "--port", &port.to_string()])
+        .args(["start", "--no-monitor", "--port", &port.to_string()])
         .env("CCP_CONFIG_DIR", config.path())
         .env("CCP_KIMI_BASE_URL", upstream_url)
         .env("NO_PROXY", "127.0.0.1,localhost")
@@ -377,13 +377,13 @@ fn update_check_with_pinned_version_is_offline() -> Result<(), Box<dyn std::erro
     cmd.args(["update", "--check", "--version", &current])
         .assert()
         .success()
-        .stdout(contains("already up to date"));
+        .stdout(contains("is up to date"));
 
     let mut cmd = Command::cargo_bin("cc-proxy")?;
     cmd.args(["update", "--check", "--version", "v9.9.9"])
         .assert()
         .success()
-        .stdout(contains("available"));
+        .stdout(contains("is out"));
     Ok(())
 }
 

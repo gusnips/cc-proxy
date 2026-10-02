@@ -21,7 +21,7 @@ It does not verify provider credentials or upstream availability.
 
 ## `GET /monitor`
 
-Read-only dashboard snapshot, available when monitor collection is enabled. The CLI enables collection in both plain and interactive `serve` modes. Only actual loopback peers are allowed; forwarded IP headers do not grant access. Other peers receive HTTP 403, and disabled collection returns HTTP 404. Responses use `Cache-Control: no-store`.
+Read-only dashboard snapshot, available when monitor collection is enabled. The CLI enables collection in both plain and interactive `start` modes. Only actual loopback peers are allowed; forwarded IP headers do not grant access. Other peers receive HTTP 403, and disabled collection returns HTTP 404. Responses use `Cache-Control: no-store`.
 
 The JSON envelope contains `version: 1` and a `snapshot` with the proxy start time, sessions, active requests and recent requests. It includes the monitor's display metadata, timing, token usage and computed throughput. It does not include credentials or request/response bodies. Process-local monotonic clocks remain in the service; snapshots contain elapsed durations instead.
 

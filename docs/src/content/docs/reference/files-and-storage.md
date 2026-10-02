@@ -21,7 +21,7 @@ Windows falls back to `%USERPROFILE%/AppData/Roaming` and `%USERPROFILE%/AppData
 
 `CCP_CONFIG_DIR` replaces the configuration root for the current process. It does not change the state root.
 
-`proxy.pid` under the state root tracks the background service (`serve`
+`proxy.pid` under the state root tracks the background service (`start`
 writes it after binding; `status`, `stop`, `restart`, and `reload` resolve
 through it). A pidfile left behind by a dead process is treated as not
 running and removed.

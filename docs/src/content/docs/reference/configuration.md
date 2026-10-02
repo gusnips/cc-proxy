@@ -3,7 +3,7 @@ title: Configuration
 description: Canonical cc-proxy configuration keys, environment variables, defaults, precedence, boolean parsing, and example config.json.
 ---
 
-Proxy settings come from environment variables or `config.json`. Precedence is **environment variable, config file, built-in default**. The `serve --port` option takes precedence over all port settings.
+Proxy settings come from environment variables or `config.json`. Precedence is **environment variable, config file, built-in default**. The `start --port` option takes precedence over all port settings.
 
 These settings configure the proxy process. Claude Code client settings such as `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `CLAUDE_CODE_*` are documented separately in [Configure Claude Code](/using/configure-claude-code/).
 
@@ -104,7 +104,7 @@ On case-sensitive platforms, uppercase names are checked before lowercase names 
 | `HTTP_PROXY` | `http://127.0.0.1:7890` |
 | `HTTPS_PROXY` | `http://127.0.0.1:7890` |
 
-After setting both variables through the operating system, service manager, or shell, start `cc-proxy serve` in the same environment.
+After setting both variables through the operating system, service manager, or shell, start `cc-proxy start` in the same environment.
 
 Proxy URLs may use `http`, `https`, `socks4`, `socks4a`, `socks5`, or `socks5h`. HTTP proxy URLs can contain percent-encoded Basic credentials, for example `http://user:password@127.0.0.1:7890`; SOCKS5 and SOCKS5H URLs can contain username/password credentials for the SOCKS handshake. SOCKS4 and SOCKS4A are supported without URL credentials. Prefer a secret-management mechanism when available because environment variables may be visible to other local processes. WSS certificate verification uses both bundled public roots and the platform native root store, including locally installed enterprise proxy CAs. Malformed or unsupported proxy URLs fail provider startup rather than being ignored. Proxy failures do not silently retry with a direct connection; only `NO_PROXY` selects direct routing. OS proxy settings, PAC files, and WPAD are not read automatically.
 
