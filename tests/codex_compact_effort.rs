@@ -7,56 +7,14 @@
 //! previous environment through `EnvGuard`. The test binary runs in its own
 //! process, keeping this environment manipulation away from the unit tests.
 
-use std::ffi::{OsStr, OsString};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
 use cc_proxy::MessagesRequest;
 use cc_proxy::providers::codex::translate::request::{TranslateOptions, translate_request};
 use serde_json::{Value, json};
 
-static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-
-    fn unset(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::remove_var(key);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
+mod common;
+use common::{EnvGuard, env_lock};
 
 /// Clears the environment knobs that feed effort resolution and reasoning
 /// summary selection, then points the config dir at an empty directory so a

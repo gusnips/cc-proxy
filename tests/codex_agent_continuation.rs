@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cc_proxy::providers::codex::websocket::{
@@ -20,55 +19,15 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{WebSocketStream, accept_hdr_async};
 use uuid::Uuid;
 
+mod common;
+use common::{EnvGuard, env_lock};
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const SESSION_HEADER: &str = "x-claude-code-session-id";
 const AGENT_HEADER: &str = "x-claude-code-agent-id";
 const PARENT_AGENT_HEADER: &str = "x-claude-code-parent-agent-id";
 
 type ProbeLog = Arc<Mutex<Vec<(usize, usize, Vec<u8>)>>>;
-
-static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-
-    fn unset(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::remove_var(key);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
 
 fn configure_environment(config_dir: &Path, upstream_url: &str) -> Vec<EnvGuard> {
     let mut guards = [
