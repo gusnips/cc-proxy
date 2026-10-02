@@ -36,6 +36,10 @@ description: Release notes for cc-proxy.
   accounts can't use: gpt-5.2, gpt-5.3-codex, gpt-5.3-codex-spark, gpt-5.4
   and gpt-5.4-mini. The backend answers each with a 400. On the OpenAI
   routes they now fail at once with the list of models that work.
+- GLM and OpenCode Go's Anthropic models (MiniMax) now send Claude Code only
+  whole stream events. When an upstream read ended halfway through an event
+  and an error came next, the error was stuck onto the half event, so
+  Claude Code could read neither, and text from the same read was lost.
 
 ## v0.1.48 (2026-10-01)
 

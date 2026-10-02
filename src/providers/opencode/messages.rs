@@ -36,6 +36,10 @@ pub fn prepare_request(
 /// that fails, a frame that is not JSON, an end without `message_stop`) into
 /// an `error` event. GLM shares it: the checks are about the wire shape, not
 /// about who sent it.
+///
+/// Only whole frames go out, each written again from its decoded event. A
+/// read can end halfway through a frame; forwarding it as it came glued the
+/// next `error` event onto that half, and Claude Code could read neither.
 pub fn stream_body<S, E>(
     upstream: S,
     provider: &'static str,
@@ -96,28 +100,39 @@ where
             return None;
         }
 
-        let chunk = match self.upstream.next().await {
-            Some(Ok(chunk)) => chunk,
-            Some(Err(_)) => return Some(self.cut_off("transport", "upstream_stream")),
-            None => {
-                if self.decoder.finish().is_err() {
-                    return Some(self.cut_off("decoder", "incomplete_stream"));
+        loop {
+            let chunk = match self.upstream.next().await {
+                Some(Ok(chunk)) => chunk,
+                Some(Err(_)) => return Some(self.cut_off("transport", "upstream_stream")),
+                None => {
+                    if self.decoder.finish().is_err() {
+                        return Some(self.cut_off("decoder", "incomplete_stream"));
+                    }
+                    return Some(self.cut_off("protocol", "missing_message_stop"));
                 }
-                return Some(self.cut_off("protocol", "missing_message_stop"));
+            };
+            if self.bytes == 0
+                && let Some(monitor) = self.monitor.as_ref()
+            {
+                monitor.generation_started(&self.req_id);
             }
-        };
-        if self.bytes == 0
-            && let Some(monitor) = self.monitor.as_ref()
-        {
-            monitor.generation_started(&self.req_id);
+            self.bytes = self.bytes.saturating_add(chunk.len() as u64);
+            self.chunks = self.chunks.saturating_add(1);
+            if let Some(output) = self.relay(&chunk) {
+                return Some(Bytes::from(output));
+            }
         }
-        self.bytes = self.bytes.saturating_add(chunk.len() as u64);
-        self.chunks = self.chunks.saturating_add(1);
+    }
 
-        let events = match self.decoder.push(&chunk) {
+    /// The whole frames `chunk` completes, or None when it completes none. A
+    /// failure comes after the frames before it, which reached cc-proxy whole
+    /// and are still worth sending.
+    fn relay(&mut self, chunk: &[u8]) -> Option<Vec<u8>> {
+        let events = match self.decoder.push(chunk) {
             Ok(events) => events,
             Err(_) => return Some(self.fail_at("decoder", "malformed_sse")),
         };
+        let mut output = Vec::new();
         let mut input_tokens = None;
         let mut output_tokens = None;
         let mut terminal = false;
@@ -127,16 +142,21 @@ where
             // raw before it came through here, so nothing shows z.ai never
             // sends one, and failing a finished answer over a terminator
             // costs the whole turn. It is skipped, not parsed, and still
-            // forwarded in the raw bytes, as GLM always did.
+            // forwarded, as GLM always did.
             if event.data.trim() == "[DONE]" {
+                output.extend(encode_sse_event(event.event.as_deref(), &event.data));
                 continue;
             }
             if terminal {
-                return Some(self.fail_at("protocol", "event_after_message_stop"));
+                output.extend(self.fail_at("protocol", "event_after_message_stop"));
+                return Some(output);
             }
             let value: serde_json::Value = match serde_json::from_str(&event.data) {
                 Ok(value) => value,
-                Err(_) => return Some(self.fail_at("json", "malformed_event")),
+                Err(_) => {
+                    output.extend(self.fail_at("json", "malformed_event"));
+                    return Some(output);
+                }
             };
             if let Some(capture) = self.stream_capture.as_mut() {
                 capture.upstream_event(event.event.as_deref(), &value);
@@ -162,13 +182,15 @@ where
                     value.get("error").unwrap_or(&value),
                     self.provider,
                 );
-                return Some(self.fail(
+                output.extend(self.fail(
                     "upstream",
                     "error_event",
                     failure.error_type(),
                     &failure.message,
                 ));
+                return Some(output);
             }
+            output.extend(encode_sse_event(event.event.as_deref(), &event.data));
             if event.event.as_deref() == Some("message_stop") || kind == Some("message_stop") {
                 terminal = true;
             }
@@ -184,12 +206,13 @@ where
         }
         if terminal {
             if self.decoder.finish().is_err() {
+                // Nothing may follow message_stop, so the error goes alone.
                 return Some(self.fail_at("decoder", "trailing_incomplete_frame"));
             }
             self.terminal = true;
             self.finish_capture(true);
         }
-        Some(chunk)
+        (!output.is_empty()).then_some(output)
     }
 
     /// The answer stopped partway: the read failed or timed out, or the
@@ -200,15 +223,15 @@ where
             "{} stopped before the answer finished. Try again.",
             self.provider
         );
-        self.fail(stage, kind, "api_error", &message)
+        Bytes::from(self.fail(stage, kind, "api_error", &message))
     }
 
-    fn fail_at(&mut self, stage: &str, kind: &str) -> Bytes {
+    fn fail_at(&mut self, stage: &str, kind: &str) -> Vec<u8> {
         let message = format!("{} sent a stream cc-proxy could not read.", self.provider);
         self.fail(stage, kind, "api_error", &message)
     }
 
-    fn fail(&mut self, stage: &str, kind: &str, error_type: &str, message: &str) -> Bytes {
+    fn fail(&mut self, stage: &str, kind: &str, error_type: &str, message: &str) -> Vec<u8> {
         self.error_sent = true;
         if let Some(capture) = self.stream_capture.as_mut() {
             capture.malformed(stage, kind);
@@ -235,7 +258,7 @@ where
             capture.downstream_event("error", value.clone());
         }
         self.finish_capture(false);
-        Bytes::from(encode_sse_event(Some("error"), &value.to_string()))
+        encode_sse_event(Some("error"), &value.to_string())
     }
 
     fn finish_capture(&mut self, completed: bool) {
@@ -306,14 +329,12 @@ mod tests {
         assert_eq!(translated["max_tokens"], 2048);
     }
 
-    #[tokio::test]
-    async fn live_stream_rejects_an_incomplete_frame_after_message_stop() {
-        let upstream =
-            futures_util::stream::iter([Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\ndata: {",
-            ))]);
-        let mut state = MessagesStreamState {
-            upstream,
+    fn relay<const N: usize>(
+        reads: [&'static [u8]; N],
+    ) -> MessagesStreamState<impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Unpin>
+    {
+        MessagesStreamState {
+            upstream: futures_util::stream::iter(reads.map(|read| Ok(Bytes::from_static(read)))),
             provider: "OpenCode Go",
             decoder: SseDecoder::default(),
             terminal: false,
@@ -324,7 +345,13 @@ mod tests {
             chunks: 0,
             stream_capture: None,
             traffic: None,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn live_stream_rejects_an_incomplete_frame_after_message_stop() {
+        let mut state =
+            relay([b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\ndata: {"]);
         let output = state.next_output().await.expect("error event");
         assert!(
             String::from_utf8_lossy(&output)
@@ -334,23 +361,9 @@ mod tests {
 
     #[tokio::test]
     async fn live_stream_forwards_the_upstream_error_type() {
-        let upstream =
-            futures_util::stream::iter([Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
-            ))]);
-        let mut state = MessagesStreamState {
-            upstream,
-            provider: "OpenCode Go",
-            decoder: SseDecoder::default(),
-            terminal: false,
-            error_sent: false,
-            monitor: None,
-            req_id: "req".into(),
-            bytes: 0,
-            chunks: 0,
-            stream_capture: None,
-            traffic: None,
-        };
+        let mut state = relay([
+            b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+        ]);
         let output = state.next_output().await.expect("error event");
         let output = String::from_utf8_lossy(&output);
         assert!(output.contains("overloaded_error"), "{output}");
@@ -359,33 +372,35 @@ mod tests {
 
     #[tokio::test]
     async fn live_stream_rejects_a_complete_event_after_message_stop() {
-        let upstream =
-            futures_util::stream::iter([Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                concat!(
-                    "event: message_stop\n",
-                    "data: {\"type\":\"message_stop\"}\n\n",
-                    "event: content_block_delta\n",
-                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"late\"}}\n\n"
-                )
-                .as_bytes(),
-            ))]);
-        let mut state = MessagesStreamState {
-            upstream,
-            provider: "OpenCode Go",
-            decoder: SseDecoder::default(),
-            terminal: false,
-            error_sent: false,
-            monitor: None,
-            req_id: "req".into(),
-            bytes: 0,
-            chunks: 0,
-            stream_capture: None,
-            traffic: None,
-        };
+        let mut state = relay([concat!(
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"late\"}}\n\n"
+        )
+        .as_bytes()]);
         let output = state.next_output().await.expect("error event");
         assert!(
             String::from_utf8_lossy(&output)
                 .contains("OpenCode Go sent a stream cc-proxy could not read.")
         );
+    }
+
+    #[tokio::test]
+    async fn live_stream_sends_a_split_frame_whole_before_the_error_after_it() {
+        // The first read ends halfway through the delta. Sent as it came,
+        // the error event in the next read was glued onto that half.
+        let mut state = relay([
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,",
+            b"\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\r\n\r\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Slow down\"}}\n\n",
+        ]);
+        let output = state.next_output().await.expect("frames");
+        let output = String::from_utf8_lossy(&output);
+        let delta = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n";
+        assert!(output.starts_with(delta), "{output}");
+        let error = &output[delta.len()..];
+        assert!(error.starts_with("event: error\ndata: "), "{output}");
+        assert!(error.contains("rate_limit_error") && error.contains("Slow down"));
+        assert!(state.next_output().await.is_none());
     }
 }

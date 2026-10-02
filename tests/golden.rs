@@ -975,7 +975,6 @@ async fn glm_thinking() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: the relay sends half of a split frame, then glues the error event onto it"]
 async fn glm_error_event() {
     assert_eq!(
         run(Glm, fixture(Glm, "error_event")).await,
@@ -999,7 +998,6 @@ async fn glm_cut_off() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: the relay sends half of the cut frame, then glues the error event onto it"]
 async fn glm_cut_off_mid_frame() {
     assert_eq!(
         run(Glm, fixture(Glm, "cut_off").mid_frame()).await,
@@ -1148,7 +1146,6 @@ async fn opencode_messages_thinking() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: the relay sends half of a split frame, then glues the error event onto it"]
 async fn opencode_messages_error_event() {
     assert_eq!(
         run(OpenCodeMessages, fixture(OpenCodeMessages, "error_event")).await,
@@ -1175,7 +1172,6 @@ async fn opencode_messages_cut_off() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: the relay sends half of the cut frame, then glues the error event onto it"]
 async fn opencode_messages_cut_off_mid_frame() {
     assert_eq!(
         run(
