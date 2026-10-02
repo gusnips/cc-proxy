@@ -5,6 +5,12 @@ description: Canonical cc-proxy command syntax for starting Claude Code, serving
 
 Running `cc-proxy` without a subcommand is equivalent to `cc-proxy serve`.
 
+In a terminal, commands print in color next to a small face that shows how
+the proxy is: awake when it runs, asleep when it's stopped, unsure when
+something needs a look. While a command waits (start, stop, restart), the
+face looks around until it's done. Piped or redirected output, `NO_COLOR=1`
+and `TERM=dumb` get the same words as plain text, with no escape codes.
+
 ## Global version commands
 
 ```sh
@@ -100,7 +106,8 @@ cc-proxy restart [--port <PORT>]
 cc-proxy reload
 ```
 
-`status` reports the running pid and listening address, or exits 1 when the
+`status` reports how long the service has run, its pid and listening
+address, and whether plain `claude` goes through it, or exits 1 when the
 service is down. `stop` shuts a running service down gracefully (exit 0 when
 there is nothing to stop). `restart` stops and starts again, keeping the
 previous port unless `--port` overrides it. `reload` validates `config.json`
@@ -182,6 +189,9 @@ Codex (plus)
   5-hour window: 45% used, resets in 2h 10m (17:00)
   Weekly: 7% used, resets in 4d 9h (Mon 00:00)
 ```
+
+In a terminal, each window also gets a bar that turns yellow at 70% used and
+red at 90%.
 
 | Provider | Asks | Shows |
 | --- | --- | --- |

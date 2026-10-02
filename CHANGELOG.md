@@ -3,6 +3,28 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## Unreleased
+
+- Commands look better in a terminal. `serve`, `stop`, `restart`, `reload`
+  and `status` print a small card with the cc-proxy face, which shows whether
+  the proxy runs, sleeps or needs a look. While a command waits, the face
+  looks around until it's done. Errors print in red with their cause.
+  Piped output, `NO_COLOR=1` and `TERM=dumb` get the same words as plain
+  text.
+- `cc-proxy status` also shows how long the proxy has run and whether plain
+  `claude` goes through it.
+- The plain text of the lifecycle commands changed: the first line names
+  cc-proxy and the details follow on their own lines (`cc-proxy started`,
+  then the address and pid), instead of `proxy started (pid …)`.
+- `cc-proxy usage` draws a bar for each window in a terminal. It turns
+  yellow at 70% used and red at 90%.
+- The monitor's header shows the face too. It talks while requests stream,
+  looks unsure for 10 seconds after a failed request, and blinks now and
+  then so you can tell the dashboard is live. Beside it are four minutes of
+  output tokens and the live tokens per second. A request that just
+  finished glows for three seconds, every provider has its own color, and
+  each empty panel says what shows up there.
+
 ## v0.1.49 (2026-10-01)
 
 - Kimi now signs in at `auth.kimi.ai` and calls `api.kimi.ai`, where Kimi
