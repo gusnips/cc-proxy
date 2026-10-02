@@ -41,6 +41,7 @@ pub fn provider_name(provider: &str) -> &str {
     match provider {
         "codex" => "Codex",
         "glm" => "GLM",
+        "copilot" => "GitHub Copilot",
         "cursor" => "Cursor",
         "kimi" => "Kimi",
         "grok" => "Grok",

@@ -151,7 +151,7 @@ pub fn render_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, panel: &Provid
                 Style::default().fg(if set_up { GREEN } else { DIM }),
             ),
             Span::styled(
-                format!("{:<12}", ui::provider_name(&row.id)),
+                format!("{:<16}", ui::provider_name(&row.id)),
                 Style::default().fg(ui::provider_color(&row.id)),
             ),
             Span::styled(
@@ -161,7 +161,7 @@ pub fn render_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, panel: &Provid
         ]));
         if let Some(usage) = &row.usage {
             lines.push(Line::from(Span::styled(
-                format!("                {usage}"),
+                format!("                    {usage}"),
                 Style::default().fg(DIM_WHITE),
             )));
         }

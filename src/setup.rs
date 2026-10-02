@@ -11,7 +11,7 @@ use crate::ui::{self, Mood};
 use crate::{config, config_keys, prompt, providers};
 
 /// Providers that sign in with a plan you already pay for.
-const PLAN_PROVIDERS: [&str; 4] = ["codex", "kimi", "cursor", "grok"];
+const PLAN_PROVIDERS: [&str; 5] = ["codex", "kimi", "cursor", "grok", "copilot"];
 /// Providers that take an API key.
 const KEY_PROVIDERS: [&str; 2] = ["glm", "opencode"];
 
