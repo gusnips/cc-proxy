@@ -3,7 +3,7 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
-## Unreleased
+## v0.1.49 (2026-10-01)
 
 - Kimi now signs in at `auth.kimi.ai` and calls `api.kimi.ai`, where Kimi
   moved. Both hosts share one sign-in, so an existing login keeps working
