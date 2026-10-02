@@ -3,6 +3,20 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## Unreleased
+
+- On Windows, cc-proxy now keeps its config under `%APPDATA%\cc-proxy` and
+  its state under `%LOCALAPPDATA%\cc-proxy`, as the docs say. It had been
+  using `~/.config` there. A config folder already at `~/.config/cc-proxy`
+  stays in use until `%APPDATA%\cc-proxy` exists, so existing logins keep
+  working. On macOS the config folder is always `~/.config/cc-proxy`, even
+  when `XDG_CONFIG_HOME` is set.
+- `cc-proxy serve` waits up to 30 seconds for the proxy to answer, up from
+  15, so a busy machine doesn't kill a start that would have worked. A
+  timeout now says what happened and what to try.
+- `cc-proxy models` no longer says "0 cursor model aliases". It shows that
+  `cursor:<model>` takes any model Cursor offers.
+
 ## v0.1.50 (2026-10-01)
 
 - Commands look better in a terminal. `serve`, `stop`, `restart`, `reload`

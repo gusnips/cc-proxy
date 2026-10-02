@@ -644,25 +644,23 @@ fn print_models(registry: &Registry, full: bool) {
 }
 
 fn compact_cursor_list(models: &[String]) -> String {
-    let mut legacy = Vec::new();
-    let mut dynamic = Vec::new();
-    for model in models {
-        if !model.contains(':') {
-            legacy.push(model.clone());
-        } else {
-            dynamic.push(model.clone());
-        }
+    let (dynamic, legacy): (Vec<&String>, Vec<&String>) =
+        models.iter().partition(|model| model.contains(':'));
+    let mut out = legacy
+        .iter()
+        .map(|model| model.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    // The legacy names are all the registry lists; `cursor:<model>` takes
+    // any id Cursor knows, so the line says so instead of counting zero.
+    if dynamic.is_empty() {
+        out.push_str("; or cursor:<model> for any model Cursor offers, e.g. cursor:gpt-5.5");
+    } else {
+        out.push_str(&format!(
+            "; {} cursor model aliases, e.g. cursor:gpt-5.5. Run `cc-proxy models --full` for all of them",
+            dynamic.len()
+        ));
     }
-    let mut out = String::new();
-    if !legacy.is_empty() {
-        out.push_str(&legacy.join(", "));
-        out.push_str("; ");
-    }
-    out.push_str(&format!("{} cursor model aliases", dynamic.len()));
-    if !dynamic.is_empty() {
-        out.push_str(", example: cursor:gpt-5.5");
-    }
-    out.push_str(" run `cc-proxy models --full` for all aliases");
     out
 }
 

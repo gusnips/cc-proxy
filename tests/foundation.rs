@@ -55,7 +55,7 @@ fn path_resolvers_cover_platform_rules() {
     let mut env = HashMap::new();
     env.insert("CCP_CONFIG_DIR".to_string(), "/tmp/ccp-config".to_string());
     let deps = DirResolverEnv {
-        platform: "darwin".to_string(),
+        platform: "macos".to_string(),
         home: "/home/u".into(),
         env: env.clone(),
     };
@@ -65,7 +65,7 @@ fn path_resolvers_cover_platform_rules() {
     );
 
     let deps = DirResolverEnv {
-        platform: "darwin".to_string(),
+        platform: "macos".to_string(),
         home: "/home/u".into(),
         env: HashMap::from([("XDG_CONFIG_HOME".into(), "/x".into())]),
     };
@@ -85,13 +85,38 @@ fn path_resolvers_cover_platform_rules() {
     );
 
     let deps = DirResolverEnv {
-        platform: "win32".to_string(),
+        platform: "windows".to_string(),
         home: "C:/Users/u".into(),
         env: HashMap::from([("APPDATA".into(), "C:/Users/u/AppData/Roaming".into())]),
     };
     assert_eq!(
         paths::resolve_config_dir(&deps).to_string_lossy(),
         "C:/Users/u/AppData/Roaming/cc-proxy"
+    );
+}
+
+#[test]
+fn windows_keeps_using_a_config_dir_saved_before_appdata() {
+    let home = tempfile::tempdir().unwrap();
+    let home_path = home.path().to_str().unwrap().to_string();
+    let appdata = format!("{home_path}/AppData/Roaming");
+    let env = HashMap::from([("APPDATA".to_string(), appdata.clone())]);
+    let deps = DirResolverEnv {
+        platform: "windows".to_string(),
+        home: home_path.clone(),
+        env,
+    };
+
+    std::fs::create_dir_all(format!("{home_path}/.config/cc-proxy")).unwrap();
+    assert_eq!(
+        paths::resolve_config_dir(&deps).to_string_lossy(),
+        format!("{home_path}/.config/cc-proxy")
+    );
+
+    std::fs::create_dir_all(format!("{appdata}/cc-proxy")).unwrap();
+    assert_eq!(
+        paths::resolve_config_dir(&deps).to_string_lossy(),
+        format!("{appdata}/cc-proxy")
     );
 }
 
