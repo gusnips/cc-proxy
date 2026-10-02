@@ -36,6 +36,38 @@ On Unix, cc-proxy replaces itself with `claude`, so the exit code and signals
 are Claude Code's own. On Windows it waits for `claude` and exits with its
 code. If there's no `claude` on `PATH`, it exits with code 127.
 
+## `shell install`, `shell uninstall`, `on`, `off`
+
+```sh
+cc-proxy shell install
+cc-proxy shell uninstall
+cc-proxy on
+cc-proxy off
+```
+
+`shell install` makes plain `claude` run through `cc-proxy claude` while
+cc-proxy is on. It picks the shell from `$SHELL`:
+
+| Shell | What it writes |
+| --- | --- |
+| zsh | One line in `$ZDOTDIR/.zshrc`, or `~/.zshrc` |
+| bash on Linux | One line in `~/.bashrc` |
+| bash on macOS | One line in `~/.bash_profile`. With no `.bash_profile`, it goes in the `~/.bash_login` or `~/.profile` you have, because bash reads only the first of the three that exists |
+| fish | `$XDG_CONFIG_HOME/fish/functions/claude.fish`, or `~/.config/fish/functions/claude.fish` |
+
+For zsh and bash, the line loads a `claude` function from `shell/claude.sh`
+in the config directory. Running `shell install` again changes nothing. Any
+other shell exits with code 1 and says to run `cc-proxy claude` instead.
+`shell install` also turns cc-proxy on.
+
+`shell uninstall` removes the line from every one of those files, deletes
+the function files it wrote, and turns cc-proxy off, so terminals that are
+still open go back to plain Claude Code.
+
+`on` and `off` set `claude.enabled` in `config.json`. The `claude` function
+asks cc-proxy on every call, so the change applies in every terminal at once.
+`cc-proxy claude`, typed out in full, always uses the proxy.
+
 ## `serve`
 
 ```sh

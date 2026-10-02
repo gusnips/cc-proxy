@@ -36,6 +36,15 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
     },
+    /// Add or remove the hook that sends plain `claude` through cc-proxy
+    Shell {
+        #[command(subcommand)]
+        command: ShellCommand,
+    },
+    /// Send plain `claude` through cc-proxy, in every terminal
+    On,
+    /// Run plain `claude` without the proxy again, in every terminal
+    Off,
     /// Start the proxy as a background service (default)
     Serve {
         #[arg(long)]
@@ -135,6 +144,14 @@ enum ProviderGroup {
 }
 
 #[derive(Debug, Subcommand)]
+enum ShellCommand {
+    /// Add the hook to your shell's startup file (zsh, bash or fish)
+    Install,
+    /// Remove the hook and turn cc-proxy off for plain `claude`
+    Uninstall,
+}
+
+#[derive(Debug, Subcommand)]
 enum ConfigCommand {
     /// Show one value from config.json
     Get {
@@ -174,6 +191,12 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Claude { args } => cc_proxy::claude::run(args),
+        Commands::Shell { command } => match command {
+            ShellCommand::Install => cc_proxy::shell::install(),
+            ShellCommand::Uninstall => cc_proxy::shell::uninstall(),
+        },
+        Commands::On => cc_proxy::shell::set(true),
+        Commands::Off => cc_proxy::shell::set(false),
         Commands::Serve {
             port,
             no_monitor,
@@ -637,6 +660,10 @@ mod tests {
             vec!["cc-proxy", "restart", "--port", "18766"],
             vec!["cc-proxy", "serve", "--monitor"],
             vec!["cc-proxy", "serve", "--no-monitor"],
+            vec!["cc-proxy", "shell", "install"],
+            vec!["cc-proxy", "shell", "uninstall"],
+            vec!["cc-proxy", "on"],
+            vec!["cc-proxy", "off"],
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
         }

@@ -5,6 +5,12 @@ description: Release notes for cc-proxy.
 
 ## Unreleased
 
+- `cc-proxy shell install` makes plain `claude` go through cc-proxy. It adds
+  one line to `~/.zshrc`, `~/.bashrc` or `~/.bash_profile`, or a function
+  file for fish. After that, `cc-proxy off` and `cc-proxy on` switch every
+  terminal at once, and `claude --resume <id>` keeps working. The line sets
+  no environment variables, so other programs never see the proxy.
+  `cc-proxy shell uninstall` removes it.
 - `cc-proxy claude` starts Claude Code on the proxy. It starts the proxy
   first if it isn't running, then passes every argument to `claude`, so
   `--resume`, `--worktree`, `-p` and a pasted resume command work as usual.

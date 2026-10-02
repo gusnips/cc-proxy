@@ -100,6 +100,30 @@ with every argument you gave it, so `--resume`, `--worktree` and `-p` work as
 usual. It doesn't change any settings file. To pick the model every session
 starts on, run `cc-proxy config set claude.model gpt-6-sol`.
 
+To make plain `claude` use the proxy too, add the shell hook once:
+
+```sh
+cc-proxy shell install
+```
+
+It adds one line to the file your shell reads when a terminal opens:
+`~/.zshrc` for zsh, `~/.bashrc` for bash on Linux, `~/.bash_profile` for bash
+on macOS. fish gets `~/.config/fish/functions/claude.fish` instead. That line
+defines a `claude` command that runs `cc-proxy claude` while cc-proxy is on,
+and plain Claude Code while it's off. It sets no environment variables, so
+nothing else on your machine sees the proxy.
+
+```sh
+cc-proxy off   # plain claude, in every terminal
+cc-proxy on    # claude through the proxy again
+```
+
+`on` and `off` reach every terminal at once, because the `claude` command
+asks cc-proxy each time it runs. A terminal that was already open when you
+ran `shell install` needs `exec zsh` (or your shell's name) once. A Claude
+Code session that's already open keeps its connection until you quit it.
+`cc-proxy shell uninstall` removes the line and turns cc-proxy off.
+
 See [Getting started](docs/src/content/docs/getting-started.md)
 for the complete first session.
 

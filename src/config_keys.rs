@@ -76,6 +76,13 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "effort for routed Codex security reviews (none|low|medium|high|xhigh|max; off inherits)",
     },
     ConfigKey {
+        path: "claude.enabled",
+        kind: ConfigKind::Bool,
+        env: &[],
+        default: Some("true"),
+        blurb: "plain `claude` uses the proxy, once `cc-proxy shell install` added the hook",
+    },
+    ConfigKey {
         path: "claude.model",
         kind: ConfigKind::Str,
         env: &[],
@@ -377,16 +384,21 @@ pub fn run_config_list() -> Result<()> {
     Ok(())
 }
 
-pub fn run_config_set(name: &str, raw: &str) -> Result<()> {
-    let key = find_key(name)?;
-    let value = parse_value(key, raw)?;
-    let dir = paths::config_dir();
+/// Write one dotted key to config.json, keeping every other key. Returns
+/// the file written.
+pub(crate) fn write_value(path: &str, value: serde_json::Value) -> Result<std::path::PathBuf> {
     let mut root = read_file()?;
     if !root.is_object() {
         root = serde_json::json!({});
     }
-    set_dotted(&mut root, key.path, value);
-    let path = config::write_config_json_at(&dir, &root)?;
+    set_dotted(&mut root, path, value);
+    config::write_config_json_at(&paths::config_dir(), &root)
+}
+
+pub fn run_config_set(name: &str, raw: &str) -> Result<()> {
+    let key = find_key(name)?;
+    let value = parse_value(key, raw)?;
+    let path = write_value(key.path, value)?;
     if key.kind == ConfigKind::Secret {
         println!("{} saved to {}.", key.path, path.display());
     } else {

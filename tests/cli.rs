@@ -53,6 +53,9 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
     for description in [
         "Print version information",
         "Start Claude Code on the proxy, passing every argument to claude",
+        "Add or remove the hook that sends plain `claude` through cc-proxy",
+        "Send plain `claude` through cc-proxy, in every terminal",
+        "Run plain `claude` without the proxy again, in every terminal",
         "Start the proxy as a background service",
         "Stop the background proxy service",
         "Show whether the background proxy service is running",

@@ -16,6 +16,7 @@ pub mod request_identity;
 pub mod retry;
 pub mod server;
 pub mod session;
+pub mod shell;
 pub mod traffic;
 pub mod tui;
 pub mod update;
