@@ -329,7 +329,7 @@ fn wait_for_child(
         }
         if let Some(exit) = child.try_wait().map_err(anyhow::Error::from)? {
             anyhow::bail!(
-                "proxy exited during startup (status {exit}); see {}",
+                "cc-proxy stopped while starting ({exit}). The log says why: {}",
                 log_path.display()
             );
         }

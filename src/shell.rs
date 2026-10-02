@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::ui::{self, Mood};
 use crate::{config, config_keys, paths};
 
 /// Set by the shell function, so `cc-proxy claude` knows `claude.enabled`
@@ -211,7 +212,7 @@ pub fn install() -> Result<()> {
     let target = match env.target(std::env::consts::OS) {
         Ok(target) => target,
         Err(message) => {
-            eprintln!("{message}");
+            ui::eprint_note(Mood::Unsure, &[message]);
             std::process::exit(1);
         }
     };
@@ -232,14 +233,19 @@ pub fn install() -> Result<()> {
         }
     };
     set_enabled(true)?;
-    println!(
-        "Added the cc-proxy hook to {}. In new terminals, `claude` now starts Claude Code \
-         on the proxy. In a terminal that's already open, run `exec {}` first.",
-        env.show(file),
-        env.shell_name()
-    );
-    println!(
-        "`cc-proxy off` goes back to plain Claude Code in every terminal; `cc-proxy on` switches back."
+    ui::print_note(
+        Mood::Glad,
+        &[
+            format!("Added the cc-proxy hook to {}.", env.show(file)),
+            format!(
+                "In new terminals, `claude` now starts Claude Code on the proxy. In a \
+                 terminal that's already open, run `exec {}` first.",
+                env.shell_name()
+            ),
+            "`cc-proxy off` goes back to plain Claude Code in every terminal; `cc-proxy on` \
+             switches back."
+                .into(),
+        ],
     );
     Ok(())
 }
@@ -273,12 +279,19 @@ pub fn uninstall() -> Result<()> {
     // off sends it to plain Claude Code.
     set_enabled(false)?;
     if removed.is_empty() {
-        println!("The cc-proxy hook isn't installed, so there was nothing to remove.");
+        ui::print_note(
+            Mood::Asleep,
+            &["The cc-proxy hook isn't installed, so there was nothing to remove.".into()],
+        );
     } else {
-        println!(
-            "Removed the cc-proxy hook from {}. `claude` starts plain Claude Code again, \
-             in every terminal. `cc-proxy claude` still uses the proxy.",
-            removed.join(" and ")
+        ui::print_note(
+            Mood::Asleep,
+            &[
+                format!("Removed the cc-proxy hook from {}.", removed.join(" and ")),
+                "`claude` starts plain Claude Code again, in every terminal. \
+                 `cc-proxy claude` still uses the proxy."
+                    .into(),
+            ],
         );
     }
     Ok(())
@@ -286,24 +299,50 @@ pub fn uninstall() -> Result<()> {
 
 pub fn set(on: bool) -> Result<()> {
     set_enabled(on)?;
-    let env = Env::current();
-    match (on, hook_installed(&env)) {
-        (true, true) => println!(
-            "cc-proxy is on. `claude` in any terminal now starts Claude Code on the proxy."
+    let open_sessions =
+        "Claude Code sessions that are already open keep their connection until you quit them.";
+    let (mood, lines) = match (on, hook_installed(&Env::current())) {
+        (true, true) => (
+            Mood::Awake,
+            [
+                "cc-proxy is on.",
+                "`claude` in any terminal now starts Claude Code on the proxy.",
+            ],
         ),
-        (true, false) => println!(
-            "cc-proxy is on, but plain `claude` won't use it until you run \
-             `cc-proxy shell install`. `cc-proxy claude` uses the proxy either way."
+        (true, false) => (
+            Mood::Unsure,
+            [
+                "cc-proxy is on, but plain `claude` won't use it until you run \
+                 `cc-proxy shell install`.",
+                "`cc-proxy claude` uses the proxy either way.",
+            ],
         ),
-        (false, _) => println!(
-            "cc-proxy is off. `claude` in any terminal now starts plain Claude Code. \
-             `cc-proxy claude` still uses the proxy."
+        (false, _) => (
+            Mood::Asleep,
+            [
+                "cc-proxy is off.",
+                "`claude` in any terminal now starts plain Claude Code. `cc-proxy claude` \
+                 still uses the proxy.",
+            ],
         ),
-    }
-    println!(
-        "Claude Code sessions that are already open keep their connection until you quit them."
-    );
+    };
+    let lines = lines.into_iter().chain([open_sessions]).map(String::from);
+    ui::print_note(mood, &lines.collect::<Vec<_>>());
     Ok(())
+}
+
+/// Whether plain `claude` goes through the proxy: the hook is in and it's on.
+pub fn plain_claude_uses_proxy() -> bool {
+    hook_installed(&Env::current()) && config::claude_enabled()
+}
+
+/// What plain `claude` does right now, for `cc-proxy status`.
+pub fn plain_claude_line() -> &'static str {
+    match (hook_installed(&Env::current()), config::claude_enabled()) {
+        (true, true) => "Plain `claude` goes through it.",
+        (true, false) => "Plain `claude` skips it. `cc-proxy on` sends it through.",
+        (false, _) => "Plain `claude` skips it. `cc-proxy shell install` sends it through.",
+    }
 }
 
 /// Through the hook, `claude.enabled` decides; run by hand, always the proxy.

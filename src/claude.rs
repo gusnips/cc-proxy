@@ -11,6 +11,7 @@ use std::process::Command;
 
 use anyhow::Result;
 
+use crate::ui::{self, Mood};
 use crate::{config, daemon};
 
 /// The Claude Code environment that sends every request to the proxy at
@@ -54,14 +55,16 @@ fn proxy_url() -> Result<String> {
         daemon::DaemonStatus::Running(info) => Ok(info.listen_url()),
         // `describe` found it by probing loopback on this port.
         daemon::DaemonStatus::Unmanaged { port } => Ok(format!("http://127.0.0.1:{port}")),
-        daemon::DaemonStatus::Stopped => match daemon::serve_background(None)? {
-            daemon::ServeOutcome::Started(info) => {
-                let url = info.listen_url();
-                eprintln!("Started cc-proxy on {url}.");
-                Ok(url)
+        daemon::DaemonStatus::Stopped => {
+            match ui::waiting("starting cc-proxy", || daemon::serve_background(None))? {
+                daemon::ServeOutcome::Started(info) => {
+                    let url = info.listen_url();
+                    ui::eprint_note(Mood::Awake, &[format!("Started cc-proxy on {url}.")]);
+                    Ok(url)
+                }
+                daemon::ServeOutcome::AlreadyRunning(info) => Ok(info.listen_url()),
             }
-            daemon::ServeOutcome::AlreadyRunning(info) => Ok(info.listen_url()),
-        },
+        }
     }
 }
 
@@ -74,9 +77,13 @@ pub fn run(args: Vec<OsString>) -> Result<()> {
     command.args(args).env_remove(crate::shell::HOOK_ENV);
     let error = exec(command);
     if error.kind() == std::io::ErrorKind::NotFound {
-        eprintln!(
-            "cc-proxy couldn't start claude: there's no `claude` on your PATH. \
-             Install Claude Code, or add it to PATH."
+        ui::eprint_note(
+            Mood::Hurt,
+            &[
+                "cc-proxy couldn't start claude: there's no `claude` on your PATH. \
+               Install Claude Code, or add it to PATH."
+                    .into(),
+            ],
         );
         std::process::exit(127);
     }

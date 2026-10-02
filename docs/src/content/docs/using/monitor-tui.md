@@ -25,9 +25,16 @@ In an attached dashboard, `q` and `Ctrl-C` detach immediately and leave the serv
 
 ## What the monitor shows
 
+- A header with the cc-proxy face, which shows the proxy's state at a
+  glance: it talks while requests stream, looks unsure for 10 seconds after
+  a failed request, and sleeps while the proxy shuts down. Beside it are the
+  uptime, the session and active request counts, the output tokens of the
+  last four minutes, and the live tokens per second.
 - Sessions grouped by Claude Code session ID and project
 - Active request lifecycle and selected provider or model
-- Recent requests, HTTP status, elapsed time, and errors
+- Recent requests, HTTP status, elapsed time, and errors. A request that
+  just finished glows for three seconds.
+- Each provider in its own color
 - Input and output token totals
 - Output throughput based on matched upstream timing and cumulative usage samples
 - Paths to traffic captures when capture is enabled
