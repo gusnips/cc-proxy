@@ -286,6 +286,8 @@ static CONTEXT: LazyLock<Regex> = LazyLock::new(|| {
         r"|reduce the length of the (?:messages|prompt|input)",
         r"|input length and `?max_tokens`? exceed context limit",
         r"|exceed(?:s|ed)? (?:the )?context limit",
+        // GitHub Copilot: "prompt token count of 270000 exceeds the limit of 128000".
+        r"|model_max_prompt_tokens_exceeded|prompt token count of \d+ exceeds the limit",
         // Scoped to what overflowed: a bare "exceeds the maximum" also covers
         // image counts and per-minute token rates, which compaction can't fix.
         r"|exceeds? the (?:model'?s? )?maximum (?:input |prompt |context )?(?:tokens?|length|context)",
@@ -416,6 +418,11 @@ mod tests {
             (
                 429,
                 r#"{"error":{"message":"Your prompt is too long, too many input tokens"}}"#,
+                FailureKind::Context,
+            ),
+            (
+                400,
+                r#"{"error":{"message":"prompt token count of 270000 exceeds the limit of 128000","code":"model_max_prompt_tokens_exceeded"}}"#,
                 FailureKind::Context,
             ),
             (

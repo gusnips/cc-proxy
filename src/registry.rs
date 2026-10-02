@@ -76,6 +76,10 @@ impl Registry {
             "glm".into(),
             GLM_MODELS.iter().map(|m| (*m).to_string()).collect(),
         );
+        models.insert(
+            "copilot".into(),
+            crate::providers::copilot::advertised_models(),
+        );
 
         let mut handlers = BTreeMap::new();
         for (name, entries) in &models {
@@ -86,6 +90,7 @@ impl Registry {
                 "grok" => Arc::new(crate::providers::grok::GrokProvider::new()),
                 "opencode" => Arc::new(crate::providers::opencode::OpenCodeProvider::new()),
                 "glm" => Arc::new(crate::providers::glm::GlmProvider::new()),
+                "copilot" => Arc::new(crate::providers::copilot::CopilotProvider::new()),
                 _ => Arc::new(PlaceholderProvider::new(name, entries.clone())),
             };
             handlers.insert(name.clone(), handler);
@@ -184,6 +189,11 @@ impl Registry {
         session_affinity: Option<&AliasProvider>,
     ) -> Option<Arc<dyn Provider>> {
         let normalized = normalize_incoming_model(raw_model);
+        // Any `copilot/` ID routes to GitHub Copilot, whose own `gpt-*` and
+        // `claude-*` ids would otherwise collide with the native providers'.
+        if normalized.starts_with(crate::providers::copilot::MODEL_PREFIX) {
+            return self.handlers.get("copilot").cloned();
+        }
         // Any `opencode-go/` ID routes to OpenCode Go, registered or not.
         // Unknown IDs are forwarded with an inferred wire protocol and
         // OpenCode Go reports the ones it never heard of, so a catalog
@@ -527,6 +537,22 @@ mod tests {
                 .name(),
             "opencode"
         );
+    }
+
+    #[test]
+    fn copilot_namespace_wins_over_the_native_ids_it_shares() {
+        let registry = Registry::new(AliasProvider::Codex);
+        for (model, owner) in [
+            ("copilot/gpt-5.5", "copilot"),
+            ("copilot/claude-opus-4.8", "copilot"),
+            ("gpt-5.5", "codex"),
+        ] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                owner,
+                "{model}"
+            );
+        }
     }
 
     #[test]

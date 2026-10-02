@@ -31,6 +31,7 @@ pub fn provider_color(provider: &str) -> Color {
         "kimi" => Color::Rgb(200, 140, 230),
         "grok" => Color::Rgb(240, 130, 170),
         "opencode" => Color::Rgb(240, 165, 100),
+        "copilot" => Color::Rgb(160, 150, 255),
         _ => DIM_WHITE,
     }
 }

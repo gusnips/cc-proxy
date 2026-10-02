@@ -158,6 +158,7 @@ cc-proxy <provider> auth <action>
 | `codex` | Browser PKCE | Device code | Account, expiry, storage | Delete proxy credential |
 | `kimi` | Device code | Unsupported | User, expiry, scope, storage | Delete proxy credential |
 | `grok` | Browser PKCE | Device code | Expiry and storage | Delete proxy credential |
+| `copilot` | Device code | Same as `login` | Account, host, token expiry, storage | Delete proxy credential and model list |
 | `cursor` | Browser polling flow | Unsupported | Source, claims, expiry | Delete proxy credential |
 | `glm` | API key entry | Unsupported | Env and stored key presence | Delete proxy credential |
 | `opencode` | API key entry (hidden) | Unsupported | Key source and base URL | Delete stored key |

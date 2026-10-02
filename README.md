@@ -1,7 +1,7 @@
 # cc-proxy
 
 Claude Code, powered by **OpenAI Codex**, **Kimi**, **Grok**, **OpenCode Go**,
-or **Cursor Agent**.
+**GitHub Copilot**, or **Cursor Agent**.
 
 > Originally forked from
 > [raine/claude-code-proxy](https://github.com/raine/claude-code-proxy).
@@ -67,7 +67,7 @@ leaves the proxy running. `cc-proxy stop` stops the service;
 `cc-proxy restart` and `cc-proxy reload` restart it and reload its config.
 
 Sign in to the other providers the same way (`kimi`, `grok`, `cursor`,
-`glm`, `opencode`), then check state and usage:
+`glm`, `opencode`, `copilot`), then check state and usage:
 
 ```sh
 cc-proxy kimi auth login
@@ -148,6 +148,7 @@ The opt-in Images API returns base64 image data and consumes the signed-in accou
 | OpenCode Go  | OpenCode Go subscription       | Non-conflicting IDs and `opencode-go/<model-id>` |
 | Cursor Agent | Cursor account                 | Cursor aliases and `cursor:<model-id>` prefixes |
 | GLM          | z.ai API key                   | `glm-*` IDs (unlisted ones forward raw)         |
+| GitHub Copilot | GitHub account with a Copilot plan | `copilot/<id>`; `cc-proxy models` lists yours |
 
 Run `cc-proxy models` for the current catalog or
 `cc-proxy models --full` for every dynamic Cursor alias.

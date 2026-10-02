@@ -140,6 +140,14 @@ Proxy URLs may use `http`, `https`, `socks4`, `socks4a`, `socks5`, or `socks5h`.
 | `CCP_KIMI_BASE_URL` | `kimi.baseUrl` | `https://api.kimi.ai/coding/v1` | Changes the API base URL. |
 | `CCP_KIMI_USER_AGENT` | `kimi.userAgent` | `KimiCLI/1.37.0` | Changes the Kimi user-agent. |
 
+## GitHub Copilot
+
+| Environment | Config key | Default | Purpose |
+| --- | --- | --- | --- |
+| `CCP_COPILOT_BASE_URL` | none | the host the Copilot token names | Sends chat to this host. |
+| `CCP_COPILOT_GITHUB_URL` | none | `https://github.com` | The GitHub site for sign-in. |
+| `CCP_COPILOT_GITHUB_API_URL` | none | `https://api.github.com` | The GitHub API that issues Copilot tokens. |
+
 ## Grok
 
 | Environment | Config key | Default | Purpose |

@@ -16,6 +16,14 @@ description: Release notes for cc-proxy.
   timeout now says what happened and what to try.
 - `cc-proxy models` no longer says "0 cursor model aliases". It shows that
   `cursor:<model>` takes any model Cursor offers.
+- New provider: GitHub Copilot. Run `cc-proxy copilot auth login`, approve the
+  code on GitHub, then start Claude Code with `cc-proxy claude --model
+  copilot/gpt-5.5`. `cc-proxy models` lists the models your account can use,
+  and every one starts with `copilot/`. cc-proxy marks a turn the agent
+  continues after a tool result as `agent`, so Copilot bills a premium
+  request only when you start a turn.
+- A Copilot context overflow ("prompt token count of … exceeds the limit")
+  now reaches Claude Code as "prompt is too long", so it compacts.
 
 ## v0.1.50 (2026-10-01)
 
