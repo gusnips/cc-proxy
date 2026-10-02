@@ -1233,13 +1233,13 @@ async fn opencode_responses_thinking() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: an in-band response.failed becomes a generic api_error, so a throttle loses its kind"]
 async fn opencode_responses_error_event() {
     assert_eq!(
         run(OpenCodeResponses, fixture(OpenCodeResponses, "error_event")).await,
         [
             "message_start",
             "content_block_start 0 text",
+            r#"content_block_delta 0 text "It says""#,
             "content_block_stop 0",
             "error rate_limit_error: Rate limit reached. Try again in 20s.",
         ]

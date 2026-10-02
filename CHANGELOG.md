@@ -40,6 +40,10 @@ description: Release notes for cc-proxy.
   whole stream events. When an upstream read ended halfway through an event
   and an error came next, the error was stuck onto the half event, so
   Claude Code could read neither, and text from the same read was lost.
+- OpenCode Go's GPT, Grok and Muse Spark models now pass on what failed when
+  the upstream fails mid-answer. A rate limit used to reach Claude Code as a
+  generic "stream is invalid" error, without the upstream's message, and the
+  text that came just before it was dropped.
 
 ## v0.1.48 (2026-10-01)
 

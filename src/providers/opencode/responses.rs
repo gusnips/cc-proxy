@@ -7,11 +7,13 @@ use futures_util::StreamExt;
 
 use crate::anthropic::schema::MessagesRequest;
 use crate::monitor::{MonitorHandle, usage_from_anthropic_sse};
+use crate::providers::codex::events::event_error;
 pub use crate::providers::codex::translate::accumulate::accumulate_response;
 use crate::providers::codex::translate::{
     live_stream::LiveStreamTranslator, request::translate_openai_compatible_request,
 };
 use crate::providers::grok::translate::stream::SseDecoder;
+use crate::providers::upstream_error;
 use crate::traffic::{StreamTrafficCapture, TrafficCapture};
 
 use super::client::{OpenCodeError, OpenCodeResponse};
@@ -104,7 +106,7 @@ where
                     let output = match self.translator.accept(&completion, self.traffic.as_deref())
                     {
                         Ok(output) => output,
-                        Err(_) => return Some(self.fail_at("translation", "invalid_event")),
+                        Err(_) => return Some(self.fail_on_event(&completion)),
                     };
                     self.terminal = true;
                     self.record_progress(&output);
@@ -126,12 +128,16 @@ where
                 Ok(events) => events,
                 Err(_) => return Some(self.fail_at("decoder", "malformed_sse")),
             };
+            // Events translated before a failure in the same read still go
+            // out ahead of the error. Dropping them lost the text that came
+            // just before it.
             let mut output = Vec::new();
             for event in events {
                 let data = event.data.trim();
                 if data == "[DONE]" {
                     if self.pending_completion.is_none() || self.done_seen {
-                        return Some(self.fail_at("protocol", "premature_done"));
+                        output.extend(self.fail_at("protocol", "premature_done"));
+                        return Some(output);
                     }
                     self.done_seen = true;
                     if let Some(capture) = self.stream_capture.as_mut() {
@@ -142,7 +148,10 @@ where
                 }
                 let value: serde_json::Value = match serde_json::from_str(data) {
                     Ok(value) => value,
-                    Err(_) => return Some(self.fail_at("json", "malformed_event")),
+                    Err(_) => {
+                        output.extend(self.fail_at("json", "malformed_event"));
+                        return Some(output);
+                    }
                 };
                 if let Some(capture) = self.stream_capture.as_mut() {
                     capture.upstream_event(event.event.as_deref(), &value);
@@ -152,7 +161,8 @@ where
                     if event_type == Some("ping") {
                         continue;
                     }
-                    return Some(self.fail_at("protocol", "event_after_completion"));
+                    output.extend(self.fail_at("protocol", "event_after_completion"));
+                    return Some(output);
                 }
                 if matches!(
                     event_type,
@@ -164,13 +174,16 @@ where
                 }
                 let translated = match self.translator.accept(&value, self.traffic.as_deref()) {
                     Ok(translated) => translated,
-                    Err(_) => return Some(self.fail_at("translation", "invalid_event")),
+                    Err(_) => {
+                        output.extend(self.fail_on_event(&value));
+                        return Some(output);
+                    }
                 };
+                self.capture_downstream(&translated);
                 output.extend(translated);
             }
             if !output.is_empty() {
                 self.record_progress(&output);
-                self.capture_downstream(&output);
                 return Some(output);
             }
         }
@@ -190,7 +203,34 @@ where
         );
     }
 
+    /// An event the translator refused. When it carries the upstream's own
+    /// error, that error keeps its kind and message: a throttle reported as a
+    /// broken stream loses the wait it asked for.
+    fn fail_on_event(&mut self, event: &serde_json::Value) -> Vec<u8> {
+        match event_error(event) {
+            Some(error) => {
+                let failure = upstream_error::from_stream(error, "OpenCode Go");
+                self.fail(
+                    "upstream",
+                    "error_event",
+                    failure.error_type(),
+                    &failure.message,
+                )
+            }
+            None => self.fail_at("translation", "invalid_event"),
+        }
+    }
+
     fn fail_at(&mut self, stage: &str, kind: &str) -> Vec<u8> {
+        self.fail(
+            stage,
+            kind,
+            "api_error",
+            "OpenCode Go Responses stream is invalid",
+        )
+    }
+
+    fn fail(&mut self, stage: &str, kind: &str, error_type: &str, message: &str) -> Vec<u8> {
         self.error_sent = true;
         if let Some(capture) = self.stream_capture.as_mut() {
             capture.malformed(stage, kind);
@@ -206,11 +246,9 @@ where
                 }),
             );
         }
-        let output = self.translator.error_chunk(
-            "OpenCode Go Responses stream is invalid",
-            "api_error",
-            self.traffic.as_deref(),
-        );
+        let output = self
+            .translator
+            .error_chunk(message, error_type, self.traffic.as_deref());
         self.capture_downstream(&output);
         self.finish_capture(false);
         output
