@@ -18,7 +18,7 @@ use crate::{config, paths};
 pub const DAEMON_CHILD_ENV: &str = "CC_PROXY_DAEMON_CHILD";
 
 /// How long `serve` waits for a fresh daemon to answer health checks.
-const START_TIMEOUT: Duration = Duration::from_secs(15);
+const START_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long `stop` waits for graceful exit before forcing it.
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -336,7 +336,9 @@ fn wait_for_child(
         if Instant::now() >= deadline {
             let _ = child.kill();
             anyhow::bail!(
-                "timed out waiting for the proxy at {address}; see {}",
+                "cc-proxy didn't answer at {address} within {} seconds. A busy machine can \
+                 be this slow: try `cc-proxy serve` again. The log may say more: {}",
+                START_TIMEOUT.as_secs(),
                 log_path.display()
             );
         }

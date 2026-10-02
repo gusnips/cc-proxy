@@ -25,16 +25,24 @@ pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
         return Path::new(override_dir).to_path_buf();
     }
 
-    if deps.platform == "win32" {
+    if deps.platform == "windows" {
         let appdata = deps
             .env
             .get("APPDATA")
             .cloned()
             .unwrap_or_else(|| format!("{}\\AppData\\Roaming", deps.home));
-        return join_with_sep(&appdata, &["cc-proxy"], true);
+        let dir = join_with_sep(&appdata, &["cc-proxy"], true);
+        // Until this fix, Windows kept its config under `~/.config`. A login
+        // saved there stays in use until the AppData folder exists.
+        let old = join_with_sep(&deps.home, &[".config", "cc-proxy"], false);
+        return if !dir.exists() && old.exists() {
+            old
+        } else {
+            dir
+        };
     }
 
-    if deps.platform == "darwin" {
+    if deps.platform == "macos" {
         return join_with_sep(&deps.home, &[".config", "cc-proxy"], false);
     }
 
@@ -47,7 +55,7 @@ pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
 }
 
 pub fn resolve_state_dir(deps: &DirResolverEnv) -> PathBuf {
-    if deps.platform == "win32" {
+    if deps.platform == "windows" {
         let local = deps
             .env
             .get("LOCALAPPDATA")
