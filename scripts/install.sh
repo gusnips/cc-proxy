@@ -282,7 +282,7 @@ verify_installation() {
 	echo "Get started:"
 	echo "  ${BIN_NAME} codex auth login    # authenticate with your ChatGPT account, or"
 	echo "  ${BIN_NAME} kimi auth login     # authenticate with your kimi.com account"
-	echo "  ${BIN_NAME} serve               # start the proxy"
+	echo "  ${BIN_NAME} start               # start the proxy"
 	echo ""
 	echo "Documentation: https://github.com/${REPO}"
 	echo ""

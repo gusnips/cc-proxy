@@ -110,6 +110,6 @@ Use process-level variables or a wrapper when you also launch Claude Code direct
 
 ## Proxy settings are separate
 
-`CCP_*`, `PORT`, and `config.json` configure the **cc-proxy server process**. They control the listener, provider endpoints, transport, credentials, and diagnostics. They do not belong in Claude Code's client environment unless the same shell also starts the proxy.
+`CCP_*`, `PORT`, and `config.json` configure the **cc-proxy startr process**. They control the listener, provider endpoints, transport, credentials, and diagnostics. They do not belong in Claude Code's client environment unless the same shell also starts the proxy.
 
 See [Configuration](/reference/configuration/) for the canonical server setting table.

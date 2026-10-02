@@ -1865,7 +1865,7 @@ fn render_setup_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, setup_text: 
 
 fn mock_setup_text(port: u16, registry: &Registry) -> String {
     format!(
-        "Mock mode uses deterministic simulated monitor traffic.\nNo proxy server is listening.\nRun `cc-proxy serve` to start the proxy.\n\n{}",
+        "Mock mode uses deterministic simulated monitor traffic.\nNo proxy server is listening.\nRun `cc-proxy start` to start the proxy.\n\n{}",
         setup_text(port, registry)
     )
 }

@@ -3,7 +3,7 @@ title: Choosing a provider
 description: Compare cc-proxy providers by account, protocol, models, reasoning, multimodal input, tools, and operational tradeoffs.
 ---
 
-One `serve` process supports every provider. Choose based on the account you have, model access, and the capabilities your work needs.
+One `start` process supports every provider. Choose based on the account you have, model access, and the capabilities your work needs.
 
 | Provider | Account | Upstream protocol | Model selection | Notable capabilities |
 | --- | --- | --- | --- | --- |

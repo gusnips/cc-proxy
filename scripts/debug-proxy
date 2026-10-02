@@ -81,7 +81,7 @@ for _attempt in {1..20}; do
   CCP_LOG_STDERR=1 \
   CCP_LOG_VERBOSE=1 \
   CCP_TRAFFIC_LOG=1 \
-    "$repo_root/target/debug/cc-proxy" serve \
+    "$repo_root/target/debug/cc-proxy" start \
       --port "$proxy_port" \
       --no-monitor >> "$server_log" 2>&1 &
   proxy_pid=$!

@@ -142,7 +142,7 @@ Server compaction is disabled by default. Enable it in `config.json`:
 Or enable it for one proxy process:
 
 ```sh
-CCP_CODEX_SERVER_COMPACTION=1 cc-proxy serve
+CCP_CODEX_SERVER_COMPACTION=1 cc-proxy start
 ```
 
 ### Fallbacks and visibility
@@ -164,7 +164,7 @@ The proxy replaces incoming credentials with stored Codex auth for both routes. 
 `CCP_CODEX_IMAGES_API=1` separately enables `POST /v1/images/generations` and `POST /v1/images/edits`. The routes reuse the proxy's stored ChatGPT OAuth session and target the ChatGPT Codex image backend; no OpenAI Platform API key is required.
 
 ```sh
-CCP_CODEX_IMAGES_API=1 cc-proxy serve
+CCP_CODEX_IMAGES_API=1 cc-proxy start
 ```
 
 The model defaults to and is restricted to `gpt-image-2`. Generation accepts JSON. Editing accepts either Codex JSON data URLs or OpenAI-style multipart uploads, which the proxy validates and converts into the Codex JSON contract. Results are returned as `data[].b64_json`. Masks, remote URLs, URL-formatted output, and image variations are not supported.

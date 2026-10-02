@@ -1,6 +1,6 @@
 //! Background-service lifecycle for the proxy.
 //!
-//! `serve` starts a detached daemon and records it in a pidfile under the
+//! `start` starts a detached daemon and records it in a pidfile under the
 //! state directory. `status`, `stop`, `restart`, and `reload` all resolve
 //! through that pidfile, so every command knows whether the service is up.
 //! A stale pidfile (dead or foreign pid) is treated as not running.
@@ -13,11 +13,11 @@ use std::time::{Duration, Instant};
 
 use crate::{config, paths};
 
-/// Env marker: when present, `serve` runs the daemon child instead of
+/// Env marker: when present, `start` runs the daemon child instead of
 /// spawning one.
 pub const DAEMON_CHILD_ENV: &str = "CC_PROXY_DAEMON_CHILD";
 
-/// How long `serve` waits for a fresh daemon to answer health checks.
+/// How long `start` waits for a fresh daemon to answer health checks.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long `stop` waits for graceful exit before forcing it.
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -337,7 +337,7 @@ fn wait_for_child(
             let _ = child.kill();
             anyhow::bail!(
                 "cc-proxy didn't answer at {address} within {} seconds. A busy machine can \
-                 be this slow: try `cc-proxy serve` again. The log may say more: {}",
+                 be this slow: try `cc-proxy start` again. The log may say more: {}",
                 START_TIMEOUT.as_secs(),
                 log_path.display()
             );
@@ -357,7 +357,7 @@ pub fn serve_background(port: Option<u16>) -> anyhow::Result<ServeOutcome> {
         anyhow::bail!(
             "port {port} already answers health checks but has no pidfile — \
              another proxy instance (or something else) owns it. Stop it first, \
-             or pick another port with `cc-proxy serve --port <PORT>`."
+             or pick another port with `cc-proxy start --port <PORT>`."
         );
     }
     let exe = std::env::current_exe()?;
@@ -373,7 +373,7 @@ pub fn serve_background(port: Option<u16>) -> anyhow::Result<ServeOutcome> {
         .open(&log_path)?;
     let log_err = log_out.try_clone()?;
     let mut child = Command::new(exe)
-        .arg("serve")
+        .arg("start")
         .arg("--port")
         .arg(port.to_string())
         .env(DAEMON_CHILD_ENV, "1")
@@ -392,7 +392,7 @@ pub fn stop_service() -> anyhow::Result<StopOutcome> {
         DaemonStatus::Running(info) => info,
         DaemonStatus::Unmanaged { port } => anyhow::bail!(
             "a proxy answers on port {port} but has no pidfile, so it was not \
-             started by `cc-proxy serve`. Stop that process directly."
+             started by `cc-proxy start`. Stop that process directly."
         ),
         DaemonStatus::Stopped => return Ok(StopOutcome::NotRunning),
     };
@@ -434,7 +434,7 @@ pub fn restart_service(port: Option<u16>) -> anyhow::Result<DaemonInfo> {
     if !status().is_running() && probe_port_health(effective) {
         anyhow::bail!(
             "a proxy answers on port {effective} but has no pidfile, so it was \
-             not started by `cc-proxy serve`. Stop that process directly, or \
+             not started by `cc-proxy start`. Stop that process directly, or \
              restart onto another port with `cc-proxy restart --port <PORT>`."
         );
     }

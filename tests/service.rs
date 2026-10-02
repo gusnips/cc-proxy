@@ -150,7 +150,7 @@ fn serve_status_and_stop_round_trip() -> Result<(), Box<dyn std::error::Error>> 
         serve.env(key, value);
     }
     serve
-        .args(["serve", "--port", &port.to_string()])
+        .args(["start", "--port", &port.to_string()])
         .assert()
         .success()
         .stdout(contains("started"));
@@ -163,7 +163,7 @@ fn serve_status_and_stop_round_trip() -> Result<(), Box<dyn std::error::Error>> 
         again.env(key, value);
     }
     again
-        .args(["serve", "--port", &port.to_string()])
+        .args(["start", "--port", &port.to_string()])
         .assert()
         .success()
         .stdout(contains("already running"));
@@ -192,7 +192,7 @@ fn restart_keeps_serving() -> Result<(), Box<dyn std::error::Error>> {
         serve.env(key, value);
     }
     serve
-        .args(["serve", "--port", &port.to_string()])
+        .args(["start", "--port", &port.to_string()])
         .assert()
         .success();
     wait_for_status(&guard, true)?;

@@ -58,7 +58,7 @@ cc-proxy codex auth login
 Start the proxy (runs as a background service):
 
 ```sh
-cc-proxy serve
+cc-proxy start
 cc-proxy status
 ```
 
@@ -133,7 +133,7 @@ for the complete first session.
 Optional Codex image generation and editing can reuse the same ChatGPT login:
 
 ```sh
-CCP_CODEX_IMAGES_API=1 cc-proxy serve
+CCP_CODEX_IMAGES_API=1 cc-proxy start
 curl http://127.0.0.1:18765/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"A paper-cut fox","model":"gpt-image-2"}'

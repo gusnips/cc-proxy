@@ -1,6 +1,6 @@
 # The `ccp` helper: running the proxy as a background service
 
-`ccp` is a small wrapper that runs `cc-proxy` as a **systemd user service**, so the proxy stays up in the background (with auto-restart) instead of needing a terminal running `cargo run -- serve`. The installer writes the unit and the wrapper automatically.
+`ccp` is a small wrapper that runs `cc-proxy` as a **systemd user service**, so the proxy stays up in the background (with auto-restart) instead of needing a terminal running `cargo run -- start`. The installer writes the unit and the wrapper automatically.
 
 > **Linux/WSL only — not macOS.** This uses a systemd `--user` service; macOS has no systemd — it would need a launchd agent instead. The installer refuses to run without systemd. It's an optional convenience helper, not part of what the proxy itself ships.
 
@@ -23,7 +23,7 @@ Two files, both written outside the repo (see `install.sh` for the exact content
 
 Both drive the compiled binary at `~/.local/bin/cc-proxy` — the unit runs whatever is installed there, independent of the repo checkout. Rebuild/reinstall the binary (eg, `just install`, or copy a fresh build over it) and `ccp restart` picks it up.
 
-The unit runs `... serve --no-monitor` in the foreground (systemd needs a
+The unit runs `... start --no-monitor` in the foreground (systemd needs a
 non-forking process, and there is no TTY as a service) with `CCP_LOG_STDERR=1`,
 so systemd captures the logs for `ccp logs`. It restarts on failure and listens
 on the default `127.0.0.1:18765` — to change the port add `Environment=PORT=...`

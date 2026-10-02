@@ -49,7 +49,8 @@ enum Commands {
     /// Run plain `claude` without the proxy again, in every terminal
     Off,
     /// Start the proxy as a background service (default)
-    Serve {
+    #[command(alias = "serve")]
+    Start {
         #[arg(long)]
         port: Option<u16>,
         /// Run in the foreground without the monitor dashboard
@@ -194,7 +195,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let commands = cli.command.unwrap_or(Commands::Serve {
+    let commands = cli.command.unwrap_or(Commands::Start {
         port: None,
         no_monitor: false,
         monitor: false,
@@ -213,7 +214,7 @@ fn run() -> Result<()> {
         },
         Commands::On => cc_proxy::shell::set(true),
         Commands::Off => cc_proxy::shell::set(false),
-        Commands::Serve {
+        Commands::Start {
             port,
             no_monitor,
             monitor,
@@ -299,7 +300,7 @@ fn run() -> Result<()> {
             });
             if !from_flag && matches!(daemon::describe(), daemon::DaemonStatus::Stopped) {
                 anyhow::bail!(
-                    "proxy is not running. Start it with `cc-proxy serve`, \
+                    "proxy is not running. Start it with `cc-proxy start`, \
                      then attach with `cc-proxy monitor`."
                 );
             }
@@ -458,7 +459,7 @@ fn start_daemon(port: Option<u16>) -> Result<()> {
                 Some(wanted) if wanted != info.port => format!(
                     "It serves port {}, so `--port {wanted}` was ignored. Move it with \
                      `cc-proxy restart --port {wanted}`, or run a second one in the \
-                     foreground with `cc-proxy serve --no-monitor --port {wanted}`.",
+                     foreground with `cc-proxy start --no-monitor --port {wanted}`.",
                     info.port,
                 ),
                 _ => "Restart it with `cc-proxy restart`.".to_string(),
@@ -492,7 +493,7 @@ fn start_hint() -> String {
     if cc_proxy::shell::plain_claude_uses_proxy() {
         "Plain `claude` starts it again the next time you run it.".into()
     } else {
-        "Start it with `cc-proxy serve`.".into()
+        "Start it with `cc-proxy start`.".into()
     }
 }
 
@@ -731,7 +732,8 @@ mod tests {
             vec!["cc-proxy", "reload"],
             vec!["cc-proxy", "restart"],
             vec!["cc-proxy", "restart", "--port", "18766"],
-            vec!["cc-proxy", "serve", "--monitor"],
+            vec!["cc-proxy", "start", "--monitor"],
+            vec!["cc-proxy", "start", "--no-monitor"],
             vec!["cc-proxy", "serve", "--no-monitor"],
             vec!["cc-proxy", "shell", "install"],
             vec!["cc-proxy", "shell", "uninstall"],
@@ -740,7 +742,7 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
         }
-        assert!(Cli::try_parse_from(["cc-proxy", "serve", "--monitor", "--no-monitor"]).is_err());
+        assert!(Cli::try_parse_from(["cc-proxy", "start", "--monitor", "--no-monitor"]).is_err());
     }
 
     #[test]

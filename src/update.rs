@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::daemon;
+use crate::ui::{self, Mood};
 
 const REPO: &str = "gusnips/cc-proxy";
 const BIN_NAME: &str = "cc-proxy";
@@ -195,35 +196,49 @@ pub fn run_update(check: bool, version: Option<&str>) -> Result<()> {
     };
 
     if !is_newer(CURRENT_VERSION, &tag) {
-        println!("{BIN_NAME} {CURRENT_VERSION} is already up to date ({tag}).");
+        ui::print_note(
+            Mood::Glad,
+            &[format!(
+                "{BIN_NAME} {CURRENT_VERSION} is up to date ({tag})."
+            )],
+        );
         return Ok(());
     }
     if check {
-        println!(
-            "{BIN_NAME} {CURRENT_VERSION} -> {tag} available; re-run without --check to install."
+        ui::print_note(
+            Mood::Awake,
+            &[
+                format!("{BIN_NAME} {tag} is out. You have {CURRENT_VERSION}."),
+                format!("Run `{BIN_NAME} update` to install it."),
+            ],
         );
         return Ok(());
     }
 
     let path = install_path()?;
     let (archive_url, checksum_url) = archive_urls(&tag, platform);
-    println!("Downloading {BIN_NAME} {tag} for {platform}...");
-    let archive = download_bytes(&client, &archive_url)?;
-    let checksum = download_text(&client, &checksum_url)?;
-    verify_sha256(&archive, &checksum)?;
-    let binary = extract_binary(&archive)?;
-    replace_binary(&path, &binary)?;
-    println!("Installed {BIN_NAME} {tag} to {}", path.display());
+    ui::waiting(&format!("Downloading {BIN_NAME} {tag}"), || {
+        let archive = download_bytes(&client, &archive_url)?;
+        let checksum = download_text(&client, &checksum_url)?;
+        verify_sha256(&archive, &checksum)?;
+        replace_binary(&path, &extract_binary(&archive)?)
+    })?;
 
+    let mut lines = vec![
+        format!("Updated {BIN_NAME} to {tag}"),
+        format!("From {CURRENT_VERSION}, installed in {}", path.display()),
+    ];
     if let daemon::DaemonStatus::Running(info) = daemon::describe() {
-        let info = daemon::restart_service(Some(info.port))?;
-        println!(
-            "Background service restarted (pid {}) on {}.",
-            info.pid,
-            info.listen_url()
-        );
+        let info = daemon::restart_service(Some(info.port)).with_context(|| {
+            format!("{BIN_NAME} {tag} is installed, but the background proxy did not restart")
+        })?;
+        lines.push(format!(
+            "The background proxy restarted on {} · pid {}.",
+            info.listen_url(),
+            info.pid
+        ));
     }
-    println!("Verify with `{BIN_NAME} --version`.");
+    ui::print_card(Mood::Glad, &lines);
     Ok(())
 }
 

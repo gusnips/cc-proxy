@@ -3,7 +3,7 @@ title: Command reference
 description: Canonical cc-proxy command syntax for starting Claude Code, serving, monitoring, listing models, version output, provider authentication, and OpenCode Go usage.
 ---
 
-Running `cc-proxy` without a subcommand is equivalent to `cc-proxy serve`.
+Running `cc-proxy` without a subcommand is equivalent to `cc-proxy start`.
 
 In a terminal, commands print in color next to a small face that shows how
 the proxy is: awake when it runs, asleep when it's stopped, unsure when
@@ -90,14 +90,14 @@ still open go back to plain Claude Code.
 asks cc-proxy on every call, so the change applies in every terminal at once.
 `cc-proxy claude`, typed out in full, always uses the proxy.
 
-## `serve`
+## `start`
 
 ```sh
-cc-proxy serve [--port <PORT>] [--no-monitor | --monitor]
+cc-proxy start [--port <PORT>] [--no-monitor | --monitor]
 ```
 
 Starts the proxy as a background service and exits once it answers health
-checks, printing its pid and listening address. A second `serve` reports the
+checks, printing its pid and listening address. A second `start` reports the
 running pid instead of starting another copy. The service is tracked in a
 pidfile under the state directory; `status`, `stop`, `restart`, and `reload`
 all resolve through it.
@@ -287,7 +287,7 @@ script (`scripts/install.sh`) updates the same way.
 From a source checkout:
 
 ```sh
-cargo run -- serve
+cargo run -- start
 cargo test --all
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings

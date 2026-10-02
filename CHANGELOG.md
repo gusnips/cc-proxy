@@ -3,6 +3,17 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## Unreleased
+
+- `cc-proxy start` is now the name of the command that starts the proxy.
+  `cc-proxy serve` still works and does the same thing, so existing service
+  units and scripts keep running. The docs, the install script and every hint
+  the program prints now say `start`.
+- `cc-proxy update` and `cc-proxy config set` now answer with the same face
+  card as `start` and `stop`. `update` shows the animation while it
+  downloads, says what version you moved from, and says so if the new
+  binary installed but the background proxy did not restart.
+
 ## v0.1.51 (2026-10-01)
 
 - On Windows, cc-proxy now keeps its config under `%APPDATA%\cc-proxy` and
