@@ -37,8 +37,8 @@ These settings configure the proxy process. Claude Code client settings such as 
   },
   "kimi": {
     "userAgent": "KimiCLI/1.37.0",
-    "oauthHost": "https://auth.kimi.com",
-    "baseUrl": "https://api.kimi.com/coding/v1"
+    "oauthHost": "https://auth.kimi.ai",
+    "baseUrl": "https://api.kimi.ai/coding/v1"
   },
   "grok": {
     "baseUrl": "https://cli-chat-proxy.grok.com/v1",
@@ -136,8 +136,8 @@ Proxy URLs may use `http`, `https`, `socks4`, `socks4a`, `socks5`, or `socks5h`.
 
 | Environment | Config key | Default | Purpose |
 | --- | --- | --- | --- |
-| `CCP_KIMI_OAUTH_HOST` | `kimi.oauthHost` | `https://auth.kimi.com` | Changes the OAuth host. |
-| `CCP_KIMI_BASE_URL` | `kimi.baseUrl` | `https://api.kimi.com/coding/v1` | Changes the API base URL. |
+| `CCP_KIMI_OAUTH_HOST` | `kimi.oauthHost` | `https://auth.kimi.ai` | Changes the OAuth host. |
+| `CCP_KIMI_BASE_URL` | `kimi.baseUrl` | `https://api.kimi.ai/coding/v1` | Changes the API base URL. |
 | `CCP_KIMI_USER_AGENT` | `kimi.userAgent` | `KimiCLI/1.37.0` | Changes the Kimi user-agent. |
 
 ## Grok

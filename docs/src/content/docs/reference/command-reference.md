@@ -186,7 +186,7 @@ Codex (plus)
 | Provider | Asks | Shows |
 | --- | --- | --- |
 | `codex` | `GET https://chatgpt.com/backend-api/wham/usage` | 5-hour and weekly windows, plan |
-| `kimi` | `GET https://api.kimi.com/coding/v1/usages` | 5-hour and weekly quotas, plan |
+| `kimi` | `GET https://api.kimi.ai/coding/v1/usages` | 5-hour and weekly quotas, plan |
 | `opencode` | `GET https://opencode.ai/zen/go/v1/usage` | Rolling 5-hour, weekly and monthly windows |
 
 Each address follows the provider's base URL (`codex.baseUrl`, `kimi.baseUrl`,

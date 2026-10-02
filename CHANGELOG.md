@@ -5,6 +5,10 @@ description: Release notes for cc-proxy.
 
 ## Unreleased
 
+- Kimi now signs in at `auth.kimi.ai` and calls `api.kimi.ai`, where Kimi
+  moved. Both hosts share one sign-in, so an existing login keeps working
+  with no new `cc-proxy kimi auth login`. `kimi.oauthHost` and
+  `kimi.baseUrl` still override them.
 - `cc-proxy shell install` makes plain `claude` go through cc-proxy. It adds
   one line to `~/.zshrc`, `~/.bashrc` or `~/.bash_profile`, or a function
   file for fish. After that, `cc-proxy off` and `cc-proxy on` switch every

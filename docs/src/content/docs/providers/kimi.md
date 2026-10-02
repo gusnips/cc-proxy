@@ -3,11 +3,11 @@ title: Kimi
 description: Configure Kimi Code authentication, model aliases, reasoning effort, tools, images, video, token refresh, and provider settings.
 ---
 
-Kimi uses the OpenAI-style chat completions endpoint at `https://api.kimi.com/coding/v1/chat/completions`.
+Kimi uses the OpenAI-style chat completions endpoint at `https://api.kimi.ai/coding/v1/chat/completions`.
 
 ## Account and authentication
 
-Use a **kimi.com account with Kimi Code access**. Authentication is an RFC 8628 device-code flow:
+Use a **Kimi account with Kimi Code access**. Authentication is an RFC 8628 device-code flow:
 
 ```sh
 cc-proxy kimi auth login
