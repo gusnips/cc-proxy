@@ -52,6 +52,10 @@ description: Release notes for cc-proxy.
 - A Cursor 429 now passes on Cursor's reason and its own `retry-after`.
   Before, Claude Code got "Cursor upstream error" and a 5-second wait that
   Cursor never sent.
+- A finished answer no longer fails when an upstream read ends halfway
+  through what comes after the end of the answer, such as `data: [DONE]` or
+  OpenCode Go's closing metadata. This affected Kimi, GLM and OpenCode Go.
+  Claude Code got an error instead of the answer it had already been sent.
 
 ## v0.1.48 (2026-10-01)
 

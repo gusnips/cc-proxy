@@ -1206,9 +1206,10 @@ where
                 self.capture_downstream(&output);
             }
             if self.translator.is_finished() {
-                if self.translator.finish().is_err() || self.capture_decoder.finish().is_err() {
-                    return Some(self.fail_at("decoder", "trailing_incomplete_frame"));
-                }
+                // [DONE] finished the answer. A read can end partway through
+                // the metadata some providers send after it, and failing the
+                // finished turn over that half frame would cost the whole
+                // answer, so the half frame is dropped.
                 self.terminal = true;
                 self.finish_capture(true);
                 return (!output.is_empty()).then_some(output);
@@ -1795,7 +1796,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_stream_rejects_an_incomplete_frame_after_done() {
+    async fn live_stream_ends_cleanly_when_half_a_frame_trails_done() {
         let upstream = futures_util::stream::iter([Ok::<Bytes, std::io::Error>(
             Bytes::from_static(b"data: [DONE]\n\ndata: {"),
         )]);
@@ -1812,8 +1813,11 @@ mod tests {
             stream_capture: None,
             traffic: None,
         };
-        let output = state.next_output().await.expect("error event");
-        assert!(String::from_utf8_lossy(&output).contains("OpenCode Go stream is invalid"));
+        let output = state.next_output().await.expect("the end of the answer");
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("event: message_stop"), "{output}");
+        assert!(!output.contains("event: error"), "{output}");
+        assert!(state.next_output().await.is_none());
     }
 
     #[tokio::test]

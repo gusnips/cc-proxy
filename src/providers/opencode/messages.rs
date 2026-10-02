@@ -205,10 +205,10 @@ where
             );
         }
         if terminal {
-            if self.decoder.finish().is_err() {
-                // Nothing may follow message_stop, so the error goes alone.
-                return Some(self.fail_at("decoder", "trailing_incomplete_frame"));
-            }
+            // The answer is whole once message_stop is out. A read can end
+            // partway through what trails it (z.ai's `data: [DONE]`), and
+            // failing the finished turn over that half frame would cost the
+            // whole answer, so the half frame is dropped.
             self.terminal = true;
             self.finish_capture(true);
         }
@@ -349,14 +349,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_stream_rejects_an_incomplete_frame_after_message_stop() {
+    async fn live_stream_ends_cleanly_when_half_a_frame_trails_message_stop() {
+        let message_stop = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
         let mut state =
-            relay([b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\ndata: {"]);
-        let output = state.next_output().await.expect("error event");
-        assert!(
-            String::from_utf8_lossy(&output)
-                .contains("OpenCode Go sent a stream cc-proxy could not read.")
-        );
+            relay([b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\ndata: [DO"]);
+        let output = state.next_output().await.expect("message_stop");
+        assert_eq!(String::from_utf8_lossy(&output), message_stop);
+        assert!(state.next_output().await.is_none());
     }
 
     #[tokio::test]
