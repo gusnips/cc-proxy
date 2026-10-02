@@ -11,9 +11,10 @@
 //! The transcripts pin current behavior. A case whose current behavior looks
 //! like a bug is `#[ignore]`d with the reason, and asserts what it should be.
 //!
-//! Run with `cargo test --test golden`; add `-- --ignored` for the suspected
-//! bugs. No case reaches a real provider or reads real credentials: config and
-//! HOME point at a temp dir, so the macOS Keychain is never consulted.
+//! Run with `cargo test --test golden`; add `-- --ignored` to run the cases
+//! marked as suspected bugs. No case reaches a real provider or reads real
+//! credentials: config and HOME point at a temp dir, so the macOS Keychain is
+//! never consulted.
 
 mod common;
 
@@ -975,7 +976,6 @@ async fn glm_thinking() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: the relay sends half of a split frame, then glues the error event onto it"]
 async fn glm_error_event() {
     assert_eq!(
         run(Glm, fixture(Glm, "error_event")).await,
@@ -999,7 +999,6 @@ async fn glm_cut_off() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: the relay sends half of the cut frame, then glues the error event onto it"]
 async fn glm_cut_off_mid_frame() {
     assert_eq!(
         run(Glm, fixture(Glm, "cut_off").mid_frame()).await,
@@ -1148,7 +1147,6 @@ async fn opencode_messages_thinking() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: the relay sends half of a split frame, then glues the error event onto it"]
 async fn opencode_messages_error_event() {
     assert_eq!(
         run(OpenCodeMessages, fixture(OpenCodeMessages, "error_event")).await,
@@ -1175,7 +1173,6 @@ async fn opencode_messages_cut_off() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: the relay sends half of the cut frame, then glues the error event onto it"]
 async fn opencode_messages_cut_off_mid_frame() {
     assert_eq!(
         run(
@@ -1237,13 +1234,13 @@ async fn opencode_responses_thinking() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: an in-band response.failed becomes a generic api_error, so a throttle loses its kind"]
 async fn opencode_responses_error_event() {
     assert_eq!(
         run(OpenCodeResponses, fixture(OpenCodeResponses, "error_event")).await,
         [
             "message_start",
             "content_block_start 0 text",
+            r#"content_block_delta 0 text "It says""#,
             "content_block_stop 0",
             "error rate_limit_error: Rate limit reached. Try again in 20s.",
         ]
@@ -1371,8 +1368,23 @@ async fn cursor_error_event() {
     ]);
     assert_eq!(
         run(Cursor, reply).await,
+        ["HTTP 429 rate_limit_error: Rate limit reached. Try again in 20s."]
+    );
+}
+
+#[tokio::test]
+async fn cursor_rate_limit_http() {
+    // The upstream's own wait goes through; none is made up when it sends none.
+    let reply = Reply::error(
+        429,
+        r#"{"code":"resource_exhausted","message":"Rate limit reached. Try again in 20s."}"#,
+    )
+    .header("retry-after", "20");
+    assert_eq!(
+        run(Cursor, reply).await,
         [
-            "HTTP 429 rate_limit_error: Connect error 429: Rate limit reached. Try again in 20s. (resource_exhausted)"
+            "HTTP 429 rate_limit_error: Rate limit reached. Try again in 20s.",
+            "retry-after: 20",
         ]
     );
 }
@@ -1402,7 +1414,6 @@ const CURSOR_QUOTA: &[&str] = &[
 ];
 
 #[tokio::test]
-#[ignore = "suspected bug: a spent Cursor quota comes back as a throttle, so Claude Code keeps retrying"]
 async fn cursor_quota() {
     let reply = cursor_reply(&[end_frame(Some((
         "resource_exhausted",
@@ -1412,7 +1423,6 @@ async fn cursor_quota() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: a Cursor HTTP 429 gets an invented retry-after: 5 and loses the upstream's reason"]
 async fn cursor_quota_http() {
     let reply = Reply::error(
         429,

@@ -36,6 +36,26 @@ description: Release notes for cc-proxy.
   accounts can't use: gpt-5.2, gpt-5.3-codex, gpt-5.3-codex-spark, gpt-5.4
   and gpt-5.4-mini. The backend answers each with a 400. On the OpenAI
   routes they now fail at once with the list of models that work.
+- GLM and OpenCode Go's Anthropic models (MiniMax, Qwen) now send Claude
+  Code only whole stream events. When an upstream read ended halfway through
+  an event and an error came next, the error was stuck onto the half event,
+  so Claude Code could read neither, and text from the same read was lost.
+- OpenCode Go's GPT, Grok and Muse Spark models now pass on what failed when
+  the upstream fails mid-answer. A rate limit used to reach Claude Code as a
+  generic "stream is invalid" error, without the upstream's message, and the
+  text that came just before it was dropped.
+- Cursor now tells a spent quota from a short rate limit. Both arrive as a
+  429, so Claude Code kept retrying a spent quota, which a few seconds of
+  waiting can't fix. A spent quota now comes back with `x-should-retry: false`,
+  which stops the retries, whether Cursor reports it as an HTTP error or at
+  the end of its answer.
+- A Cursor 429 now passes on Cursor's reason and its own `retry-after`.
+  Before, Claude Code got "Cursor upstream error" and a 5-second wait that
+  Cursor never sent.
+- A finished answer no longer fails when an upstream read ends halfway
+  through what comes after the end of the answer, such as `data: [DONE]` or
+  OpenCode Go's closing metadata. This affected Kimi, GLM and OpenCode Go.
+  Claude Code got an error instead of the answer it had already been sent.
 
 ## v0.1.48 (2026-10-01)
 

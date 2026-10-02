@@ -562,7 +562,7 @@ fn sse_parses_event_names_and_data() {
         error_detail: None,
     };
 
-    let sse = frame_cursor_stream(&upstream, "msg_sse", "cursor-test");
+    let sse = frame_cursor_stream(&upstream, "msg_sse", "cursor-test").unwrap();
     let sse_str = String::from_utf8_lossy(&sse);
 
     let events = parse_sse_events(&sse_str);
@@ -620,7 +620,7 @@ fn sse_message_delta_contains_usage() {
         error_detail: None,
     };
 
-    let sse = frame_cursor_stream(&upstream, "msg_u", "cursor-test");
+    let sse = frame_cursor_stream(&upstream, "msg_u", "cursor-test").unwrap();
     let sse_str = String::from_utf8_lossy(&sse);
     let events = parse_sse_events(&sse_str);
 
@@ -774,7 +774,7 @@ async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
     assert_eq!(json["usage"]["input_tokens"].as_u64(), Some(15));
     assert_eq!(json["usage"]["output_tokens"].as_u64(), Some(3));
 
-    let sse = frame_cursor_stream(&upstream, "msg_sse_mock", "cursor-test");
+    let sse = frame_cursor_stream(&upstream, "msg_sse_mock", "cursor-test").unwrap();
     let sse_str = String::from_utf8_lossy(&sse);
     let events = parse_sse_events(&sse_str);
     let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();

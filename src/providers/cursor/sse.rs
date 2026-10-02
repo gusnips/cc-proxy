@@ -1,5 +1,7 @@
 use crate::providers::cursor::client::CursorUpstreamResponse;
-use crate::providers::cursor::response::{CursorStreamEvent, decode_upstream_response};
+use crate::providers::cursor::response::{
+    CursorDecodeError, CursorStreamEvent, decode_upstream_response,
+};
 
 /// SSE event name constants.
 pub const EVENT_MESSAGE_START: &str = "message_start";
@@ -20,17 +22,16 @@ pub const EVENT_ERROR: &str = "error";
 /// 4. content_block_stop
 /// 5. message_delta (with final usage and stop_reason)
 /// 6. message_stop
+///
+/// An upstream error comes back as `Err`, not as an `error` event: the whole
+/// turn is read before anything is sent, so the caller can still answer with
+/// the real status and retry headers.
 pub fn frame_cursor_stream(
     upstream: &CursorUpstreamResponse,
     message_id: &str,
     model: &str,
-) -> Vec<u8> {
-    let events = match decode_upstream_response(&upstream.body) {
-        Ok(e) => e,
-        Err(e) => {
-            return format_sse_error(&e.to_string());
-        }
-    };
+) -> Result<Vec<u8>, CursorDecodeError> {
+    let events = decode_upstream_response(&upstream.body)?;
 
     let mut sse = Vec::new();
     let mut framer = CursorSseFramer::new(&mut sse, message_id, model);
@@ -66,7 +67,7 @@ pub fn frame_cursor_stream(
     }
 
     framer.finalize();
-    sse
+    Ok(sse)
 }
 
 /// Format an SSE error event.
@@ -382,7 +383,7 @@ mod tests {
             error_detail: None,
         };
 
-        let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test");
+        let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test").unwrap();
         let sse_str = String::from_utf8_lossy(&sse);
 
         // Verify event structure with explicit parsing
@@ -415,7 +416,7 @@ mod tests {
             error_detail: None,
         };
 
-        let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test");
+        let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test").unwrap();
         let sse_str = String::from_utf8_lossy(&sse);
         let events = parse_sse_events(&sse_str);
 
@@ -440,7 +441,7 @@ mod tests {
             error_detail: None,
         };
 
-        let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test");
+        let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test").unwrap();
         let sse_str = String::from_utf8_lossy(&sse);
         let events = parse_sse_events(&sse_str);
 
@@ -460,6 +461,25 @@ mod tests {
     }
 
     #[test]
+    fn sse_hands_an_upstream_error_back_instead_of_framing_it() {
+        // Framed into a 200, a spent quota read as a generic stream error, and
+        // the caller could no longer send the headers that stop the retries.
+        let mut body = test_frames::text_frame("It says");
+        body.extend_from_slice(&crate::providers::cursor::connect::encode_connect_frame(
+            r#"{"error":{"code":"resource_exhausted","message":"You've reached your monthly usage limit."}}"#,
+            crate::providers::cursor::connect::FLAG_END,
+        ));
+        let upstream = CursorUpstreamResponse {
+            status: 200,
+            body,
+            error_detail: None,
+        };
+
+        let error = frame_cursor_stream(&upstream, "msg_1", "cursor-test").unwrap_err();
+        assert_eq!(error.status(), Some(429));
+    }
+
+    #[test]
     fn sse_reports_an_error_when_cursor_never_ends_the_turn() {
         let upstream = CursorUpstreamResponse {
             status: 200,
@@ -467,7 +487,7 @@ mod tests {
             error_detail: None,
         };
 
-        let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test");
+        let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test").unwrap();
         let events = parse_sse_events(&String::from_utf8_lossy(&sse));
         let event_names: Vec<&str> = events.iter().map(|e| e.0.as_str()).collect();
 
@@ -502,7 +522,7 @@ mod tests {
             error_detail: None,
         };
 
-        let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test");
+        let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test").unwrap();
         let sse_str = String::from_utf8_lossy(&sse);
         let events = parse_sse_events(&sse_str);
         assert!(events.iter().any(|(_, data)| {

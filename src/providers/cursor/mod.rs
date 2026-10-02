@@ -36,6 +36,7 @@ use crate::providers::cursor::response::{
 use crate::providers::cursor::tool_bridge::{
     advertised_tool_names, can_bridge_cursor_native_tools, start_cursor_tool_bridge,
 };
+use crate::providers::upstream_error;
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -120,26 +121,26 @@ impl Provider for CursorProvider {
         }
         let upstream = match client.run_agent(&token, &prompt, model, &images).await {
             Ok(r) => r,
-            Err(e) => {
-                return map_cursor_error_to_response(&e);
-            }
+            Err(e) => return cursor_provider_error(e).response(),
         };
 
         if want_stream {
-            let sse_bytes = if can_bridge_cursor_native_tools(&body, ctx.session_id.as_deref()) {
-                let events = match decode_upstream_response(&upstream.body) {
-                    Ok(e) => e,
-                    Err(e) => return map_cursor_decode_error_to_response(&e),
-                };
-                start_cursor_tool_bridge(
-                    &message_id,
-                    model,
-                    &events,
-                    advertised_tool_names(&body),
-                    Box::new(|| uuid::Uuid::new_v4().to_string().replace('-', "")),
-                )
+            let framed = if can_bridge_cursor_native_tools(&body, ctx.session_id.as_deref()) {
+                decode_upstream_response(&upstream.body).map(|events| {
+                    start_cursor_tool_bridge(
+                        &message_id,
+                        model,
+                        &events,
+                        advertised_tool_names(&body),
+                        Box::new(|| uuid::Uuid::new_v4().to_string().replace('-', "")),
+                    )
+                })
             } else {
                 sse::frame_cursor_stream(&upstream, &message_id, model)
+            };
+            let sse_bytes = match framed {
+                Ok(bytes) => bytes,
+                Err(e) => return cursor_decode_provider_error(e).response(),
             };
             if let Some(monitor) = ctx.monitor.as_ref() {
                 let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
@@ -170,7 +171,7 @@ impl Provider for CursorProvider {
                     }
                     (StatusCode::OK, Json(json)).into_response()
                 }
-                Err(e) => map_cursor_decode_error_to_response(&e),
+                Err(e) => cursor_decode_provider_error(e).response(),
             }
         }
     }
@@ -265,6 +266,7 @@ impl Provider for CursorProvider {
             )
         } else {
             sse::frame_cursor_stream(&upstream, &message_id, &requested)
+                .map_err(cursor_decode_provider_error)?
         };
         if let Some(traffic) = ctx.traffic.as_ref() {
             traffic.write_bytes("050-anthropic-intermediate.sse", &bytes);
@@ -301,69 +303,27 @@ fn now_ms() -> u64 {
 // Error mapping
 // ---------------------------------------------------------------------------
 
+// Cursor's failures go through the classifier the other providers share. A
+// spent quota and a short throttle both arrive as 429 or `resource_exhausted`,
+// and only the reason tells them apart: Claude Code waits out a throttle, but
+// retrying a spent quota only fails again.
+
 fn cursor_provider_error(err: client::CursorError) -> ProviderError {
-    let (status, kind) = match err.status {
-        401 | 403 => (StatusCode::UNAUTHORIZED, ProviderErrorKind::Authentication),
-        429 => (StatusCode::TOO_MANY_REQUESTS, ProviderErrorKind::RateLimit),
-        _ => (StatusCode::BAD_GATEWAY, ProviderErrorKind::Api),
-    };
-    let mut error = ProviderError::new(status, kind, err.detail.unwrap_or(err.message));
-    if err.status == 429 {
-        error.retry_after = Some(err.retry_after.unwrap_or_else(|| "5".to_string()));
-    }
-    error
+    // The client's own failures (a cut-off read, a timeout) have no body and
+    // a 502, which the classifier keeps as a 502 with the client's message.
+    let reason = err.detail.as_deref().unwrap_or(&err.message);
+    upstream_error::from_http(err.status, reason, err.retry_after.as_deref(), "Cursor")
 }
 
 fn cursor_decode_provider_error(err: CursorDecodeError) -> ProviderError {
-    let (status, kind) = match err.status() {
-        Some(401 | 403) => (StatusCode::UNAUTHORIZED, ProviderErrorKind::Authentication),
-        Some(429) => (StatusCode::TOO_MANY_REQUESTS, ProviderErrorKind::RateLimit),
-        _ => (StatusCode::BAD_GATEWAY, ProviderErrorKind::Api),
-    };
-    ProviderError::new(status, kind, format!("Response decoding error: {err}"))
-}
-
-fn map_cursor_error_to_response(err: &client::CursorError) -> Response {
-    match err.status {
-        401 | 403 => json_error(
-            StatusCode::UNAUTHORIZED,
-            "authentication_error",
-            err.detail.as_deref().unwrap_or("Authentication failed"),
-        ),
-        429 => {
-            let retry_after = err.retry_after.as_deref().unwrap_or("5");
-            let resp = json_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate_limit_error",
-                &err.message,
-            );
-            let headers = [(http::header::RETRY_AFTER, retry_after)];
-            (headers, resp).into_response()
+    match err {
+        CursorDecodeError::ConnectEnd(end) => {
+            upstream_error::from_http(end.status, &end.detail, None, "Cursor")
         }
-        _ => json_error(
+        CursorDecodeError::Decode(message) => ProviderError::new(
             StatusCode::BAD_GATEWAY,
-            "api_error",
-            err.detail.as_deref().unwrap_or(&err.message),
-        ),
-    }
-}
-
-fn map_cursor_decode_error_to_response(err: &CursorDecodeError) -> Response {
-    match err.status() {
-        Some(401 | 403) => json_error(
-            StatusCode::UNAUTHORIZED,
-            "authentication_error",
-            err.to_string(),
-        ),
-        Some(429) => json_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limit_error",
-            err.to_string(),
-        ),
-        _ => json_error(
-            StatusCode::BAD_GATEWAY,
-            "api_error",
-            format!("Response decoding error: {err}"),
+            ProviderErrorKind::Api,
+            format!("Response decoding error: {message}"),
         ),
     }
 }
