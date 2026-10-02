@@ -153,7 +153,16 @@ impl CursorHttpClient {
 
         if status >= 400 {
             let detail = parse_error_body(&body_bytes, &headers);
-            return Err(CursorError::new(status, "Cursor upstream error", detail));
+            let mut error = CursorError::new(
+                status,
+                format!("Cursor upstream returned HTTP {status}"),
+                detail,
+            );
+            error.retry_after = headers
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            return Err(error);
         }
         if !finished {
             return Err(CursorError::internal(

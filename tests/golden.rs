@@ -11,9 +11,10 @@
 //! The transcripts pin current behavior. A case whose current behavior looks
 //! like a bug is `#[ignore]`d with the reason, and asserts what it should be.
 //!
-//! Run with `cargo test --test golden`; add `-- --ignored` for the suspected
-//! bugs. No case reaches a real provider or reads real credentials: config and
-//! HOME point at a temp dir, so the macOS Keychain is never consulted.
+//! Run with `cargo test --test golden`; add `-- --ignored` to run the cases
+//! marked as suspected bugs. No case reaches a real provider or reads real
+//! credentials: config and HOME point at a temp dir, so the macOS Keychain is
+//! never consulted.
 
 mod common;
 
@@ -1367,8 +1368,23 @@ async fn cursor_error_event() {
     ]);
     assert_eq!(
         run(Cursor, reply).await,
+        ["HTTP 429 rate_limit_error: Rate limit reached. Try again in 20s."]
+    );
+}
+
+#[tokio::test]
+async fn cursor_rate_limit_http() {
+    // The upstream's own wait goes through; none is made up when it sends none.
+    let reply = Reply::error(
+        429,
+        r#"{"code":"resource_exhausted","message":"Rate limit reached. Try again in 20s."}"#,
+    )
+    .header("retry-after", "20");
+    assert_eq!(
+        run(Cursor, reply).await,
         [
-            "HTTP 429 rate_limit_error: Connect error 429: Rate limit reached. Try again in 20s. (resource_exhausted)"
+            "HTTP 429 rate_limit_error: Rate limit reached. Try again in 20s.",
+            "retry-after: 20",
         ]
     );
 }
@@ -1398,7 +1414,6 @@ const CURSOR_QUOTA: &[&str] = &[
 ];
 
 #[tokio::test]
-#[ignore = "suspected bug: a spent Cursor quota comes back as a throttle, so Claude Code keeps retrying"]
 async fn cursor_quota() {
     let reply = cursor_reply(&[end_frame(Some((
         "resource_exhausted",
@@ -1408,7 +1423,6 @@ async fn cursor_quota() {
 }
 
 #[tokio::test]
-#[ignore = "suspected bug: a Cursor HTTP 429 gets an invented retry-after: 5 and loses the upstream's reason"]
 async fn cursor_quota_http() {
     let reply = Reply::error(
         429,
