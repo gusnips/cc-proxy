@@ -21,6 +21,22 @@ cc-proxy version
 
 Each prints `cc-proxy <version>`.
 
+## `setup`
+
+```sh
+cc-proxy setup
+```
+
+Asks a few questions, one line each, and saves the answers:
+
+1. A plan you already pay for (Codex, Kimi, Cursor, Grok) or an API key (GLM, OpenCode Go), then which one.
+2. The sign-in for that provider. If one is already saved, it asks before replacing it.
+3. For GLM and OpenCode Go, a check of the key. GLM gets a 1-token message and OpenCode Go a usage request. If the provider refuses the key, `setup` stops and doesn't save it. If the provider can't be reached, it saves the key and says so.
+4. The main model and the fast model, saved as `claude.model` and `claude.fastModel`. Enter keeps the first model for the main one and the same model for the fast one.
+5. Whether to add the shell hook (see `shell install`).
+
+It ends with the command to run: `claude` once the hook is in place, `cc-proxy claude` otherwise. Piped input answers the questions the same way a keyboard does.
+
 ## `claude`
 
 ```sh

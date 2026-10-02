@@ -31,6 +31,8 @@ struct Cli {
 enum Commands {
     /// Print version information
     Version,
+    /// Sign in to a provider, pick your models and get ready to run claude
+    Setup,
     /// Start Claude Code on the proxy, passing every argument to claude
     #[command(disable_help_flag = true)]
     Claude {
@@ -203,6 +205,7 @@ fn run() -> Result<()> {
             println!("cc-proxy {}", VERSION);
             Ok(())
         }
+        Commands::Setup => cc_proxy::setup::run(),
         Commands::Claude { args } => cc_proxy::claude::run(args),
         Commands::Shell { command } => match command {
             ShellCommand::Install => cc_proxy::shell::install(),

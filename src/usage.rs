@@ -140,6 +140,33 @@ enum Report {
 }
 
 impl Report {
+    /// The plan and its windows on one line, for the monitor.
+    fn headline(&self) -> String {
+        let used = |label: &str, percent: Option<f64>| {
+            percent.map(|percent| format!("{label} {percent:.0}%"))
+        };
+        let parts = match self {
+            Self::Plan(_, usage) => vec![
+                usage.plan.clone(),
+                used("5h", usage.five_hour.map(|window| window.used_percent)),
+                used("week", usage.weekly.map(|window| window.used_percent)),
+            ],
+            Self::OpenCode(response) => {
+                let usage = &response.usage;
+                let percent =
+                    |window: &Option<crate::providers::opencode::client::OpenCodeUsageWindow>| {
+                        window.as_ref().and_then(|window| window.percent)
+                    };
+                vec![
+                    used("5h", percent(&usage.rolling)),
+                    used("week", percent(&usage.weekly)),
+                    used("month", percent(&usage.monthly)),
+                ]
+            }
+        };
+        parts.into_iter().flatten().collect::<Vec<_>>().join(" · ")
+    }
+
     fn text(&self, now: Timestamp, tz: &TimeZone, styled: bool) -> String {
         match self {
             Self::Plan(provider, usage) => format_plan(provider.name(), usage, now, tz, styled),
@@ -206,6 +233,34 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
         println!("{}", blocks.join("\n\n"));
     }
     Ok(code)
+}
+
+/// One line per signed-in plan, keyed by provider id, for the monitor's
+/// Providers overlay. A lookup that fails reads "usage unavailable"; the
+/// overlay has no room for the reason, and `cc-proxy usage` gives it.
+pub fn headlines() -> Vec<(&'static str, String)> {
+    let Ok(client) = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build() else {
+        return Vec::new();
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return Vec::new();
+    };
+    let providers = UsageProvider::value_variants();
+    let results = runtime.block_on(futures_util::future::join_all(
+        providers.iter().map(|provider| fetch(*provider, &client)),
+    ));
+    providers
+        .iter()
+        .zip(results)
+        .filter_map(|(provider, result)| match result {
+            Ok(Some(report)) => Some((provider.id(), report.headline())),
+            Ok(None) => None,
+            Err(_) => Some((provider.id(), "usage unavailable".to_string())),
+        })
+        .collect()
 }
 
 /// None means the provider isn't signed in.

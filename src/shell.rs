@@ -207,6 +207,27 @@ fn hook_installed(env: &Env) -> bool {
     function_file().exists() || env.fish_function().exists()
 }
 
+/// Where this shell stands on the hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookStatus {
+    Installed,
+    /// This shell can take the hook, and doesn't have it yet.
+    Installable,
+    /// cc-proxy can't add the hook to this shell.
+    Unsupported,
+}
+
+pub fn hook_status() -> HookStatus {
+    let env = Env::current();
+    if hook_installed(&env) {
+        HookStatus::Installed
+    } else if env.target(std::env::consts::OS).is_ok() {
+        HookStatus::Installable
+    } else {
+        HookStatus::Unsupported
+    }
+}
+
 pub fn install() -> Result<()> {
     let env = Env::current();
     let target = match env.target(std::env::consts::OS) {

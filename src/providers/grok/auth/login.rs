@@ -47,7 +47,7 @@ pub fn login<S: AuthStorage<StoredAuth>>(store: &GrokTokenStore<S>) -> anyhow::R
     let auth_url = authorize_url(&discovery, &redirect_uri, &pkce, &state)?;
 
     println!("Open this URL in your browser to authorize:\n\n  {auth_url}\n");
-    open_browser(&auth_url);
+    let _ = crate::browser::open(&auth_url);
     let code = wait_for_callback(&listener, &state, LOGIN_TIMEOUT)?;
     let tokens = exchange_code(&client, &discovery, &code, &pkce, &redirect_uri)?;
     validate_tokens(&tokens)?;
@@ -278,21 +278,6 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) {
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
-}
-
-fn open_browser(url: &str) {
-    #[cfg(target_os = "macos")]
-    let command = ("open", vec![url]);
-    #[cfg(target_os = "linux")]
-    let command = ("xdg-open", vec![url]);
-    #[cfg(target_os = "windows")]
-    let command = ("cmd", vec!["/C", "start", "", url]);
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    {
-        let _ = std::process::Command::new(command.0)
-            .args(command.1)
-            .spawn();
-    }
 }
 
 fn now_ms() -> u64 {

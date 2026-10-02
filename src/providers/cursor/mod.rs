@@ -335,6 +335,16 @@ fn cursor_decode_provider_error(err: CursorDecodeError) -> ProviderError {
 pub(crate) struct CursorCli;
 
 impl CliHandlers for CursorCli {
+    fn auth_state(&self) -> crate::provider::AuthState {
+        match load_cursor_auth().ok().flatten() {
+            Some(auth) => crate::provider::AuthState::SignedIn {
+                account: auth.email.or(auth.user_id),
+                expires_ms: auth.expires,
+            },
+            None => crate::provider::AuthState::Missing,
+        }
+    }
+
     fn login(&self) -> Result<(), anyhow::Error> {
         let auth = run_cursor_login()?.ok_or_else(|| anyhow::anyhow!("Cursor login timed out"))?;
         println!("Cursor auth saved in {}", auth.source);

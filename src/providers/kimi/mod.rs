@@ -211,6 +211,16 @@ fn kimi_error(err: &client::KimiError) -> ProviderError {
 pub(crate) struct KimiCli;
 
 impl CliHandlers for KimiCli {
+    fn auth_state(&self) -> crate::provider::AuthState {
+        match file_store().load_auth().ok().flatten() {
+            Some(auth) => crate::provider::AuthState::SignedIn {
+                account: auth.user_id,
+                expires_ms: Some(auth.expires),
+            },
+            None => crate::provider::AuthState::Missing,
+        }
+    }
+
     fn login(&self) -> Result<(), anyhow::Error> {
         let tokens = auth::login::run_device_login()?;
         let store = file_store();
