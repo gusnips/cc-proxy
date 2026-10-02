@@ -24,6 +24,8 @@ Windows archives and binaries for every supported platform are on the [GitHub re
 Update later with `cc-proxy update` (add `--check` to only report), or by
 re-running the install command and restarting the service.
 
+Short on time? `cc-proxy setup` does steps 2 to 4 for any provider: it signs you in, picks the models and says what to run.
+
 ## 2. Sign in to Codex
 
 Use a **ChatGPT Plus or Pro account**, not an OpenAI API account:

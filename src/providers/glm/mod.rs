@@ -189,13 +189,47 @@ fn map_glm_error(err: &GlmError) -> Response {
 
 pub(crate) struct GlmCli;
 
+/// Sends a 1-token message on the cheapest model: the only call z.ai has
+/// that needs a valid key.
+pub async fn check_key(api_key: &str) -> crate::provider::KeyCheck {
+    use crate::provider::KeyCheck;
+    let body = serde_json::json!({
+        "model": GLM_MODELS[1],
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    let client = match GlmHttpClient::new() {
+        Ok(client) => client,
+        Err(error) => return KeyCheck::Unverified(error.to_string()),
+    };
+    let body = body.to_string();
+    let call = client.post_messages(api_key, body.as_bytes());
+    match tokio::time::timeout(std::time::Duration::from_secs(20), call).await {
+        Ok(Ok(_)) => KeyCheck::Accepted,
+        Ok(Err(GlmError {
+            status: status @ (401 | 403),
+            ..
+        })) => KeyCheck::Rejected(format!("HTTP {status}")),
+        Ok(Err(GlmError {
+            status: 0, detail, ..
+        })) => KeyCheck::Unverified(detail.unwrap_or_else(|| "no answer".into())),
+        Ok(Err(GlmError { status, .. })) => KeyCheck::Unverified(format!("HTTP {status}")),
+        Err(_) => KeyCheck::Unverified("no answer within 20 seconds".into()),
+    }
+}
+
 impl CliHandlers for GlmCli {
+    fn auth_state(&self) -> crate::provider::AuthState {
+        if load_glm_api_key().is_some() {
+            crate::provider::AuthState::KeySaved
+        } else {
+            crate::provider::AuthState::Missing
+        }
+    }
+
     fn login(&self) -> Result<(), anyhow::Error> {
-        use std::io::{self, BufRead};
-        println!("Enter your z.ai API key (https://z.ai) and press Enter:");
-        let mut buf = String::new();
-        io::stdin().lock().read_line(&mut buf)?;
-        let key = buf.trim().to_string();
+        println!("Paste your z.ai API key (https://z.ai; input is hidden) and press Enter:");
+        let key = crate::prompt::read_hidden_line("API key: ")?;
         if key.is_empty() {
             anyhow::bail!("no API key provided");
         }

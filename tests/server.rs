@@ -26,6 +26,10 @@ fn body_string(json: &str) -> Body {
 struct FakeCli;
 
 impl CliHandlers for FakeCli {
+    fn auth_state(&self) -> cc_proxy::provider::AuthState {
+        cc_proxy::provider::AuthState::Missing
+    }
+
     fn login(&self) -> anyhow::Result<()> {
         Ok(())
     }

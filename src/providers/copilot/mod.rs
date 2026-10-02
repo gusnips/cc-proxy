@@ -213,6 +213,17 @@ fn invalid_request(message: String) -> ProviderError {
 pub(crate) struct CopilotCli;
 
 impl CliHandlers for CopilotCli {
+    fn auth_state(&self) -> crate::provider::AuthState {
+        use crate::auth::AuthStorage;
+        match auth::file_store().load().ok().flatten() {
+            Some(stored) => crate::provider::AuthState::SignedIn {
+                account: stored.account,
+                expires_ms: Some(stored.expires),
+            },
+            None => crate::provider::AuthState::Missing,
+        }
+    }
+
     fn login(&self) -> Result<(), anyhow::Error> {
         let signed_in = auth::login(|prompt| {
             ui::eprint_note(

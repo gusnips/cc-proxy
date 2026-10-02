@@ -19,6 +19,8 @@ pub struct BrowserLoginConfig {
     pub issuer: String,
     pub port: u16,
     pub timeout: Duration,
+    /// Open the sign-in page in the browser. Off in tests.
+    pub open_browser: bool,
 }
 
 impl BrowserLoginConfig {
@@ -27,6 +29,7 @@ impl BrowserLoginConfig {
             issuer: issuer.into(),
             port: OAUTH_PORT,
             timeout: BROWSER_LOGIN_TIMEOUT,
+            open_browser: false,
         }
     }
 
@@ -86,7 +89,10 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body:
 // ---------------------------------------------------------------------------
 
 pub fn run_browser_login() -> Result<TokenResponse, anyhow::Error> {
-    let config = BrowserLoginConfig::new(ISSUER);
+    let config = BrowserLoginConfig {
+        open_browser: true,
+        ..BrowserLoginConfig::new(ISSUER)
+    };
     run_browser_login_with_config(&config)
 }
 
@@ -106,6 +112,9 @@ pub fn run_browser_login_with_config(
         .map_err(|e| anyhow::anyhow!("Failed to set non-blocking: {e}"))?;
 
     println!("Open this URL in your browser to authorize:\n\n  {auth_url}\n");
+    if config.open_browser {
+        let _ = crate::browser::open(&auth_url);
+    }
 
     let deadline = std::time::Instant::now() + config.timeout;
 
@@ -490,6 +499,7 @@ mod tests {
             issuer: "http://fake-issuer".into(),
             port,
             timeout: Duration::from_secs(1),
+            open_browser: false,
         };
 
         let handle = std::thread::spawn(move || {
@@ -532,6 +542,7 @@ mod tests {
             issuer: "http://fake-issuer".into(),
             port,
             timeout: Duration::from_millis(100),
+            open_browser: false,
         };
 
         // run_browser_login_with_config will bind to the port and timeout

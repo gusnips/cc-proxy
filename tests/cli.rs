@@ -52,6 +52,7 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
     let stdout = String::from_utf8(output.stdout)?;
     for description in [
         "Print version information",
+        "Sign in to a provider, pick your models and get ready to run claude",
         "Start Claude Code on the proxy, passing every argument to claude",
         "Add or remove the hook that sends plain `claude` through cc-proxy",
         "Send plain `claude` through cc-proxy, in every terminal",
@@ -567,5 +568,99 @@ fn usage_with_a_rejected_sign_in_says_how_to_fix_it_and_exits_two()
         .stderr(
             "Codex didn't accept the sign-in when asked for usage. Run `cc-proxy codex auth login` to sign in again.\n",
         );
+    Ok(())
+}
+
+/// A z.ai stand-in that answers every message with `status`.
+fn serve_glm(status: u16) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new().route(
+        "/v1/messages",
+        axum::routing::post(move || async move {
+            (axum::http::StatusCode::from_u16(status).unwrap(), "{}")
+        }),
+    );
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, app).await.unwrap();
+            });
+    });
+    base_url
+}
+
+fn setup_command(temp: &TempDir, glm_base_url: &str) -> Command {
+    let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
+    isolated_opencode_env(&mut cmd, temp);
+    cmd.arg("setup")
+        .env("SHELL", "/bin/zsh")
+        .env_remove("CCP_GLM_API_KEY")
+        .env_remove("GLM_API_KEY")
+        .env("CCP_GLM_BASE_URL", glm_base_url)
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost");
+    cmd
+}
+
+/// An API key, GLM, the key, then Enter twice for the models and "n" for
+/// the shell hook.
+const GLM_SETUP_INPUT: &str = "2\n1\nglm-test-key\n\n\nn\n";
+
+#[test]
+fn setup_tests_the_glm_key_then_saves_it_and_the_models() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = TempDir::new()?;
+    setup_command(&temp, &serve_glm(200))
+        .write_stdin(GLM_SETUP_INPUT)
+        .assert()
+        .success()
+        .stdout(contains("GLM key saved"))
+        .stdout(contains(
+            "Run `cc-proxy claude` to start Claude Code on glm-5.3.",
+        ));
+    let key = std::fs::read_to_string(temp.path().join("config/glm/auth.json"))?;
+    assert!(key.contains("glm-test-key"));
+    let config = std::fs::read_to_string(temp.path().join("config/config.json"))?;
+    assert!(config.contains("\"model\": \"glm-5.3\""), "{config}");
+    assert!(config.contains("\"fastModel\": \"glm-5.3\""), "{config}");
+    Ok(())
+}
+
+#[test]
+fn setup_refuses_to_save_a_key_the_provider_rejects() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    setup_command(&temp, &serve_glm(401))
+        .write_stdin(GLM_SETUP_INPUT)
+        .assert()
+        .failure()
+        .stderr(contains("GLM refused the key (HTTP 401)"))
+        .stderr(contains("didn't save it"));
+    assert!(!temp.path().join("config/glm/auth.json").exists());
+    assert!(!temp.path().join("config/config.json").exists());
+    Ok(())
+}
+
+#[test]
+fn setup_saves_the_key_with_a_warning_when_the_provider_is_offline()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    // A port nothing listens on.
+    let closed = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        format!("http://{}", listener.local_addr()?)
+    };
+    setup_command(&temp, &closed)
+        .write_stdin(GLM_SETUP_INPUT)
+        .assert()
+        .success()
+        .stdout(contains("couldn't check the GLM key"))
+        .stdout(contains("Run `cc-proxy claude`"));
+    assert!(temp.path().join("config/glm/auth.json").exists());
     Ok(())
 }

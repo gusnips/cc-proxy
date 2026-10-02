@@ -88,6 +88,9 @@ cc-proxy update --check
 cc-proxy update
 ```
 
+First time? `cc-proxy setup` signs you in, picks your models and tells you
+what to run.
+
 Start Claude Code on the proxy:
 
 ```sh

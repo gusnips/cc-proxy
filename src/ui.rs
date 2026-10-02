@@ -36,6 +36,20 @@ pub fn provider_color(provider: &str) -> Color {
     }
 }
 
+/// How people say a provider's name.
+pub fn provider_name(provider: &str) -> &str {
+    match provider {
+        "codex" => "Codex",
+        "glm" => "GLM",
+        "copilot" => "GitHub Copilot",
+        "cursor" => "Cursor",
+        "kimi" => "Kimi",
+        "grok" => "Grok",
+        "opencode" => "OpenCode Go",
+        other => other,
+    }
+}
+
 /// The face's expressions. Each one shows what state the proxy is in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mood {

@@ -344,6 +344,10 @@ struct PlaceholderCli {
 }
 
 impl CliHandlers for PlaceholderCli {
+    fn auth_state(&self) -> crate::provider::AuthState {
+        crate::provider::AuthState::Missing
+    }
+
     fn login(&self) -> Result<()> {
         Err(anyhow!("{}: browser login not supported", self.provider))
     }

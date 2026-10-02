@@ -196,7 +196,7 @@ pub fn run_cursor_login() -> anyhow::Result<Option<CursorAuth>> {
     println!("Open this URL to authenticate with Cursor:");
     println!("{}", login.login_url);
     println!();
-    if let Err(err) = open_cursor_login_url(&login.login_url) {
+    if let Err(err) = crate::browser::open(&login.login_url) {
         println!("Could not open browser automatically: {err}");
     }
     println!("Waiting for Cursor login...");
@@ -335,22 +335,6 @@ fn parse_jwt_claims(token: &str) -> Option<serde_json::Value> {
         })
         .ok()?;
     serde_json::from_slice(&decoded).ok()
-}
-
-fn open_cursor_login_url(url: &str) -> anyhow::Result<()> {
-    let status = if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(url).status()?
-    } else if cfg!(target_os = "windows") {
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", url])
-            .status()?
-    } else {
-        std::process::Command::new("xdg-open").arg(url).status()?
-    };
-    if !status.success() {
-        anyhow::bail!("open command exited with {status}");
-    }
-    Ok(())
 }
 
 fn random_base64_url(len: usize) -> String {

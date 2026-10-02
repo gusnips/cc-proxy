@@ -529,6 +529,15 @@ fn map_error(error: client::GrokError) -> Response {
 pub struct GrokCli;
 pub static GROK_CLI: GrokCli = GrokCli;
 impl CliHandlers for GrokCli {
+    fn auth_state(&self) -> crate::provider::AuthState {
+        match file_store().load_auth().ok().flatten() {
+            Some(auth) => crate::provider::AuthState::SignedIn {
+                account: None,
+                expires_ms: Some(auth.expires_at_ms),
+            },
+            None => crate::provider::AuthState::Missing,
+        }
+    }
     fn login(&self) -> anyhow::Result<()> {
         let store = file_store();
         auth::login::login(&store)?;

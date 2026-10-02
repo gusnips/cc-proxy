@@ -141,7 +141,33 @@ impl std::fmt::Display for ProviderError {
 /// translators and be recovered with `downcast_ref` where the response is built.
 impl std::error::Error for ProviderError {}
 
+/// What cc-proxy holds for a provider, without calling the provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthState {
+    /// A sign-in is saved. `expires_ms` is when its access token runs out;
+    /// the proxy renews it on use.
+    SignedIn {
+        account: Option<String>,
+        expires_ms: Option<u64>,
+    },
+    /// An API key is set, in the config file or the environment.
+    KeySaved,
+    Missing,
+}
+
+/// What a provider said about an API key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyCheck {
+    Accepted,
+    /// The provider refused the key: it is wrong, revoked or expired.
+    Rejected(String),
+    /// The check didn't settle it: the provider was offline or answered
+    /// with something else.
+    Unverified(String),
+}
+
 pub trait CliHandlers: Send + Sync {
+    fn auth_state(&self) -> AuthState;
     fn login(&self) -> Result<()>;
     fn device(&self) -> Result<()>;
     fn status(&self) -> Result<()>;

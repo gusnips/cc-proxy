@@ -50,6 +50,7 @@ In an attached dashboard, `q` and `Ctrl-C` detach immediately and leave the serv
 | `Esc` | Close details or an overlay |
 | `?` | Toggle shortcut help |
 | `b` | Toggle the setup overlay |
+| `p` | Toggle the Providers overlay: each provider's sign-in and plan usage |
 | `q` | Detach an attached dashboard; in the built-in dashboard, confirm proxy shutdown |
 | `Ctrl-C` | Detach an attached dashboard; in the built-in dashboard, start shutdown (press again to force exit) |
 

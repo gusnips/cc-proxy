@@ -24,6 +24,17 @@ description: Release notes for cc-proxy.
   request only when you start a turn.
 - A Copilot context overflow ("prompt token count of … exceeds the limit")
   now reaches Claude Code as "prompt is too long", so it compacts.
+- `cc-proxy setup` walks you through a first run. You pick a provider, sign
+  in (or paste an API key), pick the main model and the fast model, and
+  choose whether to add the shell hook. At the end it tells you what to run.
+  For GLM and OpenCode Go it checks the key first: a key the provider
+  refuses isn't saved, and a provider that can't be reached doesn't stop
+  you.
+- The monitor has a Providers overlay on `p`. For each provider it shows
+  whether cc-proxy has a sign-in or an API key, and for Codex, Kimi and
+  OpenCode Go how much of the plan is used. It looks again once a minute.
+- `cc-proxy codex auth login` now opens the sign-in page in your browser.
+  `cc-proxy glm auth login` no longer shows the key as you paste it.
 
 ## v0.1.50 (2026-10-01)
 

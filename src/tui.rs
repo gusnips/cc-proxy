@@ -1,4 +1,5 @@
 mod layout;
+mod providers;
 
 use layout::{
     CODE_WIDTH, COUNT_WIDTH, ColumnSpec, DURATION_WIDTH, EFFORT_WIDTH, ENDPOINT_WIDTH, ERROR_WIDTH,
@@ -6,6 +7,7 @@ use layout::{
     PROJECT_MEDIUM_WIDTH, PROJECT_WIDE_WIDTH, PROVIDER_WIDTH, RATE_WIDTH, STATUS_WIDTH, TIME_WIDTH,
     TOKEN_WIDTH,
 };
+use providers::ProvidersPanel;
 
 use std::{
     collections::HashMap,
@@ -142,6 +144,8 @@ fn run_monitor_loop(
         setup_text: config.setup_text,
         show_setup: false,
         show_help: false,
+        show_providers: false,
+        providers: ProvidersPanel::default(),
         detail: None,
         focus: FocusPane::Sessions,
         selected: 0,
@@ -175,6 +179,9 @@ fn run_monitor_events(
         let state = update.snapshot();
         app.clamp_selection(state.sessions.len(), state.recent.len());
         app.tick = app.tick.wrapping_add(1);
+        if app.show_providers {
+            app.providers.refresh();
+        }
         terminal.draw(|frame| {
             render(frame, app, state);
             if let Some(error) = update.connection_error() {
@@ -222,6 +229,7 @@ fn run_monitor_events(
                     KeyCode::Char('q') => app.request_shutdown_confirmation(),
                     KeyCode::Char('?') => app.show_help = !app.show_help,
                     KeyCode::Char('b') => app.show_setup = !app.show_setup,
+                    KeyCode::Char('p') => app.show_providers = !app.show_providers,
                     KeyCode::Tab => app.focus = app.focus.next(),
                     KeyCode::Down => app.move_down(state.sessions.len(), state.recent.len(), true),
                     KeyCode::Char('j') => {
@@ -247,6 +255,8 @@ fn run_monitor_events(
                     KeyCode::Esc => {
                         if app.show_help {
                             app.show_help = false;
+                        } else if app.show_providers {
+                            app.show_providers = false;
                         } else if app.show_setup {
                             app.show_setup = false;
                         } else {
@@ -295,6 +305,8 @@ struct MonitorApp {
     setup_text: String,
     show_setup: bool,
     show_help: bool,
+    show_providers: bool,
+    providers: ProvidersPanel,
     detail: Option<DetailView>,
     focus: FocusPane,
     selected: usize,
@@ -472,6 +484,9 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
 
     if app.show_setup {
         render_setup_overlay(frame, area, &app.setup_text);
+    }
+    if app.show_providers {
+        providers::render_overlay(frame, area, &app.providers);
     }
     if app.show_help {
         render_help_overlay(frame, area, app.is_attached());
@@ -1652,6 +1667,7 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
         ("q", if app.is_attached() { "detach" } else { "quit" }),
         ("?", "help"),
         ("b", "setup"),
+        ("p", "providers"),
         ("↑↓ j k", "navigate"),
         ("Tab", "pane"),
         ("Enter", "open"),
@@ -1775,6 +1791,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ),
         ("?", "toggle help"),
         ("b", "toggle setup"),
+        ("p", "toggle providers"),
         ("arrows", "navigate rows and panes"),
         ("j / k", "previous / next row"),
         ("Tab", "switch pane"),
@@ -2580,6 +2597,8 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
+            show_providers: false,
+            providers: ProvidersPanel::default(),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
@@ -2731,6 +2750,8 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
+            show_providers: false,
+            providers: ProvidersPanel::default(),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
@@ -2777,6 +2798,8 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
+            show_providers: false,
+            providers: ProvidersPanel::default(),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
@@ -2807,6 +2830,8 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
+            show_providers: false,
+            providers: ProvidersPanel::default(),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
@@ -2835,6 +2860,8 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
+            show_providers: false,
+            providers: ProvidersPanel::default(),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
@@ -2860,6 +2887,8 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
+            show_providers: false,
+            providers: ProvidersPanel::default(),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 10,
@@ -2886,6 +2915,8 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
+            show_providers: false,
+            providers: ProvidersPanel::default(),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 1,
@@ -2912,6 +2943,8 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
+            show_providers: false,
+            providers: ProvidersPanel::default(),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 1,

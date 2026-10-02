@@ -443,56 +443,37 @@ pub(crate) fn sse_response(body: GenerationBody) -> Response {
 
 struct OpenCodeCli;
 
-/// Read a line without echoing it, so a pasted API key never shows on
-/// screen. Uses termios on unix (already a dependency via libc); elsewhere
-/// falls back to a visible read with a warning.
-#[cfg(unix)]
-fn read_hidden_line(prompt: &str) -> std::io::Result<String> {
-    use std::io::Write;
-    use std::os::unix::io::AsRawFd;
-
-    print!("{prompt}");
-    std::io::stdout().flush()?;
-    let fd = std::io::stdin().as_raw_fd();
-    // SAFETY: tcgetattr/tcsetattr only touch the termios struct for our own
-    // stdin fd, and the original flags are restored before returning.
-    unsafe {
-        let mut original: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(fd, &mut original) != 0 {
-            // Not a TTY (piped stdin in tests and scripts): plain read.
-            return read_visible_line();
+/// Asks OpenCode Go for usage, the cheapest call that needs a valid key.
+pub async fn check_key(api_key: &str) -> crate::provider::KeyCheck {
+    use crate::provider::KeyCheck;
+    let client = match OpenCodeClient::new(
+        crate::config::opencode_base_url(),
+        Some(api_key.to_string()),
+    ) {
+        Ok(client) => client,
+        Err(error) => return KeyCheck::Unverified(error.to_string()),
+    };
+    match client.get_usage().await {
+        Ok(_) => KeyCheck::Accepted,
+        Err(error) if matches!(error.status.as_u16(), 401 | 403) => {
+            KeyCheck::Rejected(format!("HTTP {}", error.status.as_u16()))
         }
-        let mut hidden = original;
-        hidden.c_lflag &= !libc::ECHO;
-        if libc::tcsetattr(fd, libc::TCSANOW, &hidden) != 0 {
-            return read_visible_line();
-        }
-        let line = read_visible_line();
-        libc::tcsetattr(fd, libc::TCSANOW, &original);
-        println!();
-        line
+        Err(error) => KeyCheck::Unverified(error.message),
     }
 }
 
-#[cfg(not(unix))]
-fn read_hidden_line(prompt: &str) -> std::io::Result<String> {
-    eprintln!("warning: hidden input is not supported on this platform; the key will echo.");
-    print!("{prompt}");
-    read_visible_line()
-}
-
-fn read_visible_line() -> std::io::Result<String> {
-    use std::io::{BufRead, Write};
-    std::io::stdout().flush()?;
-    let mut buf = String::new();
-    std::io::stdin().lock().read_line(&mut buf)?;
-    Ok(buf.trim().to_string())
-}
-
 impl CliHandlers for OpenCodeCli {
+    fn auth_state(&self) -> crate::provider::AuthState {
+        if crate::config::opencode_api_key().is_some() {
+            crate::provider::AuthState::KeySaved
+        } else {
+            crate::provider::AuthState::Missing
+        }
+    }
+
     fn login(&self) -> anyhow::Result<()> {
         println!("Paste your OpenCode Go API key (input is hidden) and press Enter:");
-        let key = read_hidden_line("API key: ")?;
+        let key = crate::prompt::read_hidden_line("API key: ")?;
         if key.is_empty() {
             anyhow::bail!("no API key provided");
         }
