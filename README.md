@@ -143,7 +143,7 @@ The opt-in Images API returns base64 image data and consumes the signed-in accou
 | Provider     | Account                        | Model selection                                 |
 | ------------ | ------------------------------ | ----------------------------------------------- |
 | Codex        | ChatGPT Plus or Pro            | Any `gpt-*` ID (unlisted ones forward raw; `-fast` = priority tier) |
-| Kimi         | kimi.com with Kimi Code access | `k3`/`kimi-k3` (legacy `kimi-for-coding`); unlisted `kimi-*` forward raw |
+| Kimi         | A Kimi account with Kimi Code access | `k3`/`kimi-k3` (legacy `kimi-for-coding`); unlisted `kimi-*` forward raw |
 | Grok         | grok.com                       | `grok-*` IDs (unlisted ones forward raw)        |
 | OpenCode Go  | OpenCode Go subscription       | Non-conflicting IDs and `opencode-go/<model-id>` |
 | Cursor Agent | Cursor account                 | Cursor aliases and `cursor:<model-id>` prefixes |

@@ -785,7 +785,7 @@ pub fn kimi_oauth_host() -> String {
     {
         return host;
     }
-    "https://auth.kimi.com".to_string()
+    "https://auth.kimi.ai".to_string()
 }
 
 pub fn kimi_base_url() -> String {
@@ -800,7 +800,7 @@ pub fn kimi_base_url() -> String {
     {
         return url;
     }
-    "https://api.kimi.com/coding/v1".to_string()
+    "https://api.kimi.ai/coding/v1".to_string()
 }
 
 pub fn glm_base_url() -> String {
