@@ -18,6 +18,7 @@ use crate::providers::kimi::auth::headers::common_headers;
 use crate::providers::kimi::auth::manager::KimiAuthManager;
 use crate::providers::kimi::auth::token_store as kimi_tokens;
 use crate::providers::opencode::client::{OpenCodeClient, OpenCodeUsageResponse};
+use crate::ui;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -139,10 +140,10 @@ enum Report {
 }
 
 impl Report {
-    fn text(&self, now: Timestamp, tz: &TimeZone) -> String {
+    fn text(&self, now: Timestamp, tz: &TimeZone, styled: bool) -> String {
         match self {
-            Self::Plan(provider, usage) => format_plan(provider.name(), usage, now, tz),
-            Self::OpenCode(usage) => crate::providers::opencode::usage::format_text(usage),
+            Self::Plan(provider, usage) => format_plan(provider.name(), usage, now, tz, styled),
+            Self::OpenCode(usage) => crate::providers::opencode::usage::format_text(usage, styled),
         }
     }
 
@@ -174,6 +175,7 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
 
     let now = Timestamp::now();
     let tz = TimeZone::system();
+    let styled = ui::styled(&std::io::stdout());
     let mut code = 0;
     let mut blocks = Vec::new();
     let mut by_provider = Map::new();
@@ -182,7 +184,7 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
             Ok(Some(report)) if json => {
                 by_provider.insert(provider.id().to_string(), report.json()?);
             }
-            Ok(Some(report)) => blocks.push(report.text(now, &tz)),
+            Ok(Some(report)) => blocks.push(report.text(now, &tz, styled)),
             // Asked for by name, a missing sign-in fails the command.
             Ok(None) if only.is_some() => {
                 eprintln!("{}", provider.not_signed_in());
@@ -441,21 +443,45 @@ fn reset_ms(value: &Value) -> Option<i64> {
 // Text output
 // ---------------------------------------------------------------------------
 
-fn format_plan(name: &str, usage: &PlanUsage, now: Timestamp, tz: &TimeZone) -> String {
-    let mut output = match &usage.plan {
+fn format_plan(
+    name: &str,
+    usage: &PlanUsage,
+    now: Timestamp,
+    tz: &TimeZone,
+    styled: bool,
+) -> String {
+    let heading = match &usage.plan {
         Some(plan) => format!("{name} ({plan})"),
         None => name.to_string(),
     };
+    let mut output = ui::strong(&heading, ui::WHITE, styled);
     for (label, window) in [
         ("5-hour window", &usage.five_hour),
         ("Weekly", &usage.weekly),
     ] {
-        output.push_str(&format!(
-            "\n  {label}: {}",
-            format_window(window.as_ref(), now, tz)
+        output.push_str(&window_row(
+            label,
+            window.as_ref().map(|window| window.used_percent),
+            &format_window(window.as_ref(), now, tz),
+            styled,
         ));
     }
     output
+}
+
+const METER_CELLS: usize = 20;
+
+/// "\n  Weekly: 7% used, …". In a terminal the label is padded and a meter
+/// goes before the words, so every window's meter lines up.
+pub(crate) fn window_row(label: &str, percent: Option<f64>, text: &str, styled: bool) -> String {
+    if !styled {
+        return format!("\n  {label}: {text}");
+    }
+    let meter = percent.map_or_else(
+        || " ".repeat(METER_CELLS),
+        |percent| ui::meter(percent, METER_CELLS),
+    );
+    format!("\n  {label:<18}{meter}  {text}")
 }
 
 fn format_window(window: Option<&Window>, now: Timestamp, tz: &TimeZone) -> String {
@@ -655,7 +681,7 @@ mod tests {
             weekly: window(7.0, ms("2026-08-17T00:00:00Z")),
         };
         assert_eq!(
-            format_plan("Codex", &usage, now, &tz),
+            format_plan("Codex", &usage, now, &tz, false),
             concat!(
                 "Codex (plus)\n",
                 "  5-hour window: 45% used, resets in 2h 10m (17:00)\n",
@@ -673,7 +699,7 @@ mod tests {
             weekly: None,
         };
         assert_eq!(
-            format_plan("Kimi", &usage, now, &TimeZone::UTC),
+            format_plan("Kimi", &usage, now, &TimeZone::UTC, false),
             "Kimi\n  5-hour window: 12.5% used\n  Weekly: not reported"
         );
     }

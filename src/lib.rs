@@ -19,6 +19,7 @@ pub mod session;
 pub mod shell;
 pub mod traffic;
 pub mod tui;
+pub mod ui;
 pub mod update;
 pub mod usage;
 

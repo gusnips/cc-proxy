@@ -64,15 +64,20 @@ impl OpenCodeUsageService {
     }
 }
 
-pub fn format_text(response: &OpenCodeUsageResponse) -> String {
+pub fn format_text(response: &OpenCodeUsageResponse, styled: bool) -> String {
     let rows = [
         ("Rolling (5 hour)", response.usage.rolling.as_ref()),
         ("Weekly", response.usage.weekly.as_ref()),
         ("Monthly", response.usage.monthly.as_ref()),
     ];
-    let mut output = String::from("OpenCode Go usage:");
+    let mut output = crate::ui::strong("OpenCode Go usage:", crate::ui::WHITE, styled);
     for (label, window) in rows {
-        output.push_str(&format!("\n  {label}: {}", format_window(window)));
+        output.push_str(&crate::usage::window_row(
+            label,
+            window.and_then(|window| window.percent),
+            &format_window(window),
+            styled,
+        ));
     }
     output
 }
@@ -257,7 +262,7 @@ mod tests {
     #[test]
     fn text_output_has_stable_window_order() {
         assert_eq!(
-            format_text(&response()),
+            format_text(&response(), false),
             concat!(
                 "OpenCode Go usage:\n",
                 "  Rolling (5 hour): 12.5% used, status ok, resets 2026-09-10T12:00:00Z\n",
@@ -280,7 +285,7 @@ mod tests {
         };
 
         assert_eq!(
-            format_text(&response),
+            format_text(&response, false),
             "OpenCode Go usage:\n  Rolling (5 hour): unavailable\n  Weekly: unavailable\n  Monthly: unavailable"
         );
     }

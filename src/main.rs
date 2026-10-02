@@ -6,6 +6,7 @@ use cc_proxy::{
     registry::{ANTHROPIC_STYLE_ALIASES, Registry},
     server::{self, ServerConfig},
     tui::{self, MonitorExit, MonitorUiConfig},
+    ui::{self, Mood},
 };
 use clap::{ArgAction, Parser, Subcommand};
 
@@ -171,7 +172,14 @@ enum ConfigCommand {
     Edit,
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(error) = run() {
+        ui::print_error(&error);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.version_flag {
@@ -431,98 +439,152 @@ fn select_serve_mode(no_monitor: bool, monitor: bool) -> ServeMode {
 }
 
 fn start_daemon(port: Option<u16>) -> Result<()> {
-    match daemon::serve_background(port)? {
+    let label = format!(
+        "starting cc-proxy on port {}",
+        port.unwrap_or_else(config::port)
+    );
+    match ui::waiting(&label, || daemon::serve_background(port))? {
         daemon::ServeOutcome::AlreadyRunning(info) => {
-            println!(
-                "proxy is already running (pid {}, {})",
-                info.pid,
-                info.listen_url()
-            );
-            match port {
-                Some(wanted) if wanted != info.port => println!(
-                    "it serves port {}, so `--port {wanted}` was ignored. Run a second \
-                     instance in the foreground with `cc-proxy serve --no-monitor`, \
-                     or `cc-proxy restart --port <PORT>` to move the service.",
+            let hint = match port {
+                Some(wanted) if wanted != info.port => format!(
+                    "It serves port {}, so `--port {wanted}` was ignored. Move it with \
+                     `cc-proxy restart --port {wanted}`, or run a second one in the \
+                     foreground with `cc-proxy serve --no-monitor --port {wanted}`.",
                     info.port,
                 ),
-                _ => println!("Use `cc-proxy restart` to restart it."),
-            }
-            Ok(())
+                _ => "Restart it with `cc-proxy restart`.".to_string(),
+            };
+            ui::print_card(
+                Mood::Awake,
+                &["cc-proxy is already running".into(), address(&info), hint],
+            );
         }
-        daemon::ServeOutcome::Started(info) => {
-            println!("proxy started (pid {})", info.pid);
-            println!("listening on {}", info.listen_url());
-            println!("logs: {}", paths::log_file().display());
-            println!("status: cc-proxy status · stop: cc-proxy stop");
-            Ok(())
-        }
+        daemon::ServeOutcome::Started(info) => ui::print_card(
+            Mood::Awake,
+            &[
+                "cc-proxy started".into(),
+                address(&info),
+                format!("Logs go to {}", paths::log_file().display()),
+                "`cc-proxy claude` starts Claude Code on it. `cc-proxy monitor` shows its \
+                 traffic, `cc-proxy stop` stops it."
+                    .into(),
+            ],
+        ),
+    }
+    Ok(())
+}
+
+fn address(info: &daemon::DaemonInfo) -> String {
+    format!("{} · pid {}", info.listen_url(), info.pid)
+}
+
+/// How the proxy comes back after a stop.
+fn start_hint() -> String {
+    if cc_proxy::shell::plain_claude_uses_proxy() {
+        "Plain `claude` starts it again the next time you run it.".into()
+    } else {
+        "Start it with `cc-proxy serve`.".into()
     }
 }
 
 fn stop_daemon() -> Result<()> {
-    match daemon::stop_service()? {
-        daemon::StopOutcome::NotRunning => {
-            println!("proxy is not running.");
-            Ok(())
-        }
-        daemon::StopOutcome::Stopped { pid } => {
-            println!("proxy stopped (was pid {pid}).");
-            Ok(())
-        }
-    }
+    let lines = match ui::waiting("stopping cc-proxy", daemon::stop_service)? {
+        daemon::StopOutcome::NotRunning => vec!["cc-proxy is not running".into(), start_hint()],
+        daemon::StopOutcome::Stopped { pid } => vec![
+            "cc-proxy stopped".into(),
+            format!("pid {pid} has exited."),
+            start_hint(),
+        ],
+    };
+    ui::print_card(Mood::Asleep, &lines);
+    Ok(())
 }
 
 fn daemon_status() -> Result<()> {
     match daemon::describe() {
         daemon::DaemonStatus::Running(info) => {
-            println!(
-                "proxy is running (pid {}, {}, started {})",
-                info.pid,
-                info.listen_url(),
-                info.started_at
+            let headline = match uptime(&info.started_at) {
+                Some(up) => format!("cc-proxy is running · up {up}"),
+                None => "cc-proxy is running".into(),
+            };
+            ui::print_card(
+                Mood::Awake,
+                &[
+                    headline,
+                    address(&info),
+                    cc_proxy::shell::plain_claude_line().into(),
+                ],
             );
             Ok(())
         }
         daemon::DaemonStatus::Unmanaged { port } => {
-            println!(
-                "a proxy answers on port {port} but has no pidfile: \
-                 it was not started by `cc-proxy serve`. Stop that process directly."
+            ui::print_card(
+                Mood::Unsure,
+                &[
+                    format!("Something answers on port {port}, but cc-proxy didn't start it"),
+                    "It has no pidfile, so `cc-proxy stop` can't stop it. Stop that \
+                     process yourself."
+                        .into(),
+                ],
             );
             Ok(())
         }
         daemon::DaemonStatus::Stopped => {
-            println!("proxy is not running. Start it with `cc-proxy serve`.");
+            ui::print_card(
+                Mood::Asleep,
+                &["cc-proxy is not running".into(), start_hint()],
+            );
             std::process::exit(1);
         }
     }
 }
 
+/// "2h14m" since `started_at`, an RFC 3339 time from the pidfile.
+fn uptime(started_at: &str) -> Option<String> {
+    let started = started_at.parse::<jiff::Timestamp>().ok()?;
+    let up = std::time::Duration::try_from(jiff::Timestamp::now().duration_since(started)).ok()?;
+    Some(ui::duration(up))
+}
+
 fn restart_daemon(port: Option<u16>) -> Result<()> {
-    let info = daemon::restart_service(port)?;
-    println!("proxy restarted (pid {})", info.pid);
-    println!("listening on {}", info.listen_url());
+    let info = ui::waiting("restarting cc-proxy", || daemon::restart_service(port))?;
+    ui::print_card(Mood::Awake, &["cc-proxy restarted".into(), address(&info)]);
     Ok(())
 }
 
 fn reload_daemon() -> Result<()> {
     match daemon::reload_service()? {
-        daemon::ReloadOutcome::Reloaded => {
-            println!("config reloaded. File-backed settings apply on the next request;");
-            println!(
-                "bind address, port, alias provider, and environment need `cc-proxy restart`."
-            );
-            Ok(())
-        }
-        daemon::ReloadOutcome::ValidatedOnly => {
-            println!("config is valid. This platform cannot reload a running service;");
-            println!("run `cc-proxy restart` to apply changes.");
-            Ok(())
-        }
+        daemon::ReloadOutcome::Reloaded => ui::print_card(
+            Mood::Glad,
+            &[
+                "config reloaded".into(),
+                "Settings from the file apply on the next request.".into(),
+                "Bind address, port, alias provider and environment variables need \
+                 `cc-proxy restart`."
+                    .into(),
+            ],
+        ),
+        daemon::ReloadOutcome::ValidatedOnly => ui::print_card(
+            Mood::Unsure,
+            &[
+                "config is valid".into(),
+                "This platform can't reload a running proxy. Run `cc-proxy restart` to \
+                 apply the changes."
+                    .into(),
+            ],
+        ),
         daemon::ReloadOutcome::NotRunning => {
-            println!("proxy is not running, but the config file is valid.");
+            ui::print_card(
+                Mood::Asleep,
+                &[
+                    "cc-proxy is not running, but the config file is valid".into(),
+                    start_hint(),
+                ],
+            );
             std::process::exit(1);
         }
     }
+    Ok(())
 }
 
 fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
@@ -567,14 +629,16 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
 
 fn print_models(registry: &Registry, full: bool) {
     let grouped = registry.grouped_models();
+    let styled = ui::styled(&std::io::stdout());
     for provider in ["codex", "kimi", "grok", "opencode", "cursor", "glm"] {
         let Some(models) = grouped.get(provider) else {
             continue;
         };
+        let name = ui::strong(provider, ui::provider_color(provider), styled);
         if full || provider != "cursor" {
-            println!("{provider}: {}", models.join(", "));
+            println!("{name}: {}", models.join(", "));
         } else {
-            println!("{provider}: {}", compact_cursor_list(models));
+            println!("{name}: {}", compact_cursor_list(models));
         }
     }
 }
