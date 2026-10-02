@@ -3,7 +3,7 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
-## Unreleased
+## v0.1.51 (2026-10-01)
 
 - On Windows, cc-proxy now keeps its config under `%APPDATA%\cc-proxy` and
   its state under `%LOCALAPPDATA%\cc-proxy`, as the docs say. It had been
