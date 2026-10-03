@@ -4,7 +4,7 @@ description: Use the cc-proxy monitor to inspect sessions, active and recent req
 ---
 
 `cc-proxy start` starts the proxy as a background service. The monitor is a
-separate view over that service — attaching or detaching never starts or
+separate view over that service. Attaching or detaching never starts or
 stops the proxy.
 
 ```sh

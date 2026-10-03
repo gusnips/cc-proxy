@@ -62,7 +62,7 @@ cc-proxy start
 cc-proxy status
 ```
 
-Attach the dashboard from any terminal with `cc-proxy monitor` — detaching
+Attach the dashboard from any terminal with `cc-proxy monitor`. Detaching
 leaves the proxy running. `cc-proxy stop` stops the service;
 `cc-proxy restart` and `cc-proxy reload` restart it and reload its config.
 

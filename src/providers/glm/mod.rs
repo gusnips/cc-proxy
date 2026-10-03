@@ -241,7 +241,7 @@ impl CliHandlers for GlmCli {
 
     fn device(&self) -> Result<(), anyhow::Error> {
         anyhow::bail!(
-            "glm: API-key provider — set CCP_GLM_API_KEY / GLM_API_KEY or run `cc-proxy glm auth login`"
+            "glm: API-key provider: set CCP_GLM_API_KEY / GLM_API_KEY or run `cc-proxy glm auth login`"
         );
     }
 

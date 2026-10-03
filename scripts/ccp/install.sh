@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the `ccp` helper: a systemd user service for cc-proxy plus a wrapper script.
-# Linux/WSL only (needs systemd --user). Idempotent — safe to re-run; overwrites the unit and wrapper with these versions.
+# Linux/WSL only (needs systemd --user). Idempotent, so safe to re-run; overwrites the unit and wrapper with these versions.
 # See README.md (in this dir) for details
 set -euo pipefail
 
@@ -10,7 +10,7 @@ unit="$HOME/.config/systemd/user/cc-proxy.service"
 
 # --- sanity: systemd --user must be available (Linux/WSL only; not macOS) ---
 if ! systemctl --user show-environment >/dev/null 2>&1; then
-  echo "error: 'systemctl --user' isn't available. This installer is Linux/WSL only — it uses systemd." >&2
+  echo "error: 'systemctl --user' isn't available. This installer is Linux/WSL only. It uses systemd." >&2
   echo "       macOS has no systemd (it would need a launchd agent instead); this script doesn't set that up." >&2
   echo "       WSL: set systemd=true in /etc/wsl.conf, then 'wsl --shutdown' and reopen." >&2
   exit 1
