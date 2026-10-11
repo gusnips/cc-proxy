@@ -33,7 +33,7 @@ use ratatui::{
 use tokio::sync::oneshot;
 
 use crate::{
-    claude, config, daemon,
+    config, daemon,
     monitor::{
         MockMonitor, MonitorHandle, SESSION_TOKEN_BUCKET_SECS, Throughput,
         snapshot::{
@@ -253,14 +253,8 @@ fn run_monitor_events(
                         }
                     }
                     KeyCode::Esc => {
-                        if app.show_help {
-                            app.show_help = false;
-                        } else if app.show_providers {
-                            app.show_providers = false;
-                        } else if app.show_setup {
-                            app.show_setup = false;
-                        } else {
-                            app.detail = None;
+                        if let Some(exit) = app.handle_escape() {
+                            return Ok(exit);
                         }
                     }
                     _ => {}
@@ -321,6 +315,22 @@ impl MonitorApp {
     fn is_attached(&self) -> bool {
         self.shutdown.is_none() && self.shutdown_complete.is_none()
     }
+    fn handle_escape(&mut self) -> Option<MonitorExit> {
+        if self.show_help {
+            self.show_help = false;
+        } else if self.show_providers {
+            self.show_providers = false;
+        } else if self.show_setup {
+            self.show_setup = false;
+        } else if self.detail.take().is_none() {
+            if self.is_attached() {
+                return Some(MonitorExit::Detached);
+            }
+            self.request_shutdown_confirmation();
+        }
+        None
+    }
+
     fn handle_ctrl_c(&mut self) -> bool {
         if self.phase == MonitorPhase::ShuttingDown {
             true
@@ -1664,7 +1674,15 @@ fn detail_line<'a>(label: &'static str, value: impl Into<String>, value_color: C
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
     let keys = [
-        ("q", if app.is_attached() { "detach" } else { "quit" }),
+        ("Esc", "back / close"),
+        (
+            "q",
+            if app.is_attached() {
+                "close"
+            } else {
+                "stop proxy"
+            },
+        ),
         ("?", "help"),
         ("b", "setup"),
         ("p", "providers"),
@@ -1782,11 +1800,19 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
     frame.render_widget(block, popup);
     let lines = [
         (
-            "q / Ctrl-C",
+            "q",
             if attached {
-                "detach dashboard"
+                "close monitor"
             } else {
-                "quit proxy"
+                "confirm proxy shutdown"
+            },
+        ),
+        (
+            "Ctrl-C",
+            if attached {
+                "close monitor"
+            } else {
+                "stop proxy; again to force"
             },
         ),
         ("?", "toggle help"),
@@ -1796,7 +1822,14 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ("j / k", "previous / next row"),
         ("Tab", "switch pane"),
         ("Enter", "open detail"),
-        ("Esc", "close overlay / detail"),
+        (
+            "Esc",
+            if attached {
+                "back, then close monitor"
+            } else {
+                "back, then confirm shutdown"
+            },
+        ),
     ];
     let content = lines
         .into_iter()
@@ -1882,18 +1915,18 @@ pub fn setup_text(port: u16, registry: &Registry) -> String {
         .collect::<Vec<_>>()
         .join("  ");
     let mut lines = vec![
+        format!(
+            "Proxy: {}",
+            daemon::client_url(&config::bind_address(), port)
+        ),
         format!("Logs: {}", paths::log_file().display()),
         format!("Config: {}", paths::config_dir().display()),
         format!("Providers: {model_summary}"),
     ];
     lines.push(String::new());
-    lines.push("Start Claude Code on the proxy:".to_string());
-    lines.push("cc-proxy claude".to_string());
-    lines.push("Or set these yourself before you run claude:".to_string());
-    let base_url = daemon::client_url(&config::bind_address(), port);
-    for (name, value) in claude::env(&base_url) {
-        lines.push(format!("export {name}=\"{value}\""));
-    }
+    lines.push("Use the proxy for new Claude Code sessions:".to_string());
+    lines.push("cc-proxy on".to_string());
+    lines.push("Or start one session: cc-proxy claude".to_string());
     lines.join("\n")
 }
 
@@ -2743,6 +2776,39 @@ mod tests {
     }
 
     #[test]
+    fn escape_closes_layers_before_detaching_from_the_main_screen() {
+        let mut app = MonitorApp {
+            listen_url: String::new(),
+            setup_text: String::new(),
+            show_setup: true,
+            show_help: true,
+            show_providers: true,
+            providers: ProvidersPanel::default(),
+            detail: Some(DetailView::Request),
+            focus: FocusPane::Sessions,
+            selected: 0,
+            recent_selected: 0,
+            tick: 0,
+            phase: MonitorPhase::Running,
+            shutdown: None,
+            shutdown_complete: None,
+        };
+        assert_eq!(app.handle_escape(), None);
+        assert!(!app.show_help);
+        assert!(app.show_providers && app.show_setup && app.detail.is_some());
+        assert_eq!(app.handle_escape(), None);
+        assert!(!app.show_providers);
+        assert!(app.show_setup && app.detail.is_some());
+        assert_eq!(app.handle_escape(), None);
+        assert!(!app.show_setup);
+        assert!(app.detail.is_some());
+        assert_eq!(app.handle_escape(), None);
+        assert!(app.detail.is_none());
+        assert_eq!(app.handle_escape(), Some(MonitorExit::Detached));
+        assert_eq!(app.phase, MonitorPhase::Running);
+    }
+
+    #[test]
     fn shutdown_confirmation_can_be_cancelled_before_signalling_server() {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let mut app = MonitorApp {
@@ -2762,7 +2828,7 @@ mod tests {
             shutdown_complete: Some(mpsc::channel().1),
         };
 
-        app.request_shutdown_confirmation();
+        assert_eq!(app.handle_escape(), None);
         assert_eq!(app.phase, MonitorPhase::ConfirmingShutdown);
         assert!(matches!(
             shutdown_rx.try_recv(),

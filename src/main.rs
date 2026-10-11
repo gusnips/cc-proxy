@@ -44,9 +44,9 @@ enum Commands {
         #[command(subcommand)]
         command: ShellCommand,
     },
-    /// Send plain `claude` through cc-proxy, in every terminal
+    /// Send plain `claude` through the proxy, setting up the shell hook if needed
     On,
-    /// Run plain `claude` without the proxy again, in every terminal
+    /// Use your saved Claude Code connection again
     Off,
     /// Start the proxy as a background service (default)
     #[command(alias = "serve")]
@@ -475,8 +475,8 @@ fn start_daemon(port: Option<u16>) -> Result<()> {
                 "cc-proxy started".into(),
                 address(&info),
                 format!("Logs go to {}", paths::log_file().display()),
-                "`cc-proxy claude` starts Claude Code on it. `cc-proxy monitor` shows its \
-                 traffic, `cc-proxy stop` stops it."
+                "`cc-proxy on` makes plain `claude` use it. `cc-proxy claude` starts a \
+                 session now. `cc-proxy monitor` shows traffic; `cc-proxy stop` stops the service."
                     .into(),
             ],
         ),
@@ -692,12 +692,8 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     }
     print_models(registry, false);
     println!();
-    println!("Start Claude Code on the proxy (pick a model from above, any claude flag works):");
-    println!("  cc-proxy claude --model gpt-6-sol");
-    println!("Or set these yourself before you run claude:");
-    for (name, value) in cc_proxy::claude::env(&daemon::client_url(bind_address, port)) {
-        println!("  export {name}=\"{value}\"");
-    }
+    println!("Run cc-proxy on to make plain claude use this proxy.");
+    println!("Or start one session now: cc-proxy claude");
 }
 
 #[allow(dead_code)]

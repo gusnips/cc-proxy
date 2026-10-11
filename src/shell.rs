@@ -5,7 +5,7 @@
 //! to the shell's startup file (fish loads a function file by itself). The
 //! function exports nothing: each call runs `cc-proxy claude`, which reads
 //! `claude.enabled` and either starts Claude Code on the proxy or runs it
-//! untouched. So `on` and `off` reach every open terminal at once, and no
+//! untouched. `on` and `off` apply in terminals that loaded the hook, and no
 //! other program on the machine ever sees the proxy's address.
 
 use std::fs;
@@ -28,11 +28,13 @@ const HEADER: &str =
 
 // Without cc-proxy on PATH (uninstalled, or a shell with a trimmed PATH),
 // `claude` still runs Claude Code.
-const POSIX_FUNCTION: &str = r#"claude() {
+// `function` protects the name from alias expansion in both bash and zsh.
+// Keep the alias so it still adds the user's flags on each call.
+const BASH_ZSH_FUNCTION: &str = r#"function claude {
   if command -v cc-proxy >/dev/null 2>&1; then
     CCP_SHELL_HOOK=1 cc-proxy claude "$@"
   else
-    command claude "$@"
+    command \claude "$@"
   fi
 }
 "#;
@@ -240,7 +242,7 @@ pub fn install() -> Result<()> {
     let file = match &target {
         Target::Rc(rc) => {
             let function_file = function_file();
-            rewrite(&function_file, &format!("{HEADER}\n{POSIX_FUNCTION}"))?;
+            rewrite(&function_file, &format!("{HEADER}\n{BASH_ZSH_FUNCTION}"))?;
             let content = read_or_empty(rc)?;
             let updated = with_hook(&content, &hook_line(&function_file));
             if updated != content {
@@ -257,15 +259,18 @@ pub fn install() -> Result<()> {
     ui::print_note(
         Mood::Glad,
         &[
-            format!("Added the cc-proxy hook to {}.", env.show(file)),
             format!(
-                "In new terminals, `claude` now starts Claude Code on the proxy. In a \
-                 terminal that's already open, run `exec {}` first.",
+                "cc-proxy is on. The shell hook is installed in {}.",
+                env.show(file)
+            ),
+            format!(
+                "Run `exec {}` once in terminals that haven't loaded the hook, then run `claude`. \
+                 New terminals load it on their own.",
                 env.shell_name()
             ),
-            "`cc-proxy off` goes back to plain Claude Code in every terminal; `cc-proxy on` \
-             switches back."
+            "Your `claude` alias keeps its flags. Claude Code settings files stay unchanged."
                 .into(),
+            "`cc-proxy off` uses your saved connection again; `cc-proxy on` switches back.".into(),
         ],
     );
     Ok(())
@@ -319,36 +324,20 @@ pub fn uninstall() -> Result<()> {
 }
 
 pub fn set(on: bool) -> Result<()> {
-    set_enabled(on)?;
-    let open_sessions =
-        "Claude Code sessions that are already open keep their connection until you quit them.";
-    let (mood, lines) = match (on, hook_installed(&Env::current())) {
-        (true, true) => (
-            Mood::Awake,
-            [
-                "cc-proxy is on.",
-                "`claude` in any terminal now starts Claude Code on the proxy.",
-            ],
-        ),
-        (true, false) => (
-            Mood::Unsure,
-            [
-                "cc-proxy is on, but plain `claude` won't use it until you run \
-                 `cc-proxy shell install`.",
-                "`cc-proxy claude` uses the proxy either way.",
-            ],
-        ),
-        (false, _) => (
-            Mood::Asleep,
-            [
-                "cc-proxy is off.",
-                "`claude` in any terminal now starts plain Claude Code. `cc-proxy claude` \
-                 still uses the proxy.",
-            ],
-        ),
-    };
-    let lines = lines.into_iter().chain([open_sessions]).map(String::from);
-    ui::print_note(mood, &lines.collect::<Vec<_>>());
+    if on {
+        return install();
+    }
+    set_enabled(false)?;
+    ui::print_note(
+        Mood::Asleep,
+        &[
+            "cc-proxy is off.".into(),
+            "`claude` uses your saved connection again. `cc-proxy claude` still uses the proxy."
+                .into(),
+            "Claude Code sessions that are already open keep their connection until you quit them."
+                .into(),
+        ],
+    );
     Ok(())
 }
 
@@ -360,9 +349,9 @@ pub fn plain_claude_uses_proxy() -> bool {
 /// What plain `claude` does right now, for `cc-proxy status`.
 pub fn plain_claude_line() -> &'static str {
     match (hook_installed(&Env::current()), config::claude_enabled()) {
-        (true, true) => "Plain `claude` goes through it.",
+        (true, true) => "Plain `claude` goes through it in terminals that have loaded the hook.",
         (true, false) => "Plain `claude` skips it. `cc-proxy on` sends it through.",
-        (false, _) => "Plain `claude` skips it. `cc-proxy shell install` sends it through.",
+        (false, _) => "Plain `claude` uses your saved connection. `cc-proxy on` sends it through.",
     }
 }
 

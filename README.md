@@ -101,31 +101,33 @@ cc-proxy claude --model gpt-6-sol
 `cc-proxy claude` starts the proxy if it isn't running, then runs `claude`
 with every argument you gave it, so `--resume`, `--worktree` and `-p` work as
 usual. It doesn't change any settings file. To pick the model every session
-starts on, run `cc-proxy config set claude.model gpt-6-sol`.
+starts on, run `cc-proxy config set claude.model opus`.
 
-To make plain `claude` use the proxy too, add the shell hook once:
-
-```sh
-cc-proxy shell install
-```
-
-It adds one line to the file your shell reads when a terminal opens:
-`~/.zshrc` for zsh, `~/.bashrc` for bash on Linux, `~/.bash_profile` for bash
-on macOS. fish gets `~/.config/fish/functions/claude.fish` instead. That line
-defines a `claude` command that runs `cc-proxy claude` while cc-proxy is on,
-and plain Claude Code while it's off. It sets no environment variables, so
-nothing else on your machine sees the proxy.
+To make plain `claude` use the proxy too:
 
 ```sh
-cc-proxy off   # plain claude, in every terminal
-cc-proxy on    # claude through the proxy again
+cc-proxy on
 ```
 
-`on` and `off` reach every terminal at once, because the `claude` command
-asks cc-proxy each time it runs. A terminal that was already open when you
-ran `shell install` needs `exec zsh` (or your shell's name) once. A Claude
-Code session that's already open keeps its connection until you quit it.
-`cc-proxy shell uninstall` removes the line and turns cc-proxy off.
+`on` installs or refreshes the shell hook. In an existing zsh terminal, run
+`exec zsh` once, then `claude`. New terminals load it themselves. Your zsh or
+bash alias keeps its flags, including `--dangerously-skip-permissions`.
+There are no environment exports or Claude settings files to edit.
+
+The hook adds one line to `~/.zshrc` for zsh, `~/.bashrc` for bash on Linux
+or the login profile for bash on macOS. fish gets
+`~/.config/fish/functions/claude.fish`. It sends each new `claude` session
+through the proxy while on. The proxy starts itself when needed.
+
+```sh
+cc-proxy off   # use your saved Claude connection
+cc-proxy on    # use the proxy again
+```
+
+The switch applies to every terminal that has loaded the hook. Sessions
+already open keep their connection until you quit them. `off` stops adding
+proxy settings; it doesn't remove values you saved by hand.
+`cc-proxy shell uninstall` removes the hook and turns cc-proxy off.
 
 See [Getting started](docs/src/content/docs/getting-started.md)
 for the complete first session.
@@ -143,15 +145,15 @@ The opt-in Images API returns base64 image data and consumes the signed-in accou
 
 ## Providers
 
-| Provider     | Account                        | Model selection                                 |
-| ------------ | ------------------------------ | ----------------------------------------------- |
-| Codex        | ChatGPT Plus or Pro            | Any `gpt-*` ID (unlisted ones forward raw; `-fast` = priority tier) |
-| Kimi         | A Kimi account with Kimi Code access | `k3`/`kimi-k3` (legacy `kimi-for-coding`); unlisted `kimi-*` forward raw |
-| Grok         | grok.com                       | `grok-*` IDs (unlisted ones forward raw)        |
-| OpenCode Go  | OpenCode Go subscription       | Non-conflicting IDs and `opencode-go/<model-id>` |
-| Cursor Agent | Cursor account                 | Cursor aliases and `cursor:<model-id>` prefixes |
-| GLM          | z.ai API key                   | `glm-*` IDs (unlisted ones forward raw)         |
-| GitHub Copilot | GitHub account with a Copilot plan | `copilot/<id>`; `cc-proxy models` lists yours |
+| Provider       | Account                              | Model selection                                                          |
+| -------------- | ------------------------------------ | ------------------------------------------------------------------------ |
+| Codex          | ChatGPT Plus or Pro                  | Any `gpt-*` ID (unlisted ones forward raw; `-fast` = priority tier)      |
+| Kimi           | A Kimi account with Kimi Code access | `k3`/`kimi-k3` (legacy `kimi-for-coding`); unlisted `kimi-*` forward raw |
+| Grok           | grok.com                             | `grok-*` IDs (unlisted ones forward raw)                                 |
+| OpenCode Go    | OpenCode Go subscription             | Non-conflicting IDs and `opencode-go/<model-id>`                         |
+| Cursor Agent   | Cursor account                       | Cursor aliases and `cursor:<model-id>` prefixes                          |
+| GLM            | z.ai API key                         | `glm-*` IDs (unlisted ones forward raw)                                  |
+| GitHub Copilot | GitHub account with a Copilot plan   | `copilot/<id>`; `cc-proxy models` lists yours                            |
 
 Run `cc-proxy models` for the current catalog or
 `cc-proxy models --full` for every dynamic Cursor alias.
