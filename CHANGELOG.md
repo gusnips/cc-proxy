@@ -3,6 +3,22 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.1.53 (2026-10-11)
+
+- Claude Code's newer models, such as `claude-sonnet-5-5`, no longer fail
+  with `400 Unknown model`. cc-proxy reads the family in the name (`haiku`,
+  `sonnet`, `opus` or `fable`) and ignores the version, so the next Claude
+  release works the day it ships. Before, each version had to be added to a
+  list first.
+- Each Claude family now goes to the OpenAI family with the same role:
+  `fable` to astra, `opus` to sol, `sonnet` to terra, `haiku` to luna. Codex
+  picks the newest version of that family it knows about, from its built-in
+  list and the Codex CLI's model cache. With the built-in list alone, `opus`
+  now uses `gpt-6.1-sol` (it used `gpt-6-sol`) and `fable` uses
+  `gpt-6-astra` (it used `gpt-6-sol`). A `codex.model` setting still wins.
+- A web search on a luna model now runs on the sol of the same version, so
+  a newer luna no longer fails with a 404.
+
 ## v0.1.52 (2026-10-02)
 
 - `cc-proxy start` is now the name of the command that starts the proxy.
