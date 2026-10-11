@@ -641,7 +641,7 @@ impl Provider for CodexProvider {
 /// are upgraded to a full-lane model. Returns whether to use the lite lane.
 fn apply_model_lane_for_request(model: &mut String, body: &MessagesRequest) -> bool {
     if has_hosted_web_search(body) {
-        *model = full_lane_web_search_model(model).to_string();
+        *model = full_lane_web_search_model(model);
         return false;
     }
     uses_responses_lite(model)

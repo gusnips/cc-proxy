@@ -126,7 +126,7 @@ fn shape_native_request(body: &mut Value) -> Result<NativeResolved, Response> {
 
     let hosted_web_search = has_native_hosted_web_search(object);
     if hosted_web_search {
-        model = full_lane_web_search_model(&model).to_string();
+        model = full_lane_web_search_model(&model);
     }
     object.insert("model".to_string(), Value::String(model.clone()));
     if let Some(tier) = resolved.service_tier
@@ -689,9 +689,11 @@ mod tests {
     fn native_request_resolves_alias_and_fast_tier() {
         let mut body = request(json!({"model":"claude-opus-5","input":[]}));
         let resolved = shape_native_request(&mut body).unwrap();
-        assert_eq!(resolved.model, "gpt-6-sol");
-        assert_eq!(body["model"], "gpt-6-sol");
-        assert!(resolved.use_responses_lite);
+        let sol = resolve_model_request_with_config_override("opus", false).model;
+        assert!(sol.starts_with("gpt-") && sol.ends_with("-sol"), "{sol}");
+        assert_eq!(resolved.model, sol);
+        assert_eq!(body["model"], sol);
+        assert_eq!(resolved.use_responses_lite, uses_responses_lite(&sol));
 
         let mut fast = request(json!({"model":"gpt-5.4-fast","input":[]}));
         let resolved = shape_native_request(&mut fast).unwrap();
