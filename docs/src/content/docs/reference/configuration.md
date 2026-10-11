@@ -27,7 +27,7 @@ These settings configure the proxy process. Claude Code client settings such as 
     "reasoningSummary": "auto",
     "serviceTier": "fast",
     "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
-    "transport": "websocket",
+    "transport": "auto",
     "headerTimeoutMs": 300000,
     "previousResponseId": false,
     "serverCompaction": false,
@@ -64,21 +64,21 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 
 ## Core and diagnostics
 
-| Environment | Config key | Default | Purpose |
-| --- | --- | --- | --- |
-| `CCP_BIND_ADDRESS` | `bindAddress` | `127.0.0.1` | Listener IP address. |
-| `PORT` | `port` | `18765` | Listener port. |
-| `CCP_CONFIG_DIR` | none | Platform config directory | Replaces the configuration and file-backed auth root. |
-| `CCP_ALIAS_PROVIDER` | `aliasProvider` | `codex` | Routes recognized Anthropic-style aliases through `codex` or `kimi`. |
-| `CCP_AUTO_REVIEW_MODEL` | `autoReviewModel` | newest luna for Codex | Routes Claude Code's non-streaming, tool-free Bash security-review classifier through a routable model. |
-| none | `claude.enabled` | `true` | Whether plain `claude` uses the proxy, once `cc-proxy shell install` has added the hook. `cc-proxy on` and `cc-proxy off` set it. |
-| none | `claude.model` | unset | The model `cc-proxy claude` starts Claude Code on, as `ANTHROPIC_MODEL`. |
-| none | `claude.fastModel` | unset | The model for Claude Code's small background requests under `cc-proxy claude`, as `ANTHROPIC_DEFAULT_HAIKU_MODEL`. |
-| `CCP_AUTO_REVIEW_EFFORT` | `autoReviewEffort` | unset | Sets `none`, `low`, `medium`, `high`, `xhigh`, or `max` only for auto-review requests routed to Codex. `off` inherits ordinary effort. |
-| `CCP_LOG_STDERR` | `log.stderr` | `false` | Mirrors logs to stderr when present in the environment, regardless of its value. |
-| `CCP_LOG_VERBOSE` | `log.verbose` | `false` | Preserves full string fields in structured logs when present, regardless of its value. |
-| `CCP_TRAFFIC_LOG` | none | `false` | Enables full request captures for `1`, `true`, or `yes`. |
-| `XDG_STATE_HOME` | none | `~/.local/state` | State base on macOS and Linux. |
+| Environment              | Config key         | Default                   | Purpose                                                                                                                                |
+| ------------------------ | ------------------ | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `CCP_BIND_ADDRESS`       | `bindAddress`      | `127.0.0.1`               | Listener IP address.                                                                                                                   |
+| `PORT`                   | `port`             | `18765`                   | Listener port.                                                                                                                         |
+| `CCP_CONFIG_DIR`         | none               | Platform config directory | Replaces the configuration and file-backed auth root.                                                                                  |
+| `CCP_ALIAS_PROVIDER`     | `aliasProvider`    | `codex`                   | Routes recognized Anthropic-style aliases through `codex` or `kimi`.                                                                   |
+| `CCP_AUTO_REVIEW_MODEL`  | `autoReviewModel`  | newest luna for Codex     | Routes Claude Code's non-streaming, tool-free Bash security-review classifier through a routable model.                                |
+| none                     | `claude.enabled`   | `true`                    | Whether plain `claude` uses the proxy, once `cc-proxy shell install` has added the hook. `cc-proxy on` and `cc-proxy off` set it.      |
+| none                     | `claude.model`     | unset                     | The model `cc-proxy claude` starts Claude Code on, as `ANTHROPIC_MODEL`.                                                               |
+| none                     | `claude.fastModel` | unset                     | The model for Claude Code's small background requests under `cc-proxy claude`, as `ANTHROPIC_DEFAULT_HAIKU_MODEL`.                     |
+| `CCP_AUTO_REVIEW_EFFORT` | `autoReviewEffort` | unset                     | Sets `none`, `low`, `medium`, `high`, `xhigh`, or `max` only for auto-review requests routed to Codex. `off` inherits ordinary effort. |
+| `CCP_LOG_STDERR`         | `log.stderr`       | `false`                   | Mirrors logs to stderr when present in the environment, regardless of its value.                                                       |
+| `CCP_LOG_VERBOSE`        | `log.verbose`      | `false`                   | Preserves full string fields in structured logs when present, regardless of its value.                                                 |
+| `CCP_TRAFFIC_LOG`        | none               | `false`                   | Enables full request captures for `1`, `true`, or `yes`.                                                                               |
+| `XDG_STATE_HOME`         | none               | `~/.local/state`          | State base on macOS and Linux.                                                                                                         |
 
 `CCP_CONFIG_DIR` affects `config.json` and file-backed provider auth. It does not relocate the state directory.
 
@@ -90,18 +90,18 @@ Codex auto-review classifier requests use the newest luna model by default. Requ
 
 Outbound HTTP requests and Codex WebSocket setup inherit standard proxy environment variables when each provider client is created:
 
-| Environment | Applies to | Purpose |
-| --- | --- | --- |
-| `HTTP_PROXY` / `http_proxy` | `http://` and `ws://` destinations | Routes plain HTTP and WebSocket Upgrade requests through the configured proxy. |
-| `HTTPS_PROXY` / `https_proxy` | `https://` and `wss://` destinations | Routes TLS destinations through the configured proxy, normally with HTTP CONNECT. |
-| `ALL_PROXY` / `all_proxy` | Any destination without a scheme-specific proxy | Provides the fallback proxy. |
-| `NO_PROXY` / `no_proxy` | Matching destination hosts and IPs | Bypasses proxy routing. Supports comma-separated domains, subdomains, IP addresses, CIDR ranges, and `*`. |
+| Environment                   | Applies to                                      | Purpose                                                                                                   |
+| ----------------------------- | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `HTTP_PROXY` / `http_proxy`   | `http://` and `ws://` destinations              | Routes plain HTTP and WebSocket Upgrade requests through the configured proxy.                            |
+| `HTTPS_PROXY` / `https_proxy` | `https://` and `wss://` destinations            | Routes TLS destinations through the configured proxy, normally with HTTP CONNECT.                         |
+| `ALL_PROXY` / `all_proxy`     | Any destination without a scheme-specific proxy | Provides the fallback proxy.                                                                              |
+| `NO_PROXY` / `no_proxy`       | Matching destination hosts and IPs              | Bypasses proxy routing. Supports comma-separated domains, subdomains, IP addresses, CIDR ranges, and `*`. |
 
 On case-sensitive platforms, uppercase names are checked before lowercase names when both spellings exist. Windows treats environment names as case-insensitive, so each uppercase/lowercase pair identifies one variable. Set these variables before starting cc-proxy; changing them requires a restart because clients and pooled WebSocket connections retain their startup route. For CGI safety, proxy environment variables are ignored when `REQUEST_METHOD` is present. The variable name describes the **destination** scheme, so this default-WSS configuration is valid even though the local proxy URL uses `http://`:
 
-| Variable | Value |
-| --- | --- |
-| `HTTP_PROXY` | `http://127.0.0.1:7890` |
+| Variable      | Value                   |
+| ------------- | ----------------------- |
+| `HTTP_PROXY`  | `http://127.0.0.1:7890` |
 | `HTTPS_PROXY` | `http://127.0.0.1:7890` |
 
 After setting both variables through the operating system, service manager, or shell, start `cc-proxy start` in the same environment.
@@ -110,70 +110,70 @@ Proxy URLs may use `http`, `https`, `socks4`, `socks4a`, `socks5`, or `socks5h`.
 
 ## Codex
 
-| Environment | Config key | Default | Purpose |
-| --- | --- | --- | --- |
-| `CCP_CODEX_MODEL` | `codex.model` | unset | Forces every Codex request to one upstream model. |
-| `CCP_CODEX_EFFORT` | `codex.effort` | unset | Forces `none`, `low`, `medium`, `high`, `xhigh`, or `max`. |
-| `CCP_COMPACT_EFFORT` | none | `low` | Caps Codex reasoning effort for Claude Code summary compaction requests. `off` disables the cap and `none` removes reasoning. |
-| `CCP_CODEX_REASONING_SUMMARY` | `codex.reasoningSummary` | unset | Overrides summary mode. `off` and `none` suppress summaries. |
-| `CCP_CODEX_REASONING_SIGNATURES` | `codex.reasoningSignatures` | `on` | Preserves Codex encrypted reasoning continuation in Anthropic thinking signatures; `off`, `none`, `false`, and `0` suppress signature storage. |
-| `CCP_CODEX_SERVICE_TIER` | `codex.serviceTier` | unset | Requests `fast`, `priority`, `ultrafast`, or `flex` on Codex Messages requests. `fast` sends `priority`. Ultrafast sends `priority` unless the final model is `gpt-6-astra`. |
-| `CCP_CODEX_BASE_URL` | `codex.baseUrl` | ChatGPT Codex Responses URL | Changes the Codex endpoint. |
-| `CCP_CODEX_TRANSPORT` | `codex.transport` | `websocket` | Selects `websocket`, `http`, or `auto`. |
-| `CCP_CODEX_HEADER_TIMEOUT_MS` | `codex.headerTimeoutMs` | `300000` | Sets how long an HTTP-transport request waits for the Codex response headers. Values below `1000` are ignored. |
-| `CCP_CODEX_PREVIOUS_RESPONSE_ID` | `codex.previousResponseId` | `false` | Enables append-only WebSocket continuation for `1`, `true`, or `yes`. |
-| `CCP_CODEX_FULL_LANE` | `codex.fullLane` | `false` | Routes `gpt-5.6-sol` / `gpt-5.6-terra` through the full Responses lane instead of Responses Lite, enabling parallel tool calls (`gpt-5.6-luna` stays on Lite). |
-| `CCP_CODEX_SERVER_COMPACTION` | `codex.serverCompaction` | `false` | Enables or disables native compaction for standard boolean words. |
-| `CCP_CODEX_RESPONSES_API` | `codex.responsesApi` | `false` | Enables `/v1/responses` and `/v1/chat/completions` for every registered provider. Accepts `1`, `true`, or `yes`. |
-| `CCP_CODEX_IMAGES_API` | `codex.imagesApi` | `false` | Enables `/v1/images/generations` and `/v1/images/edits` for `1`, `true`, or `yes`. |
-| `CCP_CODEX_IMAGES_BASE_URL` | `codex.imagesBaseUrl` | `https://chatgpt.com/backend-api/codex` | Sets the trusted Codex Images API root; production use is restricted to HTTPS `chatgpt.com/backend-api/codex`. |
-| `CCP_CODEX_ORIGINATOR` | `codex.originator` | `cc-proxy` | Changes the Codex `originator` header. |
-| `CCP_CODEX_USER_AGENT` | `codex.userAgent` | `cc-proxy/<version>` | Changes the Codex user-agent. |
+| Environment                      | Config key                  | Default                                 | Purpose                                                                                                                                                                      |
+| -------------------------------- | --------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CCP_CODEX_MODEL`                | `codex.model`               | unset                                   | Forces every Codex request to one upstream model.                                                                                                                            |
+| `CCP_CODEX_EFFORT`               | `codex.effort`              | unset                                   | Forces `none`, `low`, `medium`, `high`, `xhigh`, or `max`.                                                                                                                   |
+| `CCP_COMPACT_EFFORT`             | none                        | `low`                                   | Caps Codex reasoning effort for Claude Code summary compaction requests. `off` disables the cap and `none` removes reasoning.                                                |
+| `CCP_CODEX_REASONING_SUMMARY`    | `codex.reasoningSummary`    | unset                                   | Overrides summary mode. `off` and `none` suppress summaries.                                                                                                                 |
+| `CCP_CODEX_REASONING_SIGNATURES` | `codex.reasoningSignatures` | `on`                                    | Preserves Codex encrypted reasoning continuation in Anthropic thinking signatures; `off`, `none`, `false`, and `0` suppress signature storage.                               |
+| `CCP_CODEX_SERVICE_TIER`         | `codex.serviceTier`         | unset                                   | Requests `fast`, `priority`, `ultrafast`, or `flex` on Codex Messages requests. `fast` sends `priority`. Ultrafast sends `priority` unless the final model is `gpt-6-astra`. |
+| `CCP_CODEX_BASE_URL`             | `codex.baseUrl`             | ChatGPT Codex Responses URL             | Changes the Codex endpoint.                                                                                                                                                  |
+| `CCP_CODEX_TRANSPORT`            | `codex.transport`           | `auto`                                  | Uses WebSocket with HTTP fallback if setup fails before sending a request. Set `websocket` or `http` to use only that transport.                                             |
+| `CCP_CODEX_HEADER_TIMEOUT_MS`    | `codex.headerTimeoutMs`     | `300000`                                | Sets how long an HTTP-transport request waits for the Codex response headers. Values below `1000` are ignored.                                                               |
+| `CCP_CODEX_PREVIOUS_RESPONSE_ID` | `codex.previousResponseId`  | `false`                                 | Enables append-only WebSocket continuation for `1`, `true`, or `yes`.                                                                                                        |
+| `CCP_CODEX_FULL_LANE`            | `codex.fullLane`            | `false`                                 | Routes `gpt-5.6-sol` / `gpt-5.6-terra` through the full Responses lane instead of Responses Lite, enabling parallel tool calls (`gpt-5.6-luna` stays on Lite).               |
+| `CCP_CODEX_SERVER_COMPACTION`    | `codex.serverCompaction`    | `false`                                 | Enables or disables native compaction for standard boolean words.                                                                                                            |
+| `CCP_CODEX_RESPONSES_API`        | `codex.responsesApi`        | `false`                                 | Enables `/v1/responses` and `/v1/chat/completions` for every registered provider. Accepts `1`, `true`, or `yes`.                                                             |
+| `CCP_CODEX_IMAGES_API`           | `codex.imagesApi`           | `false`                                 | Enables `/v1/images/generations` and `/v1/images/edits` for `1`, `true`, or `yes`.                                                                                           |
+| `CCP_CODEX_IMAGES_BASE_URL`      | `codex.imagesBaseUrl`       | `https://chatgpt.com/backend-api/codex` | Sets the trusted Codex Images API root; production use is restricted to HTTPS `chatgpt.com/backend-api/codex`.                                                               |
+| `CCP_CODEX_ORIGINATOR`           | `codex.originator`          | `cc-proxy`                              | Changes the Codex `originator` header.                                                                                                                                       |
+| `CCP_CODEX_USER_AGENT`           | `codex.userAgent`           | `cc-proxy/<version>`                    | Changes the Codex user-agent.                                                                                                                                                |
 
 `CLAUDE_CODE_PROXY_CODEX_BASE_URL` remains an accepted fallback for the Codex base URL. `CCP_CODEX_BASE_URL` takes precedence.
 
 ## Kimi
 
-| Environment | Config key | Default | Purpose |
-| --- | --- | --- | --- |
-| `CCP_KIMI_OAUTH_HOST` | `kimi.oauthHost` | `https://auth.kimi.ai` | Changes the OAuth host. |
-| `CCP_KIMI_BASE_URL` | `kimi.baseUrl` | `https://api.kimi.ai/coding/v1` | Changes the API base URL. |
-| `CCP_KIMI_USER_AGENT` | `kimi.userAgent` | `KimiCLI/1.37.0` | Changes the Kimi user-agent. |
+| Environment           | Config key       | Default                         | Purpose                      |
+| --------------------- | ---------------- | ------------------------------- | ---------------------------- |
+| `CCP_KIMI_OAUTH_HOST` | `kimi.oauthHost` | `https://auth.kimi.ai`          | Changes the OAuth host.      |
+| `CCP_KIMI_BASE_URL`   | `kimi.baseUrl`   | `https://api.kimi.ai/coding/v1` | Changes the API base URL.    |
+| `CCP_KIMI_USER_AGENT` | `kimi.userAgent` | `KimiCLI/1.37.0`                | Changes the Kimi user-agent. |
 
 ## GitHub Copilot
 
-| Environment | Config key | Default | Purpose |
-| --- | --- | --- | --- |
-| `CCP_COPILOT_BASE_URL` | none | the host the Copilot token names | Sends chat to this host. |
-| `CCP_COPILOT_GITHUB_URL` | none | `https://github.com` | The GitHub site for sign-in. |
-| `CCP_COPILOT_GITHUB_API_URL` | none | `https://api.github.com` | The GitHub API that issues Copilot tokens. |
+| Environment                  | Config key | Default                          | Purpose                                    |
+| ---------------------------- | ---------- | -------------------------------- | ------------------------------------------ |
+| `CCP_COPILOT_BASE_URL`       | none       | the host the Copilot token names | Sends chat to this host.                   |
+| `CCP_COPILOT_GITHUB_URL`     | none       | `https://github.com`             | The GitHub site for sign-in.               |
+| `CCP_COPILOT_GITHUB_API_URL` | none       | `https://api.github.com`         | The GitHub API that issues Copilot tokens. |
 
 ## Grok
 
-| Environment | Config key | Default | Purpose |
-| --- | --- | --- | --- |
-| `CCP_GROK_BASE_URL` | `grok.baseUrl` | `https://cli-chat-proxy.grok.com/v1` | Changes the Responses API base URL. |
-| `CCP_GROK_CLIENT_VERSION` | `grok.clientVersion` | `0.2.93` | Changes the Grok client version header. |
-| `CCP_GROK_TOOL_IMAGE` | none | `omit` | Selects `omit`, `reattach`, `inline`, or `reject` image handling. |
-| `CCP_GROK_HOSTED_SEARCH` | none | off | Set to `1`, `on`, or `true` to let hosted search tools replace the caller's own search tools and force them on an explicit search turn. |
-| `CCP_GROK_SEARCH_BLOCKS` | none | `text` | Selects how a hosted search is reported: `text` for a text block, `native` for `server_tool_use` plus a `*_tool_result` block. |
+| Environment               | Config key           | Default                              | Purpose                                                                                                                                 |
+| ------------------------- | -------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `CCP_GROK_BASE_URL`       | `grok.baseUrl`       | `https://cli-chat-proxy.grok.com/v1` | Changes the Responses API base URL.                                                                                                     |
+| `CCP_GROK_CLIENT_VERSION` | `grok.clientVersion` | `0.2.93`                             | Changes the Grok client version header.                                                                                                 |
+| `CCP_GROK_TOOL_IMAGE`     | none                 | `omit`                               | Selects `omit`, `reattach`, `inline`, or `reject` image handling.                                                                       |
+| `CCP_GROK_HOSTED_SEARCH`  | none                 | off                                  | Set to `1`, `on`, or `true` to let hosted search tools replace the caller's own search tools and force them on an explicit search turn. |
+| `CCP_GROK_SEARCH_BLOCKS`  | none                 | `text`                               | Selects how a hosted search is reported: `text` for a text block, `native` for `server_tool_use` plus a `*_tool_result` block.          |
 
 ## OpenCode Go
 
-| Environment | Config key | Default | Purpose |
-| --- | --- | --- | --- |
-| `CCP_OPENCODE_API_KEY` | `opencode.apiKey` | unset | OpenCode Go API key; takes precedence over `OPENCODE_API_KEY` and config. |
-| `OPENCODE_API_KEY` | `opencode.apiKey` | unset | Fallback API-key variable accepted by the proxy when the CCP-specific variable is unset. |
-| `CCP_OPENCODE_BASE_URL` | `opencode.baseUrl` | `https://opencode.ai/zen/go/v1` | Changes the OpenCode Go API base URL. |
+| Environment             | Config key         | Default                         | Purpose                                                                                  |
+| ----------------------- | ------------------ | ------------------------------- | ---------------------------------------------------------------------------------------- |
+| `CCP_OPENCODE_API_KEY`  | `opencode.apiKey`  | unset                           | OpenCode Go API key; takes precedence over `OPENCODE_API_KEY` and config.                |
+| `OPENCODE_API_KEY`      | `opencode.apiKey`  | unset                           | Fallback API-key variable accepted by the proxy when the CCP-specific variable is unset. |
+| `CCP_OPENCODE_BASE_URL` | `opencode.baseUrl` | `https://opencode.ai/zen/go/v1` | Changes the OpenCode Go API base URL.                                                    |
 
 ## Cursor Agent
 
-| Environment | Config key | Default | Purpose |
-| --- | --- | --- | --- |
-| `CCP_CURSOR_BASE_URL` | `cursor.baseUrl` | `https://api2.cursor.sh` | Changes the Cursor API base URL. |
-| `CCP_CURSOR_CLIENT_VERSION` | `cursor.clientVersion` | `0.48.5` | Changes Cursor client version headers. |
-| `CCP_CURSOR_AGENT_BUNDLE` | `cursor.agentBundle` | Auto-detected | Points to Cursor Agent's bundled `index.js` protobuf schemas. |
-| `CCP_CURSOR_AUTH_TOKEN` | none | unset | Uses a bearer token instead of proxy-owned Cursor auth storage. |
+| Environment                 | Config key             | Default                  | Purpose                                                         |
+| --------------------------- | ---------------------- | ------------------------ | --------------------------------------------------------------- |
+| `CCP_CURSOR_BASE_URL`       | `cursor.baseUrl`       | `https://api2.cursor.sh` | Changes the Cursor API base URL.                                |
+| `CCP_CURSOR_CLIENT_VERSION` | `cursor.clientVersion` | `0.48.5`                 | Changes Cursor client version headers.                          |
+| `CCP_CURSOR_AGENT_BUNDLE`   | `cursor.agentBundle`   | Auto-detected            | Points to Cursor Agent's bundled `index.js` protobuf schemas.   |
+| `CCP_CURSOR_AUTH_TOKEN`     | none                   | unset                    | Uses a bearer token instead of proxy-owned Cursor auth storage. |
 
 ## Shared compatibility fallbacks
 

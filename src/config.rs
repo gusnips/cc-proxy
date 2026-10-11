@@ -1241,7 +1241,7 @@ pub fn codex_transport() -> CodexTransport {
     {
         return transport;
     }
-    CodexTransport::WebSocket
+    CodexTransport::Auto
 }
 
 /// How long an HTTP-transport request waits for the Codex response headers.
@@ -1590,12 +1590,22 @@ mod tests {
     }
 
     #[test]
-    fn codex_transport_defaults_to_websocket() {
+    fn codex_transport_defaults_to_auto_and_preserves_file_choices() {
         let _guard = ENV_LOCK.lock().unwrap();
         let config = tempfile::TempDir::new().unwrap();
         let _env = isolated_env(&config);
-        let result = codex_transport();
-        assert_eq!(result, CodexTransport::WebSocket);
+        assert_eq!(codex_transport(), CodexTransport::Auto);
+        for (name, expected) in [
+            ("http", CodexTransport::Http),
+            ("websocket", CodexTransport::WebSocket),
+        ] {
+            std::fs::write(
+                config.path().join("config.json"),
+                serde_json::json!({"codex":{"transport":name}}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(codex_transport(), expected);
+        }
     }
 
     #[test]
@@ -1621,25 +1631,25 @@ mod tests {
     }
 
     #[test]
-    fn codex_transport_invalid_env_falls_back_to_websocket() {
+    fn codex_transport_invalid_env_falls_back_to_auto() {
         let _guard = ENV_LOCK.lock().unwrap();
         let config = tempfile::TempDir::new().unwrap();
         let _env = isolated_env(&config);
         unsafe {
             std::env::set_var("CCP_CODEX_TRANSPORT", "invalid");
         }
-        assert_eq!(codex_transport(), CodexTransport::WebSocket);
+        assert_eq!(codex_transport(), CodexTransport::Auto);
     }
 
     #[test]
-    fn codex_transport_empty_env_falls_back_to_websocket() {
+    fn codex_transport_empty_env_falls_back_to_auto() {
         let _guard = ENV_LOCK.lock().unwrap();
         let config = tempfile::TempDir::new().unwrap();
         let _env = isolated_env(&config);
         unsafe {
             std::env::set_var("CCP_CODEX_TRANSPORT", "");
         }
-        assert_eq!(codex_transport(), CodexTransport::WebSocket);
+        assert_eq!(codex_transport(), CodexTransport::Auto);
     }
 
     #[test]

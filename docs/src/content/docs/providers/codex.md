@@ -83,7 +83,7 @@ Normal messages, token counting, reviews routed to another provider, and OpenAI-
 
 ## Transport and continuation
 
-WebSocket is the default transport. Set `CCP_CODEX_TRANSPORT=http` for HTTP SSE, or `auto` to use WebSocket with HTTP fallback only when setup fails before a request is sent.
+The default is `auto`: WebSocket first, with HTTP fallback if connection setup fails before a request is sent. This includes a rejected WebSocket upgrade; that rejection alone doesn't mean your login expired. Set `CCP_CODEX_TRANSPORT=websocket` or `http` to use only that transport.
 
 On the HTTP transport, the proxy waits five minutes for the response headers before failing the request. Codex withholds the response head until the model produces its first output, so a large request to a high-effort model can hold it for minutes. `CCP_CODEX_HEADER_TIMEOUT_MS` or `codex.headerTimeoutMs` changes that bound.
 
