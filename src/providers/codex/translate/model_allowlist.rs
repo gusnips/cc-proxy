@@ -155,7 +155,7 @@ fn latest_in_family<'a>(family: &str, slugs: impl IntoIterator<Item = &'a str>) 
 
 /// Newest model the proxy knows for a Claude family: baseline plus the
 /// listed API-supported models in the Codex CLI cache.
-fn latest_for_claude_family(claude_family: &str) -> Option<String> {
+pub fn latest_for_claude_family(claude_family: &str) -> Option<String> {
     let family = openai_family(claude_family)?;
     let catalog = listed_catalog_models();
     latest_in_family(

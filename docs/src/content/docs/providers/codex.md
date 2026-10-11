@@ -30,7 +30,7 @@ To see how much of your 5-hour and weekly limits you have used, and when they re
 
 Use `cc-proxy models` as the current catalog. Model access depends on your ChatGPT account. A model rejected by the subscription produces the upstream error verbatim.
 
-Claude-style aliases map to Codex models: `haiku` and `claude-haiku-*` to `gpt-6-luna`, `sonnet` and `claude-sonnet-*` to `gpt-5.6-terra`, and `opus`, `fable`, `claude-opus-*` (including `claude-opus-5-5`), and `claude-fable-*` to `gpt-6-sol`.
+Claude-style names go to the newest Codex model of the matching family: `fable` to astra, `opus` to sol, `sonnet` to terra and `haiku` to luna. The name can carry any version, such as `claude-sonnet-5-5`, so a new Claude release needs no update. With the models built into cc-proxy today, that is `gpt-6-astra`, `gpt-6.1-sol`, `gpt-5.6-terra` and `gpt-6-luna`. A newer model in the Codex CLI cache takes over by itself. Set `codex.model` to pin one model instead.
 
 Append `-fast` to a Codex model to request `service_tier: "priority"`. For example, `gpt-6-sol-fast` sends `gpt-6-sol` with the priority tier. Models discovered in the Codex CLI cache and unlisted `gpt-*` IDs keep this behavior.
 
@@ -48,7 +48,7 @@ Claude Code summary compaction requests are capped at low effort by default beca
 
 ### Auto-review effort
 
-Claude Code's non-streaming, tool-free security-review requests route to `gpt-6-luna` by default when they use Codex. `autoReviewModel` can select another model. To set a separate effort for these requests, use:
+Claude Code's non-streaming, tool-free security-review requests route to the newest luna model by default when they use Codex, the same model `haiku` gets. `autoReviewModel` can select another model. To set a separate effort for these requests, use:
 
 ```sh
 cc-proxy config set autoReviewEffort low
