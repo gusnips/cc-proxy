@@ -150,6 +150,17 @@ pub(crate) fn incomplete_stop_reason(payload: &Value) -> Option<StopReason> {
     }
 }
 
+/// The call id in the backend's 400 `No tool call found for function call
+/// output with call_id <id>.`, or None for any other message. The request
+/// carries the `function_call` the backend says it cannot find, so the proxy
+/// can only resend it.
+pub(crate) fn orphan_tool_output_call_id(message: &str) -> Option<&str> {
+    const PREFIX: &str = "No tool call found for function call output with call_id ";
+    let (_, rest) = message.split_once(PREFIX)?;
+    let id = rest.split_whitespace().next()?.trim_end_matches('.');
+    (!id.is_empty()).then_some(id)
+}
+
 pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailure> {
     let event_type = payload.get("type").and_then(Value::as_str)?;
     let response_status = payload.pointer("/response/status").and_then(Value::as_str);
@@ -659,6 +670,49 @@ fn retryable_message(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orphan_tool_output_message_yields_the_call_id() {
+        for (message, id) in [
+            (
+                "No tool call found for function call output with call_id call_a47aaafcbd19449d96c24889a5858194.",
+                Some("call_a47aaafcbd19449d96c24889a5858194"),
+            ),
+            (
+                "No tool call found for function call output with call_id call_wdH5oOPMFeMejBWtUki6AAJN",
+                Some("call_wdH5oOPMFeMejBWtUki6AAJN"),
+            ),
+            (
+                "invalid_request_error: No tool call found for function call output with call_id call_x. Retry.",
+                Some("call_x"),
+            ),
+            (
+                "No tool call found for function call output with call_id ",
+                None,
+            ),
+            ("No tool call found for function call output", None),
+            ("Item with id 'call_x' not found.", None),
+            ("rate limit reached", None),
+        ] {
+            assert_eq!(orphan_tool_output_call_id(message), id, "{message}");
+        }
+    }
+
+    #[test]
+    fn orphan_tool_output_error_is_a_permanent_400() {
+        let failure = classify_event_failure(&serde_json::json!({
+            "type": "error",
+            "status_code": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "message": "No tool call found for function call output with call_id call_x."
+            }
+        }))
+        .unwrap();
+        assert_eq!(failure.status, 400);
+        assert!(!failure.retryable());
+        assert_eq!(orphan_tool_output_call_id(&failure.message), Some("call_x"));
+    }
 
     /// Shape recorded from a live turn that exhausted the five hour window: the
     /// clock arrives both in the error body and in the mirrored `X-Codex-*`
