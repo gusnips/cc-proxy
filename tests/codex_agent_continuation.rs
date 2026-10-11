@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use cc_proxy::providers::codex::translate::model_allowlist::latest_for_claude_family;
 use cc_proxy::providers::codex::websocket::{
     WEBSOCKET_PROTOCOL_HEADER, invalidate_codex_websocket_pool_owner,
 };
@@ -1460,7 +1461,8 @@ async fn auto_review_with_agent_headers_is_stateless() {
         &classifier,
         &[("developer", review_system), ("user", &review)],
     );
-    assert_eq!(classifier.body["model"], "gpt-6-luna");
+    let luna = latest_for_claude_family("haiku").expect("a luna model");
+    assert_eq!(classifier.body["model"], luna.as_str());
     assert_eq!(first.socket_ordinal, 1);
     assert_eq!(classifier.socket_ordinal, 2);
     assert_delta_input(&second, &a_response, first.socket_ordinal, &a2);

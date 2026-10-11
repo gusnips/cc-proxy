@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::config;
+use crate::{config, registry::anthropic_model_family};
 
 use super::model_catalog::{catalog_model, catalog_models};
 use super::request::ServiceTier;
@@ -24,22 +24,6 @@ pub const ALLOWED_MODELS: &[&str] = &[
     "gpt-6-luna",
     "gpt-6-sol",
     "gpt-6.1-sol",
-];
-
-pub const MODEL_ALIASES: &[(&str, &str)] = &[
-    ("haiku", "gpt-6-luna"),
-    ("claude-haiku-4-5", "gpt-6-luna"),
-    ("claude-haiku-4-5-20251001", "gpt-6-luna"),
-    ("sonnet", "gpt-5.6-terra"),
-    ("claude-sonnet-4-6", "gpt-5.6-terra"),
-    ("claude-sonnet-5", "gpt-5.6-terra"),
-    ("opus", "gpt-6-sol"),
-    ("claude-opus-4-7", "gpt-6-sol"),
-    ("claude-opus-4-8", "gpt-6-sol"),
-    ("claude-opus-5", "gpt-6-sol"),
-    ("claude-opus-5-5", "gpt-6-sol"),
-    ("fable", "gpt-6-sol"),
-    ("claude-fable-5", "gpt-6-sol"),
 ];
 
 #[derive(Debug, Clone)]
@@ -137,7 +121,57 @@ pub fn service_tier_for_model(model: &str, tier: ServiceTier) -> ServiceTier {
     }
 }
 
-fn resolve_tier_model_alias(model: &str) -> ResolvedModel {
+/// The OpenAI family that plays the same role as a Claude family. Only the
+/// pairing lives here. Versions never do: `latest_in_family` finds them.
+fn openai_family(claude_family: &str) -> Option<&'static str> {
+    match claude_family {
+        "fable" => Some("astra"),
+        "opus" => Some("sol"),
+        "sonnet" => Some("terra"),
+        "haiku" => Some("luna"),
+        _ => None,
+    }
+}
+
+/// `gpt-<version>-<family>` as numeric parts, so 6.10 beats 6.9.
+fn gpt_version(slug: &str, family: &str) -> Option<Vec<u32>> {
+    slug.strip_prefix("gpt-")?
+        .strip_suffix(family)?
+        .strip_suffix('-')?
+        .split('.')
+        .map(|part| part.parse().ok())
+        .collect()
+}
+
+/// Highest-version `gpt-<version>-<family>` among `slugs`. Other names
+/// (`gpt-5.3-codex`, `gpt-6-sol-mini`, `gpt-5.5`) never match.
+fn latest_in_family<'a>(family: &str, slugs: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    slugs
+        .into_iter()
+        .filter_map(|slug| Some((gpt_version(slug, family)?, slug)))
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, slug)| slug)
+}
+
+/// Newest model the proxy knows for a Claude family: baseline plus the
+/// listed API-supported models in the Codex CLI cache.
+pub fn latest_for_claude_family(claude_family: &str) -> Option<String> {
+    let family = openai_family(claude_family)?;
+    let catalog = listed_catalog_models();
+    latest_in_family(
+        family,
+        ALLOWED_MODELS
+            .iter()
+            .copied()
+            .chain(catalog.iter().map(String::as_str)),
+    )
+    .map(str::to_string)
+}
+
+fn resolve_model_alias(model: &str) -> ResolvedModel {
+    let latest = anthropic_model_family(model).and_then(latest_for_claude_family);
+    let model = latest.as_deref().unwrap_or(model);
+
     match split_tier_suffix(model) {
         Some((base, tier)) => ResolvedModel {
             model: base.to_string(),
@@ -163,20 +197,14 @@ pub fn resolve_model_request_with_config_override(
 }
 
 fn resolve_with_model_override(model: &str, override_model: Option<&str>) -> ResolvedModel {
-    let alias = MODEL_ALIASES
-        .iter()
-        .find(|(alias, _)| *alias == model)
-        .map(|(_, target)| *target)
-        .unwrap_or(model);
-
-    let requested = resolve_tier_model_alias(alias);
+    let requested = resolve_model_alias(model);
     // A model override must not hide a repeated or mixed local suffix.
     // Keep the unresolved suffix so the routing gate rejects the request.
     if requested.model.ends_with("-fast") || requested.model.ends_with("-ultrafast") {
         return requested;
     }
     let resolved = match override_model {
-        Some(val) if !val.is_empty() => resolve_tier_model_alias(val),
+        Some(val) if !val.is_empty() => resolve_model_alias(val),
         _ => requested.clone(),
     };
     // An override's own suffix wins. Otherwise keep the requested tier,
@@ -269,12 +297,12 @@ fn uses_responses_lite_with_full_lane(model: &str, full_lane: bool) -> bool {
 /// Luna models exist only behind the Responses Lite lane; the full
 /// Responses API resolves them to a `-free` variant and returns 404 (Model not
 /// found gpt-5.6-luna-free-...). Hosted web_search requests must run on the
-/// full lane, so luna is upgraded to its nearest full-lane sibling.
-pub fn full_lane_web_search_model(model: &str) -> &str {
-    match model {
-        "gpt-5.6-luna" => "gpt-5.6-sol",
-        "gpt-6-luna" => "gpt-6-sol",
-        _ => model,
+/// full lane, so luna is upgraded to the sol of the same version. That holds
+/// for luna versions the baseline never listed, which family routing picks.
+pub fn full_lane_web_search_model(model: &str) -> String {
+    match model.strip_suffix("-luna") {
+        Some(base) if base.starts_with("gpt-") => format!("{base}-sol"),
+        _ => model.to_string(),
     }
 }
 
@@ -285,7 +313,7 @@ pub fn is_valid_model_for_codex(model: &str) -> bool {
     if split_tier_suffix(model).is_some_and(|(base, _)| is_allowed_model(base)) {
         return true;
     }
-    MODEL_ALIASES.iter().any(|(alias, _)| *alias == model)
+    anthropic_model_family(model).is_some()
 }
 
 #[cfg(test)]
@@ -387,14 +415,8 @@ mod tests {
             assert_eq!(resolved.model, model);
             assert_eq!(resolved.service_tier, Some(tier));
         }
-        for (alias, model) in [
-            ("haiku", "gpt-6-luna"),
-            ("sonnet", "gpt-5.6-terra"),
-            ("fable", "gpt-6-sol"),
-        ] {
-            let resolved = resolve_with_model_override(alias, None);
-            assert_eq!(resolved.model, model);
-            assert_eq!(resolved.service_tier, None);
+        for alias in ["haiku", "sonnet", "opus", "fable"] {
+            assert_eq!(resolve_with_model_override(alias, None).service_tier, None);
         }
     }
 
@@ -429,12 +451,6 @@ mod tests {
     }
 
     #[test]
-    fn haiku_resolves_to_luna() {
-        let r = resolve_model_request("haiku");
-        assert_eq!(r.model, "gpt-6-luna");
-    }
-
-    #[test]
     fn responses_lite_defaults_for_56_family_only() {
         for model in ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] {
             assert!(uses_responses_lite_with_full_lane(model, false));
@@ -460,39 +476,103 @@ mod tests {
         assert_eq!(full_lane_web_search_model("gpt-5.4"), "gpt-5.4");
         assert_eq!(full_lane_web_search_model("gpt-6-luna"), "gpt-6-sol");
         assert_eq!(full_lane_web_search_model("gpt-6-sol"), "gpt-6-sol");
+        // A luna version the baseline never listed keeps its own version.
+        assert_eq!(full_lane_web_search_model("gpt-6.1-luna"), "gpt-6.1-sol");
+        assert_eq!(full_lane_web_search_model("not-gpt-luna"), "not-gpt-luna");
     }
 
     #[test]
-    fn sonnet_resolves_to_terra() {
-        let r = resolve_model_request("sonnet");
-        assert_eq!(r.model, "gpt-5.6-terra");
+    fn latest_in_family_ranks_versions_as_numbers_within_one_family() {
+        let slugs = [
+            "gpt-5.6-sol",
+            "gpt-6-sol",
+            "gpt-6.9-sol",
+            "gpt-6.10-sol",
+            "gpt-7-terra",
+            "gpt-5.3-codex",
+            "gpt-6-sol-mini",
+            "gpt-x-sol",
+            "gpt--sol",
+            "gpt-5.5",
+            "claude-sol",
+        ];
+        assert_eq!(latest_in_family("sol", slugs), Some("gpt-6.10-sol"));
+        assert_eq!(latest_in_family("terra", slugs), Some("gpt-7-terra"));
+        assert_eq!(latest_in_family("astra", slugs), None);
+        // `luna` must not match the tail of a longer family name.
+        assert_eq!(latest_in_family("luna", ["gpt-9-moonluna"]), None);
     }
 
     #[test]
-    fn sonnet_5_resolves_to_terra() {
-        let r = resolve_model_request("claude-sonnet-5");
-        assert_eq!(r.model, "gpt-5.6-terra");
+    fn baseline_covers_every_claude_family_with_its_newest_model() {
+        for (claude_family, expected) in [
+            ("fable", "gpt-6-astra"),
+            ("opus", "gpt-6.1-sol"),
+            ("sonnet", "gpt-5.6-terra"),
+            ("haiku", "gpt-6-luna"),
+        ] {
+            let family = openai_family(claude_family).unwrap();
+            let slugs = ALLOWED_MODELS.iter().copied();
+            assert_eq!(latest_in_family(family, slugs), Some(expected));
+        }
+        assert_eq!(openai_family("claude"), None);
     }
 
     #[test]
-    fn opus_resolves_to_sol() {
-        let r = resolve_model_request("opus");
-        assert_eq!(r.model, "gpt-6-sol");
-    }
-
-    #[test]
-    fn opus_aliases_resolve_to_sol() {
-        for model in ["claude-opus-4-8", "claude-opus-5", "claude-opus-5-5"] {
-            let r = resolve_model_request(model);
-            assert_eq!(r.model, "gpt-6-sol");
+    fn claude_versions_resolve_like_their_family_without_a_version_list() {
+        for (family, openai) in [
+            ("fable", "astra"),
+            ("opus", "sol"),
+            ("sonnet", "terra"),
+            ("haiku", "luna"),
+        ] {
+            let expected = resolve_with_model_override(family, None);
+            assert!(expected.model.starts_with("gpt-"), "{family}");
+            assert!(expected.model.ends_with(&format!("-{openai}")), "{family}");
+            for model in [
+                format!("claude-{family}-5-5"),
+                format!("claude-{family}-99-7"),
+                format!("claude-{family}-99.7"),
+                format!("claude-{family}-latest"),
+                format!("claude-{family}-99-7-20990101[1m]"),
+            ] {
+                let normalized = crate::registry::normalize_incoming_model(&model);
+                let resolved = resolve_with_model_override(&normalized, None);
+                assert_eq!(resolved.model, expected.model, "{model}");
+                assert_eq!(resolved.service_tier, None, "{model}");
+                assert!(is_valid_model_for_codex(&normalized), "{model}");
+                assert!(assert_routable_model(&resolved.model).is_ok(), "{model}");
+            }
         }
     }
 
     #[test]
-    fn fable_5_resolves_to_sol() {
-        for model in ["fable", "claude-fable-5"] {
-            let r = resolve_model_request(model);
-            assert_eq!(r.model, "gpt-6-sol");
+    fn claude_family_routing_keeps_configured_model_overrides() {
+        let luna = resolve_with_model_override("haiku", None).model;
+        for (requested_model, override_model, expected_model, expected_tier) in [
+            (
+                "claude-sonnet-5-5",
+                "gpt-6-astra-fast",
+                "gpt-6-astra",
+                Some(ServiceTier::Priority),
+            ),
+            (
+                "claude-sonnet-5-5",
+                "claude-haiku-99-7",
+                luna.as_str(),
+                None,
+            ),
+            (
+                "gpt-6-astra-ultrafast",
+                "claude-haiku-99-7",
+                luna.as_str(),
+                Some(ServiceTier::Priority),
+            ),
+        ] {
+            let resolved = resolve_with_model_override(requested_model, Some(override_model));
+            assert_eq!(resolved.model, expected_model);
+            assert_eq!(resolved.service_tier, expected_tier);
+            assert!(assert_routable_model(&resolved.model).is_ok());
         }
     }
 

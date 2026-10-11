@@ -163,6 +163,27 @@ mod tests {
     }
 
     #[test]
+    fn future_claude_aliases_do_not_change_session_affinity() {
+        for family in crate::registry::ANTHROPIC_STYLE_ALIASES {
+            let session_id = format!("session-affinity-future-{family}-test");
+            let initial = record_session_request(Some(&session_id), None, "kimi", "kimi-k3", 1)
+                .expect("initial session");
+            assert_eq!(initial.affinity_provider, Some(AliasProvider::Kimi));
+
+            let updated = record_session_request(
+                Some(&session_id),
+                Some(&initial),
+                "codex",
+                &format!("claude-{family}-99-7[1m]"),
+                2,
+            )
+            .expect("updated session");
+            assert_eq!(updated.affinity_provider, Some(AliasProvider::Kimi));
+            assert_eq!(updated.seq, 2);
+        }
+    }
+
+    #[test]
     fn auxiliary_request_does_not_change_session_affinity() {
         let session_id = "session-affinity-auxiliary-request-test";
         let initial = record_session_request(Some(session_id), None, "codex", "gpt-5.6-sol", 1)

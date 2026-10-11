@@ -10,21 +10,7 @@ use axum::{http::StatusCode, response::Response};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
-    "haiku",
-    "claude-haiku-4-5",
-    "claude-haiku-4-5-20251001",
-    "sonnet",
-    "claude-sonnet-4-6",
-    "claude-sonnet-5",
-    "opus",
-    "claude-opus-4-7",
-    "claude-opus-4-8",
-    "claude-opus-5",
-    "claude-opus-5-5",
-    "fable",
-    "claude-fable-5",
-];
+pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &["haiku", "sonnet", "opus", "fable"];
 
 pub const CURSOR_PREFIXES: &[&str] = &["cursor:", "cursor-plan:", "cursor-ask:"];
 
@@ -268,8 +254,25 @@ pub fn normalize_incoming_model(model: &str) -> String {
     model.to_string()
 }
 
+pub fn anthropic_model_family(model: &str) -> Option<&str> {
+    let family = if let Some(claude_model) = model.strip_prefix("claude-") {
+        let (family, suffix) = claude_model.split_once('-')?;
+        if suffix.is_empty()
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
+        {
+            return None;
+        }
+        family
+    } else {
+        model
+    };
+    ANTHROPIC_STYLE_ALIASES.contains(&family).then_some(family)
+}
+
 pub fn is_anthropic_alias(model: &str) -> bool {
-    ANTHROPIC_STYLE_ALIASES.contains(&model)
+    anthropic_model_family(model).is_some()
 }
 
 pub fn is_cursor_model(model: &str) -> bool {
@@ -454,6 +457,73 @@ mod tests {
             let p = registry.provider_for_model(model, None);
             assert!(p.is_some(), "{model} should route to a provider");
             assert_eq!(p.expect("provider").name(), "codex");
+        }
+    }
+
+    #[test]
+    fn claude_versions_route_by_family_and_preserve_affinity() {
+        for (alias_provider, configured_provider) in [
+            (AliasProvider::Codex, "codex"),
+            (AliasProvider::Kimi, "kimi"),
+        ] {
+            let registry = Registry::new(alias_provider);
+            for family in ANTHROPIC_STYLE_ALIASES {
+                for model in [
+                    format!("claude-{family}-5-5"),
+                    format!("claude-{family}-99-7"),
+                    format!("claude-{family}-99.7"),
+                    format!("claude-{family}-latest"),
+                    format!("claude-{family}-99-7-20990101[1m]"),
+                ] {
+                    for (affinity, expected_provider) in [
+                        (None, configured_provider),
+                        (Some(&AliasProvider::Codex), "codex"),
+                        (Some(&AliasProvider::Kimi), "kimi"),
+                    ] {
+                        assert_eq!(
+                            registry
+                                .provider_for_model(&model, affinity)
+                                .map(|provider| provider.name()),
+                            Some(expected_provider),
+                            "{model}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_family_lookup_rejects_unrelated_and_incomplete_ids() {
+        let registry = Registry::new(AliasProvider::Codex);
+        for model in [
+            "claude-sonnetwork-5-5",
+            "claude-other-5-5",
+            "claude-sonnet",
+            "claude-sonnet-",
+            "claude-sonnet-99 7",
+            "claude-sonnet-99/7",
+            "sonnet-5-5",
+            "definitely-not-a-model",
+        ] {
+            assert_eq!(anthropic_model_family(model), None, "{model}");
+            assert!(
+                registry.provider_for_model(model, None).is_none(),
+                "{model}"
+            );
+        }
+        for (model, provider) in [
+            ("copilot/claude-sonnet-5-5", "copilot"),
+            ("opencode-go/claude-sonnet-99-7", "opencode"),
+        ] {
+            assert_eq!(anthropic_model_family(model), None, "{model}");
+            assert_eq!(
+                registry
+                    .provider_for_model(model, Some(&AliasProvider::Kimi))
+                    .map(|provider| provider.name()),
+                Some(provider),
+                "{model}"
+            );
         }
     }
 

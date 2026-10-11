@@ -23,6 +23,7 @@ use crate::{
             CodexTranscriptionBackend, MAX_TRANSCRIPTION_REQUEST_BYTES, TranscriptionRequestError,
             prepare_transcription, transcription_error_response,
         },
+        translate::model_allowlist::latest_for_claude_family,
     },
     registry::{Registry, normalize_incoming_model},
     request_identity::{CLAUDE_AGENT_HEADER, CLAUDE_PARENT_AGENT_HEADER, ConversationIdentity},
@@ -51,7 +52,6 @@ use uuid::Uuid;
 
 const CLAUDE_AUTO_REVIEW_SYSTEM_PREFIX: &str =
     "You are a security monitor for autonomous AI coding agents.";
-const CODEX_AUTO_REVIEW_MODEL: &str = "gpt-6-luna";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AutoReviewRoute {
@@ -96,12 +96,19 @@ fn apply_auto_review_model(
         return None;
     }
 
+    // The default is the small fast model: the haiku family, which Codex
+    // fills with its newest luna.
     let override_model = configured_model
         .filter(|model| !model.is_empty())
-        .or((original_provider == "codex").then_some(CODEX_AUTO_REVIEW_MODEL))?;
+        .map(str::to_string)
+        .or_else(|| {
+            (original_provider == "codex")
+                .then(|| latest_for_claude_family("haiku"))
+                .flatten()
+        })?;
     let route = AutoReviewRoute {
         requested_model: body.model.clone()?,
-        override_model: override_model.to_string(),
+        override_model,
     };
     body.model = Some(route.override_model.clone());
     Some(route)
@@ -2430,7 +2437,10 @@ mod request_id_header_tests {
 
 #[cfg(test)]
 mod auto_review_tests {
-    use super::{apply_auto_review_model, headers_to_record, is_claude_auto_review_request};
+    use super::{
+        apply_auto_review_model, headers_to_record, is_claude_auto_review_request,
+        latest_for_claude_family,
+    };
     use crate::anthropic::schema::MessagesRequest;
     use crate::request_identity::{CLAUDE_AGENT_HEADER, CLAUDE_PARENT_AGENT_HEADER};
     use http::{HeaderMap, HeaderValue};
@@ -2510,9 +2520,11 @@ mod auto_review_tests {
         );
         let route = apply_auto_review_model(&mut classifier, false, None, "codex")
             .expect("classifier should be routed");
+        let luna = latest_for_claude_family("haiku").expect("a luna model");
+        assert!(luna.ends_with("-luna"), "{luna}");
         assert_eq!(route.requested_model, "gpt-5.6-sol");
-        assert_eq!(route.override_model, "gpt-6-luna");
-        assert_eq!(classifier.model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(route.override_model, luna);
+        assert_eq!(classifier.model.as_deref(), Some(luna.as_str()));
     }
 
     #[test]
