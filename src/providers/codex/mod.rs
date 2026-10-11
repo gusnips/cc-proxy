@@ -1081,7 +1081,21 @@ async fn live_stream_response_once(
                     return LiveStreamStart::Response(usage_limit_response(&limit));
                 }
                 if let Some(failure) = events::classify_event_failure(&payload) {
-                    if failure.retryable() {
+                    // The backend sometimes 400s a tool result it says has no call,
+                    // though the request carries that call, and a resend of the same
+                    // request has gone through. Resend once; a second 400 is returned.
+                    let orphan_call_id = events::orphan_tool_output_call_id(&failure.message);
+                    let resend = orphan_call_id.is_some() && reconnect.attempts == 0;
+                    if let Some(call_id) = orphan_call_id {
+                        log_orphan_tool_output(
+                            &ctx,
+                            &request_body,
+                            call_id,
+                            reconnect.attempts,
+                            resend,
+                        );
+                    }
+                    if failure.retryable() || resend {
                         return provider_retry(
                             &upstream_events,
                             codex_event_failure_error(
@@ -1168,6 +1182,50 @@ async fn live_stream_response_once(
         &upstream_events,
         missing_live_terminal_error(upstream_events.transport()),
     )
+}
+
+/// Logs how the failing tool result sits in the request, without any of its
+/// text. `callIndex: null` means the proxy sent an orphan; both indexes set,
+/// call first, means the request was well formed and the backend refused it.
+fn log_orphan_tool_output(
+    ctx: &RequestContext,
+    request: &translate::request::ResponsesRequest,
+    call_id: &str,
+    attempt: u32,
+    retrying: bool,
+) {
+    let pairing = request_summary::tool_call_pairing(&request.input, call_id);
+    create_logger("codex").warn(
+        "codex_orphan_tool_output",
+        Some(serde_json::Map::from_iter([
+            ("reqId".to_string(), serde_json::json!(&ctx.req_id)),
+            ("callId".to_string(), serde_json::json!(call_id)),
+            ("model".to_string(), serde_json::json!(&request.model)),
+            ("attempt".to_string(), serde_json::json!(attempt)),
+            ("retrying".to_string(), serde_json::json!(retrying)),
+            (
+                "inputItems".to_string(),
+                serde_json::json!(pairing.input_items),
+            ),
+            (
+                "functionCalls".to_string(),
+                serde_json::json!(pairing.function_calls),
+            ),
+            (
+                "functionCallOutputs".to_string(),
+                serde_json::json!(pairing.function_call_outputs),
+            ),
+            (
+                "callIndex".to_string(),
+                serde_json::json!(pairing.call_index),
+            ),
+            (
+                "outputIndex".to_string(),
+                serde_json::json!(pairing.output_index),
+            ),
+            ("tail".to_string(), serde_json::json!(pairing.tail)),
+        ])),
+    );
 }
 
 fn missing_live_terminal_error(transport: client::ActualTransport) -> client::CodexError {
@@ -2949,6 +3007,87 @@ mod tests {
         let now = 946684810000; // 10s after
         let output = format_expiry(expires, now);
         assert!(output.starts_with("Expires: 2000-01-01T00:00:00.000Z (in -"));
+    }
+
+    fn orphan_tool_output_event() -> serde_json::Value {
+        serde_json::json!({
+            "type": "error",
+            "status_code": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "message": "No tool call found for function call output with call_id call_test."
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn orphan_tool_output_is_resent_once_and_the_resend_answers() {
+        use http_body_util::BodyExt as _;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_live_websocket_request(&mut socket).await;
+                if attempt == 0 {
+                    emit_live_event(&mut socket, &orphan_tool_output_event()).await;
+                    continue;
+                }
+                for event in [
+                    serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m"}}),
+                    serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"Resent answer"}),
+                    serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
+                    serde_json::json!({"type":"response.completed","response":{"status":"completed","usage":{}}}),
+                ] {
+                    emit_live_event(&mut socket, &event).await;
+                }
+            }
+        });
+        let client = authenticated_live_test_client(format!("http://{addr}/responses"));
+        let request = live_test_request("test");
+        let model = request.model.clone();
+        let response = live_stream_response(
+            client,
+            "orphan-resend-message".into(),
+            &model,
+            live_test_context("orphan-resend"),
+            request,
+            ContinuationReservation::for_owner_turn(None, None),
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+            config::CodexTransport::WebSocket,
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = tokio::time::timeout(Duration::from_secs(12), response.into_body().collect())
+            .await
+            .unwrap()
+            .unwrap()
+            .to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(text.matches("Resent answer").count(), 1, "{text}");
+        assert!(!text.contains("event: error"), "{text}");
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("upstream saw fewer than two requests")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn orphan_tool_output_failing_twice_returns_the_400_after_one_resend() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        // The harness serves exactly two upstream requests and then drops the
+        // listener, so a third attempt would fail the connection, not the 400.
+        let response =
+            run_live_failure_case("orphan-fails-twice", orphan_tool_output_event(), 2).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()["x-should-retry"], "false");
     }
 
     #[tokio::test]

@@ -54,6 +54,66 @@ fn byte_length(s: &str) -> u64 {
     s.len() as u64
 }
 
+/// The Responses `type` of an input item.
+fn item_kind(item: &ResponsesInputItem) -> &'static str {
+    match item {
+        ResponsesInputItem::AdditionalTools { .. } => "additional_tools",
+        ResponsesInputItem::Message { .. } => "message",
+        ResponsesInputItem::FunctionCall { .. } => "function_call",
+        ResponsesInputItem::FunctionCallOutput { .. } => "function_call_output",
+        ResponsesInputItem::Reasoning { .. } => "reasoning",
+        ResponsesInputItem::Compaction { .. } => "compaction",
+        ResponsesInputItem::CompactionTrigger => "compaction_trigger",
+    }
+}
+
+/// Where one tool call and its output sit in a request's input: counts,
+/// positions and item types only, so it is safe to log.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ToolCallPairing {
+    pub input_items: usize,
+    pub function_calls: usize,
+    pub function_call_outputs: usize,
+    pub call_index: Option<usize>,
+    pub output_index: Option<usize>,
+    /// The types of the last items, oldest first.
+    pub tail: Vec<&'static str>,
+}
+
+const PAIRING_TAIL_ITEMS: usize = 6;
+
+pub fn tool_call_pairing(input: &[ResponsesInputItem], call_id: &str) -> ToolCallPairing {
+    let mut pairing = ToolCallPairing {
+        input_items: input.len(),
+        function_calls: 0,
+        function_call_outputs: 0,
+        call_index: None,
+        output_index: None,
+        tail: input[input.len().saturating_sub(PAIRING_TAIL_ITEMS)..]
+            .iter()
+            .map(item_kind)
+            .collect(),
+    };
+    for (index, item) in input.iter().enumerate() {
+        match item {
+            ResponsesInputItem::FunctionCall { call_id: id, .. } => {
+                pairing.function_calls += 1;
+                if id == call_id {
+                    pairing.call_index.get_or_insert(index);
+                }
+            }
+            ResponsesInputItem::FunctionCallOutput { call_id: id, .. } => {
+                pairing.function_call_outputs += 1;
+                if id == call_id {
+                    pairing.output_index.get_or_insert(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    pairing
+}
+
 fn json_bytes(value: Option<&Value>) -> u64 {
     match value {
         Some(v) => byte_length(&serde_json::to_string(v).unwrap_or_default()),
@@ -95,15 +155,7 @@ pub fn summarize_codex_request_size(body: &ResponsesRequest) -> CodexRequestSize
     let body_json = serde_json::to_string(body).unwrap_or_default();
     let image_parts = input_image_parts(&body.input);
 
-    let input_type_counts = count_items_by(&body.input, |item| match item {
-        ResponsesInputItem::AdditionalTools { .. } => Some("additional_tools".to_string()),
-        ResponsesInputItem::Message { .. } => Some("message".to_string()),
-        ResponsesInputItem::FunctionCall { .. } => Some("function_call".to_string()),
-        ResponsesInputItem::FunctionCallOutput { .. } => Some("function_call_output".to_string()),
-        ResponsesInputItem::Reasoning { .. } => Some("reasoning".to_string()),
-        ResponsesInputItem::Compaction { .. } => Some("compaction".to_string()),
-        ResponsesInputItem::CompactionTrigger => Some("compaction_trigger".to_string()),
-    });
+    let input_type_counts = count_items_by(&body.input, |item| Some(item_kind(item).to_string()));
 
     let role_counts = count_items_by(&body.input, |item| match item {
         ResponsesInputItem::AdditionalTools { role, .. } => Some(role.clone()),
@@ -117,28 +169,16 @@ pub fn summarize_codex_request_size(body: &ResponsesRequest) -> CodexRequestSize
             .iter()
             .enumerate()
             .map(|(i, item)| {
-                let (r#type, role) = match item {
-                    ResponsesInputItem::AdditionalTools { role, .. } => {
-                        ("additional_tools".to_string(), Some(role.clone()))
-                    }
-                    ResponsesInputItem::Message { role, .. } => {
-                        ("message".to_string(), Some(role.clone()))
-                    }
-                    ResponsesInputItem::FunctionCall { .. } => ("function_call".to_string(), None),
-                    ResponsesInputItem::FunctionCallOutput { .. } => {
-                        ("function_call_output".to_string(), None)
-                    }
-                    ResponsesInputItem::Reasoning { .. } => ("reasoning".to_string(), None),
-                    ResponsesInputItem::Compaction { .. } => ("compaction".to_string(), None),
-                    ResponsesInputItem::CompactionTrigger => {
-                        ("compaction_trigger".to_string(), None)
-                    }
+                let role = match item {
+                    ResponsesInputItem::AdditionalTools { role, .. }
+                    | ResponsesInputItem::Message { role, .. } => Some(role.clone()),
+                    _ => None,
                 };
                 let json_bytes_val =
                     json_bytes(Some(&serde_json::to_value(item).unwrap_or_default()));
                 InputItemSummary {
                     index: i,
-                    r#type,
+                    r#type: item_kind(item).to_string(),
                     role,
                     json_bytes: json_bytes_val,
                 }
@@ -253,6 +293,55 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn call(id: &str) -> ResponsesInputItem {
+        ResponsesInputItem::FunctionCall {
+            call_id: id.to_string(),
+            name: "Bash".to_string(),
+            arguments: "{}".to_string(),
+        }
+    }
+
+    fn output(id: &str) -> ResponsesInputItem {
+        ResponsesInputItem::FunctionCallOutput {
+            call_id: id.to_string(),
+            output: ResponsesFunctionCallOutput::Text("ok".to_string()),
+        }
+    }
+
+    #[test]
+    fn pairing_reports_positions_counts_and_tail_without_text() {
+        let input = vec![call("a"), output("a"), call("b"), call("c"), output("b")];
+        let pairing = tool_call_pairing(&input, "b");
+        assert_eq!(
+            pairing,
+            ToolCallPairing {
+                input_items: 5,
+                function_calls: 3,
+                function_call_outputs: 2,
+                call_index: Some(2),
+                output_index: Some(4),
+                tail: vec![
+                    "function_call",
+                    "function_call_output",
+                    "function_call",
+                    "function_call",
+                    "function_call_output",
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn pairing_shows_an_orphan_and_keeps_only_the_last_items() {
+        let mut input: Vec<_> = (0..10).map(|i| call(&format!("old{i}"))).collect();
+        input.push(output("lost"));
+        let pairing = tool_call_pairing(&input, "lost");
+        assert_eq!(pairing.call_index, None);
+        assert_eq!(pairing.output_index, Some(10));
+        assert_eq!(pairing.tail.len(), PAIRING_TAIL_ITEMS);
+        assert_eq!(pairing.tail.last(), Some(&"function_call_output"));
+    }
 
     #[test]
     fn summarize_simple_request() {

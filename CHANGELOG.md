@@ -3,6 +3,18 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.1.54 (2026-10-11)
+
+- Codex sometimes answers a tool result with `400 No tool call found for
+  function call output`, even though the request holds the matching tool
+  call. cc-proxy now sends that request again once. If Codex refuses it a
+  second time, you get the same 400 as before. This is a workaround: the
+  cause is still unknown, and it looks like it is on the Codex side.
+- Each time it happens, `proxy.log` gets a `codex_orphan_tool_output` line
+  with the call id and how the request was laid out (item counts, where the
+  call and its output sit, the kind of the last items). It holds no message
+  text and no tool output. Attach it to a report if the 400 keeps showing up.
+
 ## v0.1.53 (2026-10-11)
 
 - Claude Code's newer models, such as `claude-sonnet-5-5`, no longer fail
