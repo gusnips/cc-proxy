@@ -1848,9 +1848,31 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
 }
 
 fn render_setup_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, setup_text: &str) {
+    let mut lines = setup_text
+        .lines()
+        .map(|line| {
+            let style = if line.starts_with("cc-proxy ") {
+                Style::default().fg(WHITE)
+            } else {
+                Style::default().fg(DIM_WHITE)
+            };
+            Line::from(vec![Span::raw("  "), Span::styled(line.to_string(), style)])
+        })
+        .collect::<Vec<_>>();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Esc", Style::default().fg(TEAL)),
+        Span::styled(" close  ", Style::default().fg(DIM)),
+        Span::styled("b", Style::default().fg(TEAL)),
+        Span::styled(" toggle setup", Style::default().fg(DIM)),
+    ]));
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().bg(BG))
+        .wrap(Wrap { trim: false });
     let width = 84.min(area.width.saturating_sub(4)).max(36);
-    let content_height = setup_text.lines().count() as u16;
-    let height = (content_height + 4)
+    let height = u16::try_from(paragraph.line_count(width.saturating_sub(2)) + 2)
+        .unwrap_or(u16::MAX)
         .min(area.height.saturating_sub(2))
         .max(8);
     let popup = Rect {
@@ -1868,32 +1890,7 @@ fn render_setup_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, setup_text: 
         .style(Style::default().bg(BG));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-
-    let mut lines = setup_text
-        .lines()
-        .map(|line| {
-            let style = if line.starts_with("export ") || line.starts_with("cc-proxy ") {
-                Style::default().fg(WHITE)
-            } else {
-                Style::default().fg(DIM_WHITE)
-            };
-            Line::from(vec![Span::raw("  "), Span::styled(line.to_string(), style)])
-        })
-        .collect::<Vec<_>>();
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("Esc", Style::default().fg(TEAL)),
-        Span::styled(" close  ", Style::default().fg(DIM)),
-        Span::styled("b", Style::default().fg(TEAL)),
-        Span::styled(" toggle setup", Style::default().fg(DIM)),
-    ]));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(BG))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
+    frame.render_widget(paragraph, inner);
 }
 
 fn mock_setup_text(port: u16, registry: &Registry) -> String {
@@ -1914,7 +1911,11 @@ pub fn setup_text(port: u16, registry: &Registry) -> String {
         })
         .collect::<Vec<_>>()
         .join("  ");
-    let mut lines = vec![
+    [
+        "Use the proxy for new Claude Code sessions:".to_string(),
+        "cc-proxy on".to_string(),
+        "Or start one session: cc-proxy claude".to_string(),
+        String::new(),
         format!(
             "Proxy: {}",
             daemon::client_url(&config::bind_address(), port)
@@ -1922,12 +1923,8 @@ pub fn setup_text(port: u16, registry: &Registry) -> String {
         format!("Logs: {}", paths::log_file().display()),
         format!("Config: {}", paths::config_dir().display()),
         format!("Providers: {model_summary}"),
-    ];
-    lines.push(String::new());
-    lines.push("Use the proxy for new Claude Code sessions:".to_string());
-    lines.push("cc-proxy on".to_string());
-    lines.push("Or start one session: cc-proxy claude".to_string());
-    lines.join("\n")
+    ]
+    .join("\n")
 }
 
 fn format_system_time(time: SystemTime) -> String {
@@ -2773,6 +2770,23 @@ mod tests {
         assert!(events_text.contains("502"));
         assert!(events_text.contains("upstream unavailable"));
         assert!(!events_text.contains("No errors"));
+    }
+
+    #[test]
+    fn setup_overlay_counts_wrapped_paths_before_placing_the_commands() {
+        for path in ["folder/".repeat(20), "配置/".repeat(30)] {
+            let setup = format!(
+                "Logs: /{path}proxy.log\nConfig: /{path}config.json\n\nUse the proxy:\ncc-proxy on"
+            );
+            for (width, height) in [(120, 40), (80, 24)] {
+                let screen = draw(width, height, |frame| {
+                    render_setup_overlay(frame, frame.area(), &setup)
+                });
+                let text = buffer_text(&screen);
+                assert!(text.contains("cc-proxy on"), "{text}");
+                assert!(text.contains("toggle setup"), "{text}");
+            }
+        }
     }
 
     #[test]
