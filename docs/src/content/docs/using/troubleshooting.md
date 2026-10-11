@@ -60,9 +60,9 @@ Set `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` for Claude Code. Retrying a pa
 
 For a non-TUN local HTTP proxy, set both destination-scheme variables before starting the proxy:
 
-| Variable | Value |
-| --- | --- |
-| `HTTP_PROXY` | `http://127.0.0.1:7890` |
+| Variable      | Value                   |
+| ------------- | ----------------------- |
+| `HTTP_PROXY`  | `http://127.0.0.1:7890` |
 | `HTTPS_PROXY` | `http://127.0.0.1:7890` |
 
 Set them through the operating system, service manager, or shell, then start `cc-proxy start` in the same environment.
@@ -77,7 +77,7 @@ Use HTTP SSE to isolate transport behavior:
 CCP_CODEX_TRANSPORT=http cc-proxy start
 ```
 
-`auto` falls back only when WebSocket setup fails before sending the request. It does not replay an in-flight request.
+The default `auto` transport falls back to HTTP when WebSocket setup fails before sending the request, including a rejected upgrade. It does not replay an in-flight request. A WebSocket 403 alone doesn't prove your login expired; check `cc-proxy codex auth status` before signing in again. If you chose `websocket` explicitly, set `codex.transport` to `auto` to allow fallback.
 
 ## Cursor bundle cannot be found
 

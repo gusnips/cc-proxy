@@ -343,6 +343,157 @@ fn shell_install_adds_one_line_and_uninstall_restores_the_file()
 
 #[cfg(unix)]
 #[test]
+fn on_installs_and_refreshes_the_hook_without_editing_claude_settings()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let guard = DaemonGuard::new(&temp, free_port());
+    let shell_env = [("SHELL", std::ffi::OsStr::new("/bin/zsh"))];
+    let zshrc = temp.path().join(".zshrc");
+    let original = "alias claude='claude --dangerously-skip-permissions'\n";
+    std::fs::write(&zshrc, original)?;
+    let settings_dir = temp.path().join(".claude");
+    std::fs::create_dir_all(&settings_dir)?;
+    let saved = "{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://example.invalid\"}}\n";
+    std::fs::write(settings_dir.join("settings.json"), saved)?;
+    let function = temp.path().join("config/shell/claude.sh");
+
+    for _ in 0..2 {
+        // Simulate an earlier installed hook; on must refresh it too.
+        if function.exists() {
+            std::fs::write(&function, "claude() { command claude \"$@\"; }\n")?;
+        }
+        let output = run_isolated(&guard, &shell_env, &["on"])?;
+        assert!(output.status.success(), "{output:?}");
+        assert!(function.exists());
+        assert!(std::fs::read_to_string(&function)?.contains("function claude {"));
+    }
+    let installed = std::fs::read_to_string(&zshrc)?;
+    assert!(installed.starts_with(original));
+    assert_eq!(installed.matches("# cc-proxy shell hook").count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(settings_dir.join("settings.json"))?,
+        saved
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn the_hook_preserves_alias_flags_when_on_off_or_missing() -> Result<(), Box<dyn std::error::Error>>
+{
+    for shell_name in ["zsh", "bash"] {
+        // zsh isn't installed on every Linux machine; bash is our other supported shell.
+        let Some(shell_path) = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join(shell_name))
+            .find(|path| path.is_file())
+        else {
+            continue;
+        };
+        let temp = TempDir::new()?;
+        let port = free_port();
+        let guard = DaemonGuard::new(&temp, port);
+        let shell_env = [("SHELL", std::ffi::OsStr::new("/bin/zsh"))];
+        let installed = run_isolated(&guard, &shell_env, &["shell", "install"])?;
+        assert!(installed.status.success(), "{installed:?}");
+        let bin = fake_claude(&temp)?;
+        let cc_proxy_dir = assert_cmd::cargo::cargo_bin("cc-proxy")
+            .parent()
+            .ok_or("cc-proxy has no parent dir")?
+            .to_path_buf();
+        let path = std::env::join_paths([bin.clone(), cc_proxy_dir])?;
+        let out = temp.path().join("args.txt");
+        let alias_out = temp.path().join("alias.txt");
+        let script = temp.path().join("launch.sh");
+        std::fs::write(
+            &script,
+            r#"set -e
+if [ -n "$BASH_VERSION" ]; then shopt -s expand_aliases; fi
+if [ "$WITH_ALIAS" = 1 ]; then
+  alias claude='claude --dangerously-skip-permissions --append-system-prompt "keep it short"'
+fi
+. "$1"
+. "$1"
+claude --resume abc -p 'hi there'
+alias claude > "$ALIAS_OUT" || :
+"#,
+        )?;
+        for state in ["on", "off", "missing", "unaliased"] {
+            if state != "missing" {
+                let toggled = run_isolated(
+                    &guard,
+                    &shell_env,
+                    &[if state == "unaliased" { "on" } else { state }],
+                )?;
+                assert!(toggled.status.success(), "{toggled:?}");
+            }
+            let mut shell = std::process::Command::new(&shell_path);
+            shell.args(if shell_name == "zsh" {
+                &["-f"][..]
+            } else {
+                &["--noprofile", "--norc"][..]
+            });
+            shell
+                .arg(&script)
+                .arg(temp.path().join("config/shell/claude.sh"))
+                .env(
+                    "PATH",
+                    if state == "missing" {
+                        bin.as_os_str()
+                    } else {
+                        path.as_os_str()
+                    },
+                )
+                .env("CLAUDE_ARGS_OUT", &out)
+                .env("WITH_ALIAS", if state == "unaliased" { "0" } else { "1" })
+                .env("ALIAS_OUT", &alias_out);
+            for (key, value) in &guard.env {
+                shell.env(key, value);
+            }
+            let launched = shell.output()?;
+            assert!(
+                launched.status.success(),
+                "{shell_name} {state}: {launched:?}"
+            );
+            let recorded = std::fs::read_to_string(&out)?;
+            let args: Vec<_> = recorded.lines().collect();
+            let passed = if matches!(state, "on" | "unaliased") {
+                assert_eq!(args[0], "--settings");
+                let settings: serde_json::Value = serde_json::from_str(args[1])?;
+                assert_eq!(
+                    settings["env"]["ANTHROPIC_BASE_URL"],
+                    format!("http://127.0.0.1:{port}")
+                );
+                &args[2..]
+            } else {
+                &args[..]
+            };
+            let expected = [
+                "--dangerously-skip-permissions",
+                "--append-system-prompt",
+                "keep it short",
+                "--resume",
+                "abc",
+                "-p",
+                "hi there",
+            ];
+            let expected = if state == "unaliased" {
+                &expected[3..]
+            } else {
+                &expected[..]
+            };
+            assert_eq!(passed, expected, "{shell_name} {state}");
+            assert_eq!(
+                std::fs::read_to_string(&alias_out)?
+                    .contains("claude --dangerously-skip-permissions"),
+                state != "unaliased"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn the_hook_runs_plain_claude_when_cc_proxy_is_off() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
     let guard = DaemonGuard::new(&temp, free_port());
@@ -363,8 +514,9 @@ fn the_hook_runs_plain_claude_when_cc_proxy_is_off() -> Result<(), Box<dyn std::
             .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )?;
     let out = temp.path().join("args.txt");
-    let mut shell = std::process::Command::new("sh");
+    let mut shell = std::process::Command::new("bash");
     shell
+        .args(["--noprofile", "--norc"])
         .arg("-c")
         .arg(". \"$1\" && claude --resume abc -p 'hi there'")
         .arg("sh")

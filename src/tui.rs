@@ -33,7 +33,7 @@ use ratatui::{
 use tokio::sync::oneshot;
 
 use crate::{
-    claude, config, daemon,
+    config, daemon,
     monitor::{
         MockMonitor, MonitorHandle, SESSION_TOKEN_BUCKET_SECS, Throughput,
         snapshot::{
@@ -253,14 +253,8 @@ fn run_monitor_events(
                         }
                     }
                     KeyCode::Esc => {
-                        if app.show_help {
-                            app.show_help = false;
-                        } else if app.show_providers {
-                            app.show_providers = false;
-                        } else if app.show_setup {
-                            app.show_setup = false;
-                        } else {
-                            app.detail = None;
+                        if let Some(exit) = app.handle_escape() {
+                            return Ok(exit);
                         }
                     }
                     _ => {}
@@ -321,6 +315,22 @@ impl MonitorApp {
     fn is_attached(&self) -> bool {
         self.shutdown.is_none() && self.shutdown_complete.is_none()
     }
+    fn handle_escape(&mut self) -> Option<MonitorExit> {
+        if self.show_help {
+            self.show_help = false;
+        } else if self.show_providers {
+            self.show_providers = false;
+        } else if self.show_setup {
+            self.show_setup = false;
+        } else if self.detail.take().is_none() {
+            if self.is_attached() {
+                return Some(MonitorExit::Detached);
+            }
+            self.request_shutdown_confirmation();
+        }
+        None
+    }
+
     fn handle_ctrl_c(&mut self) -> bool {
         if self.phase == MonitorPhase::ShuttingDown {
             true
@@ -1664,7 +1674,15 @@ fn detail_line<'a>(label: &'static str, value: impl Into<String>, value_color: C
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
     let keys = [
-        ("q", if app.is_attached() { "detach" } else { "quit" }),
+        ("Esc", "back / close"),
+        (
+            "q",
+            if app.is_attached() {
+                "close"
+            } else {
+                "stop proxy"
+            },
+        ),
         ("?", "help"),
         ("b", "setup"),
         ("p", "providers"),
@@ -1782,11 +1800,19 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
     frame.render_widget(block, popup);
     let lines = [
         (
-            "q / Ctrl-C",
+            "q",
             if attached {
-                "detach dashboard"
+                "close monitor"
             } else {
-                "quit proxy"
+                "confirm proxy shutdown"
+            },
+        ),
+        (
+            "Ctrl-C",
+            if attached {
+                "close monitor"
+            } else {
+                "stop proxy; again to force"
             },
         ),
         ("?", "toggle help"),
@@ -1796,7 +1822,14 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ("j / k", "previous / next row"),
         ("Tab", "switch pane"),
         ("Enter", "open detail"),
-        ("Esc", "close overlay / detail"),
+        (
+            "Esc",
+            if attached {
+                "back, then close monitor"
+            } else {
+                "back, then confirm shutdown"
+            },
+        ),
     ];
     let content = lines
         .into_iter()
@@ -1815,9 +1848,31 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
 }
 
 fn render_setup_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, setup_text: &str) {
+    let mut lines = setup_text
+        .lines()
+        .map(|line| {
+            let style = if line.starts_with("cc-proxy ") {
+                Style::default().fg(WHITE)
+            } else {
+                Style::default().fg(DIM_WHITE)
+            };
+            Line::from(vec![Span::raw("  "), Span::styled(line.to_string(), style)])
+        })
+        .collect::<Vec<_>>();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Esc", Style::default().fg(TEAL)),
+        Span::styled(" close  ", Style::default().fg(DIM)),
+        Span::styled("b", Style::default().fg(TEAL)),
+        Span::styled(" toggle setup", Style::default().fg(DIM)),
+    ]));
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().bg(BG))
+        .wrap(Wrap { trim: false });
     let width = 84.min(area.width.saturating_sub(4)).max(36);
-    let content_height = setup_text.lines().count() as u16;
-    let height = (content_height + 4)
+    let height = u16::try_from(paragraph.line_count(width.saturating_sub(2)) + 2)
+        .unwrap_or(u16::MAX)
         .min(area.height.saturating_sub(2))
         .max(8);
     let popup = Rect {
@@ -1835,32 +1890,7 @@ fn render_setup_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, setup_text: 
         .style(Style::default().bg(BG));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-
-    let mut lines = setup_text
-        .lines()
-        .map(|line| {
-            let style = if line.starts_with("export ") || line.starts_with("cc-proxy ") {
-                Style::default().fg(WHITE)
-            } else {
-                Style::default().fg(DIM_WHITE)
-            };
-            Line::from(vec![Span::raw("  "), Span::styled(line.to_string(), style)])
-        })
-        .collect::<Vec<_>>();
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("Esc", Style::default().fg(TEAL)),
-        Span::styled(" close  ", Style::default().fg(DIM)),
-        Span::styled("b", Style::default().fg(TEAL)),
-        Span::styled(" toggle setup", Style::default().fg(DIM)),
-    ]));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(BG))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
+    frame.render_widget(paragraph, inner);
 }
 
 fn mock_setup_text(port: u16, registry: &Registry) -> String {
@@ -1881,20 +1911,20 @@ pub fn setup_text(port: u16, registry: &Registry) -> String {
         })
         .collect::<Vec<_>>()
         .join("  ");
-    let mut lines = vec![
+    [
+        "Use the proxy for new Claude Code sessions:".to_string(),
+        "cc-proxy on".to_string(),
+        "Or start one session: cc-proxy claude".to_string(),
+        String::new(),
+        format!(
+            "Proxy: {}",
+            daemon::client_url(&config::bind_address(), port)
+        ),
         format!("Logs: {}", paths::log_file().display()),
         format!("Config: {}", paths::config_dir().display()),
         format!("Providers: {model_summary}"),
-    ];
-    lines.push(String::new());
-    lines.push("Start Claude Code on the proxy:".to_string());
-    lines.push("cc-proxy claude".to_string());
-    lines.push("Or set these yourself before you run claude:".to_string());
-    let base_url = daemon::client_url(&config::bind_address(), port);
-    for (name, value) in claude::env(&base_url) {
-        lines.push(format!("export {name}=\"{value}\""));
-    }
-    lines.join("\n")
+    ]
+    .join("\n")
 }
 
 fn format_system_time(time: SystemTime) -> String {
@@ -2743,6 +2773,56 @@ mod tests {
     }
 
     #[test]
+    fn setup_overlay_counts_wrapped_paths_before_placing_the_commands() {
+        for path in ["folder/".repeat(20), "配置/".repeat(30)] {
+            let setup = format!(
+                "Logs: /{path}proxy.log\nConfig: /{path}config.json\n\nUse the proxy:\ncc-proxy on"
+            );
+            for (width, height) in [(120, 40), (80, 24)] {
+                let screen = draw(width, height, |frame| {
+                    render_setup_overlay(frame, frame.area(), &setup)
+                });
+                let text = buffer_text(&screen);
+                assert!(text.contains("cc-proxy on"), "{text}");
+                assert!(text.contains("toggle setup"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn escape_closes_layers_before_detaching_from_the_main_screen() {
+        let mut app = MonitorApp {
+            listen_url: String::new(),
+            setup_text: String::new(),
+            show_setup: true,
+            show_help: true,
+            show_providers: true,
+            providers: ProvidersPanel::default(),
+            detail: Some(DetailView::Request),
+            focus: FocusPane::Sessions,
+            selected: 0,
+            recent_selected: 0,
+            tick: 0,
+            phase: MonitorPhase::Running,
+            shutdown: None,
+            shutdown_complete: None,
+        };
+        assert_eq!(app.handle_escape(), None);
+        assert!(!app.show_help);
+        assert!(app.show_providers && app.show_setup && app.detail.is_some());
+        assert_eq!(app.handle_escape(), None);
+        assert!(!app.show_providers);
+        assert!(app.show_setup && app.detail.is_some());
+        assert_eq!(app.handle_escape(), None);
+        assert!(!app.show_setup);
+        assert!(app.detail.is_some());
+        assert_eq!(app.handle_escape(), None);
+        assert!(app.detail.is_none());
+        assert_eq!(app.handle_escape(), Some(MonitorExit::Detached));
+        assert_eq!(app.phase, MonitorPhase::Running);
+    }
+
+    #[test]
     fn shutdown_confirmation_can_be_cancelled_before_signalling_server() {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let mut app = MonitorApp {
@@ -2762,7 +2842,7 @@ mod tests {
             shutdown_complete: Some(mpsc::channel().1),
         };
 
-        app.request_shutdown_confirmation();
+        assert_eq!(app.handle_escape(), None);
         assert_eq!(app.phase, MonitorPhase::ConfirmingShutdown);
         assert!(matches!(
             shutdown_rx.try_recv(),

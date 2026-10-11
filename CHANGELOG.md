@@ -3,10 +3,37 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.1.55 (2026-10-11)
+
+- `cc-proxy on` now installs or refreshes the shell hook itself. Existing
+  zsh and bash aliases keep their flags, including
+  `--dangerously-skip-permissions`, without breaking the hook. Run
+  `exec zsh` (or your shell's name) once in an existing terminal after
+  setup. New terminals load it themselves. No Claude settings file changes.
+- Your own `--settings` JSON or file no longer replaces the proxy
+  connection. cc-proxy combines them into one flag, keeping your other
+  settings and arguments. `off` uses your saved connection again; it
+  doesn't remove proxy values you previously saved by hand.
+- Codex tool results without a preceding, unanswered tool call are kept as
+  labeled conversation context, including their text, supported images and
+  error markers. They no longer become invalid function outputs that cause
+  `400 No tool call found for function call output`.
+- The v0.1.54 note blamed Codex for those 400s. The new logs show the proxy
+  sent results without their calls. The ineffective identical-request retry
+  is removed; the content-free pairing diagnostics stay.
+- Codex now defaults to `auto`: WebSocket first, with HTTP fallback if
+  connection setup fails before a request is sent. A rejected upgrade,
+  including a 403, no longer ends the request when HTTP works. Explicit
+  `websocket` and `http` choices still apply.
+- `Esc` closes the monitor's top panel or detail view. On the main screen,
+  it closes an attached monitor without stopping the proxy. In
+  `start --monitor`, it asks before stopping the server instead. The setup
+  panel now measures wrapped file paths so they don't hide the commands.
+
 ## v0.1.54 (2026-10-11)
 
 - Codex sometimes answers a tool result with `400 No tool call found for
-  function call output`, even though the request holds the matching tool
+function call output`, even though the request holds the matching tool
   call. cc-proxy now sends that request again once. If Codex refuses it a
   second time, you get the same 400 as before. This is a workaround: the
   cause is still unknown, and it looks like it is on the Codex side.
@@ -60,7 +87,7 @@ description: Release notes for cc-proxy.
   `cursor:<model>` takes any model Cursor offers.
 - New provider: GitHub Copilot. Run `cc-proxy copilot auth login`, approve the
   code on GitHub, then start Claude Code with `cc-proxy claude --model
-  copilot/gpt-5.5`. `cc-proxy models` lists the models your account can use,
+copilot/gpt-5.5`. `cc-proxy models` lists the models your account can use,
   and every one starts with `copilot/`. cc-proxy marks a turn the agent
   continues after a tool result as `agent`, so Copilot bills a premium
   request only when you start a turn.
@@ -509,7 +536,7 @@ description: Release notes for cc-proxy.
 - Codex errors preserve upstream status codes and optional retry timing, with
   clearer permission failures and safer WebSocket handshake diagnostics.
 - Codex streaming limits oversized events and error responses, preventing
-  malformed or stalled upstream responses from   consuming unbounded memory.
+  malformed or stalled upstream responses from consuming unbounded memory.
 
 ## v0.1.22 (2026-07-20)
 

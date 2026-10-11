@@ -45,7 +45,10 @@ cc-proxy claude [claude arguments...]
 
 Starts Claude Code on the proxy. If nothing answers on the configured port,
 it starts the background service first. Then it runs
-`claude --settings '<json>'` followed by every argument you gave, unchanged.
+`claude --settings '<json>'` followed by your arguments.
+If you supply `--settings` as inline JSON or a file, cc-proxy merges the proxy
+connection into it rather than passing a second flag that would replace it.
+Your other values and flags stay intact.
 `cc-proxy claude --help` shows Claude Code's own help.
 
 The JSON holds the variables in
@@ -67,27 +70,33 @@ cc-proxy on
 cc-proxy off
 ```
 
-`shell install` makes plain `claude` run through `cc-proxy claude` while
-cc-proxy is on. It picks the shell from `$SHELL`:
+`on` installs or refreshes the hook and makes plain `claude` use the proxy.
+You don't need to run `shell install` first; it does the same setup.
+The hook picks the shell from `$SHELL`:
 
-| Shell | What it writes |
-| --- | --- |
-| zsh | One line in `$ZDOTDIR/.zshrc`, or `~/.zshrc` |
-| bash on Linux | One line in `~/.bashrc` |
+| Shell         | What it writes                                                                                                                                                              |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| zsh           | One line in `$ZDOTDIR/.zshrc`, or `~/.zshrc`                                                                                                                                |
+| bash on Linux | One line in `~/.bashrc`                                                                                                                                                     |
 | bash on macOS | One line in `~/.bash_profile`. With no `.bash_profile`, it goes in the `~/.bash_login` or `~/.profile` you have, because bash reads only the first of the three that exists |
-| fish | `$XDG_CONFIG_HOME/fish/functions/claude.fish`, or `~/.config/fish/functions/claude.fish` |
+| fish          | `$XDG_CONFIG_HOME/fish/functions/claude.fish`, or `~/.config/fish/functions/claude.fish`                                                                                    |
 
 For zsh and bash, the line loads a `claude` function from `shell/claude.sh`
-in the config directory. Running `shell install` again changes nothing. Any
-other shell exits with code 1 and says to run `cc-proxy claude` instead.
-`shell install` also turns cc-proxy on.
+in the config directory. Reinstalling refreshes that function without adding
+a second startup line. Existing zsh and bash aliases keep their flags.
+Any other shell exits with code 1 and says to run `cc-proxy claude` instead.
+
+After the first install, run `exec zsh` (or your shell's name) once in an
+existing terminal. New terminals load the hook themselves.
 
 `shell uninstall` removes the line from every one of those files, deletes
 the function files it wrote, and turns cc-proxy off, so terminals that are
 still open go back to plain Claude Code.
 
 `on` and `off` set `claude.enabled` in `config.json`. The `claude` function
-asks cc-proxy on every call, so the change applies in every terminal at once.
+asks cc-proxy on every call, so the change applies in every terminal that
+has loaded the hook. `off` stops injecting connection settings; any proxy
+values you saved by hand still apply. Claude settings files are never changed.
 `cc-proxy claude`, typed out in full, always uses the proxy.
 
 ## `start`
@@ -102,11 +111,11 @@ running pid instead of starting another copy. The service is tracked in a
 pidfile under the state directory; `status`, `stop`, `restart`, and `reload`
 all resolve through it.
 
-| Option | Behavior |
-| --- | --- |
-| `--port <PORT>` | Overrides `PORT`, `config.json`, and the default for this invocation. |
-| `--no-monitor` | Runs in the foreground with plain output instead of starting a service. |
-| `--monitor` | Runs in the foreground with the monitor dashboard attached. |
+| Option          | Behavior                                                                |
+| --------------- | ----------------------------------------------------------------------- |
+| `--port <PORT>` | Overrides `PORT`, `config.json`, and the default for this invocation.   |
+| `--no-monitor`  | Runs in the foreground with plain output instead of starting a service. |
+| `--monitor`     | Runs in the foreground with the monitor dashboard attached.             |
 
 The bind address comes from `CCP_BIND_ADDRESS` or `bindAddress`.
 
@@ -169,15 +178,15 @@ The command shape is:
 cc-proxy <provider> auth <action>
 ```
 
-| Provider | `login` | `device` | `status` | `logout` |
-| --- | --- | --- | --- | --- |
-| `codex` | Browser PKCE | Device code | Account, expiry, storage | Delete proxy credential |
-| `kimi` | Device code | Unsupported | User, expiry, scope, storage | Delete proxy credential |
-| `grok` | Browser PKCE | Device code | Expiry and storage | Delete proxy credential |
-| `copilot` | Device code | Same as `login` | Account, host, token expiry, storage | Delete proxy credential and model list |
-| `cursor` | Browser polling flow | Unsupported | Source, claims, expiry | Delete proxy credential |
-| `glm` | API key entry | Unsupported | Env and stored key presence | Delete proxy credential |
-| `opencode` | API key entry (hidden) | Unsupported | Key source and base URL | Delete stored key |
+| Provider   | `login`                | `device`        | `status`                             | `logout`                               |
+| ---------- | ---------------------- | --------------- | ------------------------------------ | -------------------------------------- |
+| `codex`    | Browser PKCE           | Device code     | Account, expiry, storage             | Delete proxy credential                |
+| `kimi`     | Device code            | Unsupported     | User, expiry, scope, storage         | Delete proxy credential                |
+| `grok`     | Browser PKCE           | Device code     | Expiry and storage                   | Delete proxy credential                |
+| `copilot`  | Device code            | Same as `login` | Account, host, token expiry, storage | Delete proxy credential and model list |
+| `cursor`   | Browser polling flow   | Unsupported     | Source, claims, expiry               | Delete proxy credential                |
+| `glm`      | API key entry          | Unsupported     | Env and stored key presence          | Delete proxy credential                |
+| `opencode` | API key entry (hidden) | Unsupported     | Key source and base URL              | Delete stored key                      |
 
 Examples:
 
@@ -210,11 +219,11 @@ Codex (plus)
 In a terminal, each window also gets a bar that turns yellow at 70% used and
 red at 90%.
 
-| Provider | Asks | Shows |
-| --- | --- | --- |
-| `codex` | `GET https://chatgpt.com/backend-api/wham/usage` | 5-hour and weekly windows, plan |
-| `kimi` | `GET https://api.kimi.ai/coding/v1/usages` | 5-hour and weekly quotas, plan |
-| `opencode` | `GET https://opencode.ai/zen/go/v1/usage` | Rolling 5-hour, weekly and monthly windows |
+| Provider   | Asks                                             | Shows                                      |
+| ---------- | ------------------------------------------------ | ------------------------------------------ |
+| `codex`    | `GET https://chatgpt.com/backend-api/wham/usage` | 5-hour and weekly windows, plan            |
+| `kimi`     | `GET https://api.kimi.ai/coding/v1/usages`       | 5-hour and weekly quotas, plan             |
+| `opencode` | `GET https://opencode.ai/zen/go/v1/usage`        | Rolling 5-hour, weekly and monthly windows |
 
 Each address follows the provider's base URL (`codex.baseUrl`, `kimi.baseUrl`,
 `opencode.baseUrl`). No provider documents these endpoints, so a Codex or Kimi

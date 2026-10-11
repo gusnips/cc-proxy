@@ -21,7 +21,7 @@ foreground proxy with plain output, which suits service managers.
 
 Use `cc-proxy monitor --url http://127.0.0.1:19999` for a different port. Without `--url`, the port follows the usual proxy configuration. The attached dashboard reads the running service's existing history; it does not start a proxy or need provider credentials.
 
-In an attached dashboard, `q` and `Ctrl-C` detach immediately and leave the service running. Multiple dashboards can attach independently. If the service becomes unavailable, the dashboard marks its last snapshot as stale and reconnects automatically. Network polling runs outside the terminal event loop.
+In an attached dashboard, `q` and `Ctrl-C` close the monitor immediately and leave the service running. `Esc` closes the top panel or detail view first; on the main screen, it closes the monitor. Multiple dashboards can attach independently. If the service becomes unavailable, the dashboard marks its last snapshot as stale and reconnects automatically. Network polling runs outside the terminal event loop.
 
 ## What the monitor shows
 
@@ -42,17 +42,17 @@ In an attached dashboard, `q` and `Ctrl-C` detach immediately and leave the serv
 
 ## Keyboard controls
 
-| Key | Action |
-| --- | --- |
-| `Tab`, `←`, `→` | Change focused pane |
-| `j`, `k`, `↓`, `↑` | Move selection |
-| `Enter` | Open session or request details |
-| `Esc` | Close details or an overlay |
-| `?` | Toggle shortcut help |
-| `b` | Toggle the setup overlay |
-| `p` | Toggle the Providers overlay: each provider's sign-in and plan usage |
-| `q` | Detach an attached dashboard; in the built-in dashboard, confirm proxy shutdown |
-| `Ctrl-C` | Detach an attached dashboard; in the built-in dashboard, start shutdown (press again to force exit) |
+| Key                | Action                                                                                                                                  |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `Tab`, `←`, `→`    | Change focused pane                                                                                                                     |
+| `j`, `k`, `↓`, `↑` | Move selection                                                                                                                          |
+| `Enter`            | Open session or request details                                                                                                         |
+| `Esc`              | Close the top panel or detail view. On the main screen, close an attached monitor; in `start --monitor`, ask before stopping the proxy. |
+| `?`                | Toggle shortcut help                                                                                                                    |
+| `b`                | Toggle the setup overlay                                                                                                                |
+| `p`                | Toggle the Providers overlay: each provider's sign-in and plan usage                                                                    |
+| `q`                | Detach an attached dashboard; in the built-in dashboard, confirm proxy shutdown                                                         |
+| `Ctrl-C`           | Detach an attached dashboard; in the built-in dashboard, start shutdown (press again to force exit)                                     |
 
 The request table changes columns as the terminal width changes.
 

@@ -871,6 +871,7 @@ fn map_tool_choice(req: &MessagesRequest) -> Result<Option<ResponsesToolChoice>,
 
 fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
     let mut out: Vec<ResponsesInputItem> = Vec::new();
+    let mut pending_tool_calls = HashSet::new();
     let mut read_tool_uses_with_offset = HashSet::new();
 
     for msg in &req.messages {
@@ -916,10 +917,36 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
                             ) {
                                 rendered.push_text(format!("\n{}", read_offset_guidance()));
                             }
-                            out.push(ResponsesInputItem::FunctionCallOutput {
-                                call_id: tool_use_id.clone(),
-                                output: function_call_output(rendered),
-                            });
+                            if pending_tool_calls.remove(tool_use_id) {
+                                out.push(ResponsesInputItem::FunctionCallOutput {
+                                    call_id: tool_use_id.clone(),
+                                    output: function_call_output(rendered),
+                                });
+                            } else {
+                                // A shortened history can carry a result without its call.
+                                // Keep the context, not an invalid function_call_output.
+                                rendered.prepend_text(format!(
+                                    "[Tool result for {tool_use_id}; the tool call is missing or already has a result]"
+                                ));
+                                out.push(ResponsesInputItem::Message {
+                                    role: "user".to_string(),
+                                    content: rendered
+                                        .parts
+                                        .into_iter()
+                                        .map(|part| match part {
+                                            RenderedToolResultPart::Text(text) => {
+                                                ResponsesContentPart::InputText { text }
+                                            }
+                                            RenderedToolResultPart::Image(image_url) => {
+                                                ResponsesContentPart::InputImage {
+                                                    image_url,
+                                                    detail: None,
+                                                }
+                                            }
+                                        })
+                                        .collect(),
+                                });
+                            }
                         }
                         _ => {}
                     }
@@ -968,6 +995,7 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
                         }
                         ContentBlock::ToolUse { id, name, input } => {
                             flush_text(&mut out, &mut text_parts);
+                            pending_tool_calls.insert(id.clone());
                             if is_read_tool_use_with_offset(name, input) {
                                 read_tool_uses_with_offset.insert(id.clone());
                             }
@@ -2311,19 +2339,118 @@ mod tests {
     }
 
     #[test]
+    fn orphan_tool_results_are_context_on_every_translation_lane() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content": [
+                {"type":"text", "text":"before"},
+                {"type":"tool_result", "tool_use_id":"call_missing", "is_error":true, "content":[
+                    {"type":"text", "text":"result text"},
+                    {"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":PNG_BASE64}}
+                ]},
+                {"type":"text", "text":"after"}
+            ]}]
+        })).unwrap();
+        for out in [
+            translate_request(&req, opts()).unwrap(),
+            translate_request(
+                &req,
+                TranslateOptions {
+                    use_responses_lite: true,
+                    ..opts()
+                },
+            )
+            .unwrap(),
+            translate_openai_compatible_request(&req, "gpt-5.5".into(), None).unwrap(),
+        ] {
+            let input = serde_json::to_value(out.input).unwrap();
+            assert_eq!(input.as_array().unwrap().len(), 3);
+            assert_eq!(input[0]["content"][0]["text"], "before");
+            assert_eq!(input[1]["type"], "message");
+            assert_eq!(input[1]["role"], "user");
+            assert!(
+                input[1]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("call_missing")
+            );
+            assert_eq!(input[1]["content"][1]["text"], "[tool execution error]");
+            assert_eq!(input[1]["content"][2]["text"], "result text");
+            assert_eq!(input[1]["content"][3]["type"], "input_image");
+            assert_eq!(
+                input[1]["content"][3]["image_url"],
+                format!("data:image/png;base64,{PNG_BASE64}")
+            );
+            assert_eq!(input[2]["content"][0]["text"], "after");
+        }
+    }
+
+    #[test]
+    fn tool_outputs_match_only_preceding_unanswered_calls() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [
+                {"role":"user", "content":[{"type":"tool_result", "tool_use_id":"call_later", "content":"too early"}]},
+                {"role":"assistant", "content":[
+                    {"type":"tool_use", "id":"call_a", "name":"Read", "input":{}},
+                    {"type":"tool_use", "id":"call_b", "name":"Bash", "input":{}},
+                    {"type":"tool_use", "id":"call_later", "name":"Read", "input":{}}
+                ]},
+                {"role":"user", "content":[
+                    {"type":"tool_result", "tool_use_id":"call_b", "content":"b"},
+                    {"type":"tool_result", "tool_use_id":"call_missing", "content":"orphan"},
+                    {"type":"tool_result", "tool_use_id":"call_a", "content":"a"},
+                    {"type":"tool_result", "tool_use_id":"call_a", "content":"duplicate"},
+                    {"type":"tool_result", "tool_use_id":"call_later", "content":"later"}
+                ]}
+            ]
+        })).unwrap();
+        let input = serde_json::to_value(build_input(&req)).unwrap();
+        let kinds: Vec<_> = input
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "message",
+                "function_call",
+                "function_call",
+                "function_call",
+                "function_call_output",
+                "message",
+                "function_call_output",
+                "message",
+                "function_call_output"
+            ]
+        );
+        assert_eq!(input[4]["call_id"], "call_b");
+        assert_eq!(input[4]["output"], "b");
+        assert_eq!(input[6]["call_id"], "call_a");
+        assert_eq!(input[6]["output"], "a");
+        assert_eq!(input[8]["call_id"], "call_later");
+        assert_eq!(input[8]["output"], "later");
+    }
+
+    #[test]
     fn translate_tool_result_content() {
         let req: MessagesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",
-            "messages": [{"role":"user", "content": [{
-                "type": "tool_result",
-                "tool_use_id": "tu_1",
-                "content": [{"type":"text", "text":"result"}]
-            }]}]
+            "messages": [
+                {"role":"assistant", "content":[{"type":"tool_use", "id":"tu_1", "name":"test", "input":{}}]},
+                {"role":"user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu_1",
+                    "content": [{"type":"text", "text":"result"}]
+                }]}
+            ]
         }))
         .unwrap();
         let out = translate_request(&req, opts()).unwrap();
-        assert_eq!(out.input.len(), 1);
-        if let ResponsesInputItem::FunctionCallOutput { call_id, output } = &out.input[0] {
+        assert_eq!(out.input.len(), 2);
+        if let ResponsesInputItem::FunctionCallOutput { call_id, output } = &out.input[1] {
             assert_eq!(call_id, "tu_1");
             assert_eq!(output.as_text(), Some("result"));
         } else {
@@ -2468,25 +2595,28 @@ mod tests {
     fn translate_tool_result_preserves_mixed_content_order() {
         let req: MessagesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",
-            "messages": [{"role":"user", "content": [{
-                "type": "tool_result",
-                "tool_use_id": "tu_image",
-                "content": [
-                    {"type": "text", "text": "before"},
-                    {"type": "image", "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": PNG_BASE64
-                    }},
-                    {"type": "text", "text": "after"}
-                ]
-            }]}]
+            "messages": [
+                {"role":"assistant", "content":[{"type":"tool_use", "id":"tu_image", "name":"test", "input":{}}]},
+                {"role":"user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu_image",
+                    "content": [
+                        {"type": "text", "text": "before"},
+                        {"type": "image", "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": PNG_BASE64
+                        }},
+                        {"type": "text", "text": "after"}
+                    ]
+                }]}
+            ]
         }))
         .unwrap();
 
         let out = translate_request(&req, opts()).unwrap();
         assert_eq!(
-            serde_json::to_value(&out.input[0]).unwrap(),
+            serde_json::to_value(&out.input[1]).unwrap(),
             json!({
                 "type": "function_call_output",
                 "call_id": "tu_image",
@@ -2577,22 +2707,25 @@ mod tests {
     fn tool_result_error_prefix_precedes_image_content() {
         let req: MessagesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",
-            "messages": [{"role":"user", "content": [{
-                "type": "tool_result",
-                "tool_use_id": "tu_error_image",
-                "is_error": true,
-                "content": [{"type": "image", "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": PNG_BASE64
-                }}]
-            }]}]
+            "messages": [
+                {"role":"assistant", "content":[{"type":"tool_use", "id":"tu_error_image", "name":"test", "input":{}}]},
+                {"role":"user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu_error_image",
+                    "is_error": true,
+                    "content": [{"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": PNG_BASE64
+                    }}]
+                }]}
+            ]
         }))
         .unwrap();
 
         let out = translate_request(&req, opts()).unwrap();
         assert_eq!(
-            serde_json::to_value(&out.input[0]).unwrap()["output"],
+            serde_json::to_value(&out.input[1]).unwrap()["output"],
             json!([
                 {"type": "input_text", "text": "[tool execution error]"},
                 {"type": "input_image", "image_url": format!("data:image/png;base64,{PNG_BASE64}")}

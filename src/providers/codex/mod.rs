@@ -1081,21 +1081,16 @@ async fn live_stream_response_once(
                     return LiveStreamStart::Response(usage_limit_response(&limit));
                 }
                 if let Some(failure) = events::classify_event_failure(&payload) {
-                    // The backend sometimes 400s a tool result it says has no call,
-                    // though the request carries that call, and a resend of the same
-                    // request has gone through. Resend once; a second 400 is returned.
-                    let orphan_call_id = events::orphan_tool_output_call_id(&failure.message);
-                    let resend = orphan_call_id.is_some() && reconnect.attempts == 0;
-                    if let Some(call_id) = orphan_call_id {
+                    if let Some(call_id) = events::orphan_tool_output_call_id(&failure.message) {
                         log_orphan_tool_output(
                             &ctx,
                             &request_body,
                             call_id,
                             reconnect.attempts,
-                            resend,
+                            failure.retryable(),
                         );
                     }
-                    if failure.retryable() || resend {
+                    if failure.retryable() {
                         return provider_retry(
                             &upstream_events,
                             codex_event_failure_error(
@@ -1184,9 +1179,8 @@ async fn live_stream_response_once(
     )
 }
 
-/// Logs how the failing tool result sits in the request, without any of its
-/// text. `callIndex: null` means the proxy sent an orphan; both indexes set,
-/// call first, means the request was well formed and the backend refused it.
+/// Logs the positions of the failing result and its call without their text.
+/// A missing call in the full request appears as `callIndex: null`.
 fn log_orphan_tool_output(
     ctx: &RequestContext,
     request: &translate::request::ResponsesRequest,
@@ -3021,71 +3015,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orphan_tool_output_is_resent_once_and_the_resend_answers() {
-        use http_body_util::BodyExt as _;
+    async fn shortened_tool_history_completes_without_an_orphan_output() {
         let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for attempt in 0..2 {
-                let (socket, _) = listener.accept().await.unwrap();
-                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
-                let _ = next_live_websocket_request(&mut socket).await;
-                if attempt == 0 {
-                    emit_live_event(&mut socket, &orphan_tool_output_event()).await;
-                    continue;
-                }
-                for event in [
-                    serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m"}}),
-                    serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"Resent answer"}),
-                    serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
-                    serde_json::json!({"type":"response.completed","response":{"status":"completed","usage":{}}}),
-                ] {
-                    emit_live_event(&mut socket, &event).await;
-                }
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let request = next_live_websocket_request(&mut socket).await;
+            let input = request["input"].as_array().unwrap();
+            assert!(
+                input
+                    .iter()
+                    .all(|item| item["type"] != "function_call_output")
+            );
+            assert!(
+                input
+                    .iter()
+                    .any(|item| item["content"].as_array().is_some_and(|parts| parts
+                        .iter()
+                        .any(|part| part["text"] == "retained tool result")))
+            );
+            for event in [
+                serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m"}}),
+                serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"Context received"}),
+                serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
+                serde_json::json!({"type":"response.completed","response":{"status":"completed","usage":{}}}),
+            ] {
+                emit_live_event(&mut socket, &event).await;
             }
         });
-        let client = authenticated_live_test_client(format!("http://{addr}/responses"));
-        let request = live_test_request("test");
-        let model = request.model.clone();
-        let response = live_stream_response(
-            client,
-            "orphan-resend-message".into(),
-            &model,
-            live_test_context("orphan-resend"),
-            request,
-            ContinuationReservation::for_owner_turn(None, None),
-            LiveStreamCompaction {
-                compact_boundary: false,
-                attempt: None,
-            },
-            config::CodexTransport::WebSocket,
-            false,
+        let provider = CodexProvider {
+            client: authenticated_live_test_client(format!("http://{addr}/responses")),
+        };
+        let body: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"gpt-6-astra", "stream":true,
+            "system":"Use the provided context.",
+            "messages":[{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"call_not_in_history","content":"retained tool result"},
+                {"type":"text","text":"Continue"}
+            ]}]
+        })).unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            provider.handle_messages_inner(body, live_test_context("shortened-tool-history"), None),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let bytes = tokio::time::timeout(Duration::from_secs(12), response.into_body().collect())
-            .await
-            .unwrap()
-            .unwrap()
-            .to_bytes();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let text = String::from_utf8(bytes.to_vec()).unwrap();
-        assert_eq!(text.matches("Resent answer").count(), 1, "{text}");
+        assert!(text.contains("Context received"), "{text}");
         assert!(!text.contains("event: error"), "{text}");
-        tokio::time::timeout(Duration::from_secs(5), server)
-            .await
-            .expect("upstream saw fewer than two requests")
-            .unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn orphan_tool_output_failing_twice_returns_the_400_after_one_resend() {
+    async fn orphan_tool_output_400_is_returned_without_resending() {
         let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
         let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
-        // The harness serves exactly two upstream requests and then drops the
-        // listener, so a third attempt would fail the connection, not the 400.
+        // A second request would fail the closed listener, not return this 400.
         let response =
-            run_live_failure_case("orphan-fails-twice", orphan_tool_output_event(), 2).await;
+            run_live_failure_case("orphan-not-resent", orphan_tool_output_event(), 1).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(response.headers()["x-should-retry"], "false");
     }

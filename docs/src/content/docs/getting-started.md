@@ -36,37 +36,34 @@ cc-proxy codex auth login
 
 For SSH or another headless environment, use `cc-proxy codex auth device` instead.
 
-## 3. Start the proxy
+## 3. Turn it on for Claude Code
 
 ```sh
-cc-proxy start
+cc-proxy on
 ```
 
-It starts in the background and prints its pid. Confirm it with
-`cc-proxy status`. It listens on `127.0.0.1:18765`. Attach the dashboard any
-time with `cc-proxy monitor`, or start foreground-with-dashboard mode with
-`cc-proxy start --monitor`.
+This installs the shell hook and turns on the proxy connection. In an
+existing zsh terminal, run `exec zsh` once. New terminals load it themselves.
+Use `exec bash` or `exec fish` if that's your shell. Your zsh or bash alias
+keeps its flags; no Claude settings file needs editing.
 
-## 4. Start Claude Code
-
-Open another terminal and run:
+## 4. Open Claude Code
 
 ```sh
-cc-proxy claude --model gpt-6-sol
+claude
 ```
 
-It starts the proxy first if it isn't running. Every argument goes to
-`claude` unchanged, so `cc-proxy claude --resume <id>` and
-`cc-proxy claude -p "..."` work as usual. The proxy's address is passed in a
-`--settings` flag for this session only, so `~/.claude/settings.json` stays as
-it is, and plain `claude` still talks to Anthropic.
+It starts the proxy in the background if needed, then opens Claude Code on
+it. Send a prompt. You can see the request with `cc-proxy monitor`.
+`cc-proxy off` uses your saved Claude connection again for new sessions.
 
-Send a prompt. The request appears in the monitor and the response streams into Claude Code.
+On Windows, or without the shell hook, run `cc-proxy claude` instead.
+`--resume`, `--worktree` and your other Claude flags work as usual.
 
-To start every session on the same model, save it once:
+To choose a model, use `claude --model opus` for one session or save a default:
 
 ```sh
-cc-proxy config set claude.model gpt-6-sol
+cc-proxy config set claude.model opus
 ```
 
 For persistent settings, provider switching, and model discovery, continue to [Configure Claude Code](/using/configure-claude-code/) and [Models and routing](/using/models-and-routing/).

@@ -5775,20 +5775,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_fallback_event_stream_keeps_http_transport_after_thinking() {
+    async fn auto_falls_back_after_forbidden_upgrade_and_keeps_http_transport() {
+        let _pool_guard = super::super::websocket::lock_codex_websocket_pool_for_tests().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut websocket, _) = listener.accept().await.unwrap();
-            let request = read_http_request(&mut websocket).await;
-            assert!(String::from_utf8_lossy(&request).starts_with("GET "));
-            websocket
-                .write_all(
-                    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                )
-                .await
-                .unwrap();
-            drop(websocket);
+            // Origin 403 gets one setup retry before Auto switches to HTTP.
+            for _ in 0..2 {
+                let (mut websocket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut websocket).await;
+                assert!(String::from_utf8_lossy(&request).starts_with("GET "));
+                websocket
+                    .write_all(
+                        b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+            }
             let (mut http, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut http).await;
             assert!(String::from_utf8_lossy(&request).starts_with("POST "));
