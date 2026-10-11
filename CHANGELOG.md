@@ -18,6 +18,9 @@ description: Release notes for cc-proxy.
   `gpt-6-astra` (it used `gpt-6-sol`). A `codex.model` setting still wins.
 - A web search on a luna model now runs on the sol of the same version, so
   a newer luna no longer fails with a 404.
+- Claude Code's Bash security-review requests go to the same luna model as
+  `haiku`, the newest one, instead of the fixed `gpt-6-luna`. Set
+  `autoReviewModel` to pin another model.
 
 ## v0.1.52 (2026-10-02)
 
