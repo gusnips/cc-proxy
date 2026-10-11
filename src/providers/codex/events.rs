@@ -151,9 +151,8 @@ pub(crate) fn incomplete_stop_reason(payload: &Value) -> Option<StopReason> {
 }
 
 /// The call id in the backend's 400 `No tool call found for function call
-/// output with call_id <id>.`, or None for any other message. The request
-/// carries the `function_call` the backend says it cannot find, so the proxy
-/// can only resend it.
+/// output with call_id <id>.`, or None for any other message. Used for
+/// content-free pairing diagnostics; resending cannot repair a missing call.
 pub(crate) fn orphan_tool_output_call_id(message: &str) -> Option<&str> {
     const PREFIX: &str = "No tool call found for function call output with call_id ";
     let (_, rest) = message.split_once(PREFIX)?;
