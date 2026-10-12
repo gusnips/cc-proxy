@@ -1842,6 +1842,15 @@ fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
             HeaderName::from_static("anthropic-ratelimit-unified-representative-claim"),
             HeaderValue::from_static(window.claim()),
         );
+    } else {
+        // Without a claim, Claude Code takes the 429 for a server throttle
+        // ("not your usage limit") and shows no reset time. A rejected extra
+        // usage status makes it say "You've hit your limit" without naming a
+        // window Codex never named.
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-unified-overage-status"),
+            HeaderValue::from_static("rejected"),
+        );
     }
 
     (
@@ -3491,6 +3500,38 @@ mod tests {
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()["x-should-retry"], "false");
         assert!(!response.headers().contains_key(http::header::RETRY_AFTER));
+    }
+
+    // Codex does not always say which window ran out. Claude Code reads a 429
+    // with no claim as a server throttle, so the neutral status stands in for it.
+    #[test]
+    fn usage_limit_without_a_window_is_still_a_usage_limit_for_claude_code() {
+        let unknown = events::CodexUsageLimit {
+            message: "The usage limit has been reached".to_string(),
+            resets_at: Some(1788879437),
+            window: None,
+        };
+        let response = usage_limit_response(&unknown);
+        let headers = response.headers();
+        assert_eq!(headers["anthropic-ratelimit-unified-status"], "rejected");
+        assert_eq!(headers["anthropic-ratelimit-unified-reset"], "1788879437");
+        assert_eq!(
+            headers["anthropic-ratelimit-unified-overage-status"],
+            "rejected"
+        );
+        assert!(!headers.contains_key("anthropic-ratelimit-unified-representative-claim"));
+
+        let named = events::CodexUsageLimit {
+            window: Some(events::CodexLimitWindow::SevenDay),
+            ..unknown
+        };
+        let response = usage_limit_response(&named);
+        let headers = response.headers();
+        assert_eq!(
+            headers["anthropic-ratelimit-unified-representative-claim"],
+            "seven_day"
+        );
+        assert!(!headers.contains_key("anthropic-ratelimit-unified-overage-status"));
     }
 
     #[tokio::test]

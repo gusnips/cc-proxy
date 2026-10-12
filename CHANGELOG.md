@@ -3,6 +3,24 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.1.56 (2026-10-12)
+
+- When a Codex usage window runs out, Claude Code now says so and shows when
+  it resets, for example `You've hit your session limit · resets 4:52pm`.
+  It can then wait for the reset and continue the task. Before, it printed
+  `Request rejected (429)` and no time. `cc-proxy claude` and the shell hook
+  used `ANTHROPIC_AUTH_TOKEN`, and in that mode Claude Code ignores usage
+  limit headers. They now use `CLAUDE_CODE_OAUTH_TOKEN=unused`. If you set
+  the variables yourself, switch the same way. The proxy still doesn't use
+  the value.
+- Codex doesn't always say which window ran out. The proxy used to send the
+  reset time alone, and Claude Code read that as a server throttle
+  (`not your usage limit`). It now marks the 429 as a spent limit, so you
+  see `You've hit your limit · resets 4:57pm`.
+- Claude Code no longer retries a 429 by itself in these sessions. For
+  Codex, the proxy still retries a short 429 up to three times before it
+  answers.
+
 ## v0.1.55 (2026-10-11)
 
 - `cc-proxy on` now installs or refreshes the shell hook itself. Existing
