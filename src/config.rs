@@ -757,9 +757,9 @@ pub(crate) fn write_config_json_at(
     dir: &Path,
     root: &serde_json::Value,
 ) -> anyhow::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
     let path = dir.join("config.json");
-    std::fs::write(&path, serde_json::to_string_pretty(root)?)?;
+    // One step, so a proxy that reads the file per request never sees half of it.
+    crate::fsutil::write_atomic(&path, serde_json::to_string_pretty(root)?.as_bytes())?;
     Ok(path)
 }
 
