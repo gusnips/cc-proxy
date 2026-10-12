@@ -92,6 +92,8 @@ CCP_CURSOR_AGENT_BUNDLE=/path/to/cursor-agent/index.js \
 
 Upstream limits are shared with other clients on the same account. Codex limit responses and Kimi HTTP 429 responses surface as HTTP 429 with `retry-after`. Wait for the indicated interval or reduce concurrent traffic.
 
+When a Codex usage window runs out, Claude Code shows when it resets and can continue the task by itself after that. Sessions started with `cc-proxy claude` or the shell hook do this. If you set the variables yourself, use `CLAUDE_CODE_OAUTH_TOKEN=unused` instead of `ANTHROPIC_AUTH_TOKEN`. See [Configure Claude Code](/using/configure-claude-code/).
+
 ## Find the complete error
 
 The monitor shows request detail. `proxy.log` contains structured JSONL events, and `errors/` stores complete redacted failed-response payloads. A `request_failed` event includes the error file path.

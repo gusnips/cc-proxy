@@ -58,7 +58,7 @@ The hook works with zsh, bash and fish. On Windows, run `cc-proxy claude`.
 
 ```sh
 ANTHROPIC_BASE_URL=http://127.0.0.1:18765 \
-ANTHROPIC_AUTH_TOKEN=unused \
+CLAUDE_CODE_OAUTH_TOKEN=unused \
 ANTHROPIC_MODEL=gpt-6-sol[1m] \
 ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-6-luna[1m] \
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
@@ -66,14 +66,14 @@ CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
   claude
 ```
 
-| Claude Code variable                          | Purpose                                                                                                                                                                            |
-| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ANTHROPIC_BASE_URL`                          | Sends Anthropic API requests to the local proxy.                                                                                                                                   |
-| `ANTHROPIC_AUTH_TOKEN`                        | Satisfies Claude Code's client credential requirement. The proxy does not use it for upstream auth.                                                                                |
-| `ANTHROPIC_MODEL`                             | Selects the main request model and therefore the provider.                                                                                                                         |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL`               | Selects the model for title generation, token-related background work, and other small requests. Use a model the proxy routes. It replaces the older `ANTHROPIC_SMALL_FAST_MODEL`. |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`  | Reduces background traffic sent to the subscription provider.                                                                                                                      |
-| `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` | Prevents Claude Code from retrying a partially completed stream as non-streaming, which can duplicate tool calls.                                                                  |
+| Claude Code variable                          | Purpose                                                                                                                                                                                                                                                       |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ANTHROPIC_BASE_URL`                          | Sends Anthropic API requests to the local proxy.                                                                                                                                                                                                              |
+| `CLAUDE_CODE_OAUTH_TOKEN`                     | Satisfies Claude Code's credential check. The proxy does not use it for upstream auth. Use it instead of `ANTHROPIC_AUTH_TOKEN`: with that one Claude Code ignores usage-limit headers, so it can't show when a limit resets or continue by itself afterward. |
+| `ANTHROPIC_MODEL`                             | Selects the main request model and therefore the provider.                                                                                                                                                                                                    |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL`               | Selects the model for title generation, token-related background work, and other small requests. Use a model the proxy routes. It replaces the older `ANTHROPIC_SMALL_FAST_MODEL`.                                                                            |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`  | Reduces background traffic sent to the subscription provider.                                                                                                                                                                                                 |
+| `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` | Prevents Claude Code from retrying a partially completed stream as non-streaming, which can duplicate tool calls.                                                                                                                                             |
 
 The proxy always makes streaming upstream requests. It can still accumulate a non-streaming Anthropic response when the client requests one.
 
@@ -98,7 +98,7 @@ If every Claude Code session should use the proxy, put client variables in `~/.c
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:18765",
-    "ANTHROPIC_AUTH_TOKEN": "unused",
+    "CLAUDE_CODE_OAUTH_TOKEN": "unused",
     "ANTHROPIC_MODEL": "gpt-6-sol[1m]",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-6-luna[1m]",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": 272000,

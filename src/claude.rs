@@ -17,8 +17,12 @@ use crate::{config, daemon};
 fn env(base_url: &str) -> Vec<(&'static str, String)> {
     let mut env = vec![
         ("ANTHROPIC_BASE_URL", base_url.to_string()),
-        // Claude Code asks for a credential; the proxy never forwards it.
-        ("ANTHROPIC_AUTH_TOKEN", "unused".to_string()),
+        // Claude Code asks for a credential; the proxy never forwards it. An
+        // OAuth token, not ANTHROPIC_AUTH_TOKEN: a session that sets that one is
+        // not a claude.ai subscriber, so Claude Code ignores the usage-limit
+        // headers. With this one it reads them, shows when the limit resets and
+        // can continue the task by itself once it has.
+        ("CLAUDE_CODE_OAUTH_TOKEN", "unused".to_string()),
         ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".to_string()),
         // Without it, a stream that fails part-way is sent again without
         // streaming, which can run its tool calls twice.
@@ -270,5 +274,9 @@ mod tests {
         assert_eq!(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:18765");
         assert_eq!(env["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"], "1");
         assert!(env.get("ANTHROPIC_SMALL_FAST_MODEL").is_none());
+        // ANTHROPIC_AUTH_TOKEN makes Claude Code drop every `anthropic-ratelimit-*`
+        // header, so the reset countdown and the wait-and-continue offer never show.
+        assert_eq!(env["CLAUDE_CODE_OAUTH_TOKEN"], "unused");
+        assert!(env.get("ANTHROPIC_AUTH_TOKEN").is_none());
     }
 }
