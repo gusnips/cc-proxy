@@ -3,7 +3,7 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
-## Unreleased
+## v0.2.1 (2026-10-13)
 
 - Switching an existing Claude Code session to the proxy no longer silently
   accepts a request with only its newest messages. Claude Code's Message
