@@ -1,537 +1,450 @@
-// Lifecycle tests for the background proxy service: serve, status, restart,
-// stop, and reload against an isolated state directory.
+// Lifecycle tests for the background proxy service and for the routing it
+// switches on and off in Claude Code's settings. Each test gets its own HOME,
+// config dir, state dir and port, so none of them touches the real ones.
 use assert_cmd::Command;
 use predicates::str::contains;
+use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-fn isolated_env(cmd: &mut Command, temp: &TempDir, port: u16) {
-    cmd.env("CCP_CONFIG_DIR", temp.path().join("config"));
-    cmd.env("XDG_STATE_HOME", temp.path().join("state"));
-    cmd.env("HOME", temp.path());
-    // Pin the probe port so status/stop/reload never touch the machine's
-    // real proxy port (or another test's) when no daemon is tracked.
-    cmd.env("PORT", port.to_string());
+mod common;
+
+const NEUTRAL_URL: &str = "https://api.anthropic.com";
+
+/// An isolated machine. Dropping it runs `cc-proxy stop`, so a failed test
+/// leaves no daemon behind on a test port.
+struct Sandbox {
+    temp: TempDir,
+    port: u16,
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-/// Runs `cc-proxy stop` on drop so a failed test does not leave a daemon
-/// behind on a test port.
-struct DaemonGuard {
-    env: Vec<(String, String)>,
-}
-
-impl DaemonGuard {
-    fn new(temp: &TempDir, port: u16) -> Self {
-        let env = [
-            (
-                "CCP_CONFIG_DIR".to_string(),
-                temp.path().join("config").to_string_lossy().into_owned(),
-            ),
-            (
-                "XDG_STATE_HOME".to_string(),
-                temp.path().join("state").to_string_lossy().into_owned(),
-            ),
-            (
-                "HOME".to_string(),
-                temp.path().to_string_lossy().into_owned(),
-            ),
-            ("PORT".to_string(), port.to_string()),
-        ]
-        .into_iter()
-        .collect();
-        Self { env }
+impl Sandbox {
+    fn new() -> Self {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        Self {
+            temp: TempDir::new().unwrap(),
+            port,
+        }
     }
 
-    fn stop(&self) {
+    /// `cc-proxy` in this machine. The port is pinned so status, stop and
+    /// reload never touch the real proxy port when no daemon is tracked.
+    fn cmd(&self) -> Command {
         let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
-        for (key, value) in &self.env {
-            cmd.env(key, value);
-        }
-        let _ = cmd.arg("stop").output();
+        cmd.env("CCP_CONFIG_DIR", self.config_dir())
+            .env("XDG_STATE_HOME", self.temp.path().join("state"))
+            .env("HOME", self.temp.path())
+            .env("PORT", self.port.to_string())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("ZDOTDIR")
+            .env_remove("XDG_CONFIG_HOME");
+        cmd
     }
-}
 
-impl Drop for DaemonGuard {
-    fn drop(&mut self) {
-        self.stop();
+    fn start_args(&self) -> [String; 3] {
+        ["start".into(), "--port".into(), self.port.to_string()]
     }
-}
 
-fn wait_for_status(guard: &DaemonGuard, running: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let mut cmd = Command::cargo_bin("cc-proxy")?;
-        for (key, value) in &guard.env {
-            cmd.env(key, value);
-        }
-        let output = cmd.arg("status").output()?;
-        if output.status.success() == running {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "status did not become running={running}: {}",
+    fn config_dir(&self) -> PathBuf {
+        self.temp.path().join("config")
+    }
+
+    fn sign_in(&self, provider: &str) {
+        common::write_auth(&self.config_dir(), provider);
+    }
+
+    fn settings_path(&self) -> PathBuf {
+        self.temp.path().join(".claude/settings.json")
+    }
+
+    fn write_settings(&self, text: &str) {
+        let path = self.settings_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn settings(&self) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(self.settings_path()).unwrap()).unwrap()
+    }
+
+    /// The `route` block in config.json, or null before anything wrote it.
+    fn route(&self) -> Value {
+        std::fs::read_to_string(self.config_dir().join("config.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .map(|config| config["route"].clone())
+            .unwrap_or(Value::Null)
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn pid(&self) -> u32 {
+        let pidfile = self.temp.path().join("state/cc-proxy/proxy.pid");
+        let info: Value = serde_json::from_str(&std::fs::read_to_string(pidfile).unwrap()).unwrap();
+        info["pid"].as_u64().unwrap() as u32
+    }
+
+    fn wait_for_status(&self, running: bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let output = self.cmd().arg("status").output().unwrap();
+            if output.status.success() == running {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "status never became running={running}: {}",
                 String::from_utf8_lossy(&output.stdout)
-            )
-            .into());
+            );
+            std::thread::sleep(Duration::from_millis(200));
         }
-        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    fn assert_routed_to_proxy(&self) {
+        let settings = self.settings();
+        assert_eq!(settings["env"]["ANTHROPIC_BASE_URL"], self.url());
+        assert_eq!(settings["env"]["CLAUDE_CODE_OAUTH_TOKEN"], "unused");
+    }
+
+    fn assert_routed_to_anthropic(&self) {
+        let settings = self.settings();
+        assert_eq!(settings["env"]["ANTHROPIC_BASE_URL"], NEUTRAL_URL);
+        assert_eq!(settings["env"]["CLAUDE_CODE_OAUTH_TOKEN"], "");
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        let _ = self.cmd().arg("stop").output();
     }
 }
 
 #[test]
-fn status_reports_not_running_without_daemon() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let mut cmd = Command::cargo_bin("cc-proxy")?;
-    isolated_env(&mut cmd, &temp, free_port());
-    cmd.arg("status")
+fn status_reports_not_running_without_daemon() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .cmd()
+        .arg("status")
         .assert()
         .failure()
         .code(1)
         .stdout(contains("not running"));
-    Ok(())
 }
 
 #[test]
-fn stop_without_daemon_is_success() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let mut cmd = Command::cargo_bin("cc-proxy")?;
-    isolated_env(&mut cmd, &temp, free_port());
-    cmd.arg("stop")
+fn stop_without_daemon_is_success() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .cmd()
+        .arg("stop")
         .assert()
         .success()
         .stdout(contains("not running"));
-    Ok(())
 }
 
 #[test]
-fn reload_without_daemon_validates_config() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let mut cmd = Command::cargo_bin("cc-proxy")?;
-    isolated_env(&mut cmd, &temp, free_port());
-    cmd.arg("reload")
+fn reload_without_daemon_validates_config() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .cmd()
+        .arg("reload")
         .assert()
         .failure()
         .stdout(contains("config file is valid"));
-    Ok(())
 }
 
 #[test]
-fn reload_rejects_invalid_config() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let config_dir = temp.path().join("config");
-    std::fs::create_dir_all(&config_dir)?;
-    std::fs::write(config_dir.join("config.json"), "{not json")?;
-    let mut cmd = Command::cargo_bin("cc-proxy")?;
-    isolated_env(&mut cmd, &temp, free_port());
-    cmd.arg("reload")
+fn reload_rejects_invalid_config() {
+    let sandbox = Sandbox::new();
+    std::fs::create_dir_all(sandbox.config_dir()).unwrap();
+    std::fs::write(sandbox.config_dir().join("config.json"), "{not json").unwrap();
+    sandbox
+        .cmd()
+        .arg("reload")
         .assert()
         .failure()
         .stderr(contains("invalid config"));
-    Ok(())
 }
 
 #[test]
-fn serve_status_and_stop_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let port = free_port();
-    let guard = DaemonGuard::new(&temp, port);
+fn start_status_and_stop_round_trip() {
+    let sandbox = Sandbox::new();
+    sandbox.sign_in("codex");
 
-    let mut serve = Command::cargo_bin("cc-proxy")?;
-    for (key, value) in &guard.env {
-        serve.env(key, value);
-    }
-    serve
-        .args(["start", "--port", &port.to_string()])
+    sandbox
+        .cmd()
+        .args(sandbox.start_args())
         .assert()
         .success()
         .stdout(contains("started"));
+    sandbox.wait_for_status(true);
 
-    wait_for_status(&guard, true)?;
-
-    // A second serve refuses to double-start.
-    let mut again = Command::cargo_bin("cc-proxy")?;
-    for (key, value) in &guard.env {
-        again.env(key, value);
-    }
-    again
-        .args(["start", "--port", &port.to_string()])
+    // A second start refuses to double-start.
+    sandbox
+        .cmd()
+        .args(sandbox.start_args())
         .assert()
         .success()
         .stdout(contains("already running"));
 
-    let mut stop = Command::cargo_bin("cc-proxy")?;
-    for (key, value) in &guard.env {
-        stop.env(key, value);
-    }
-    stop.arg("stop")
+    sandbox
+        .cmd()
+        .arg("stop")
         .assert()
         .success()
         .stdout(contains("stopped"));
-
-    wait_for_status(&guard, false)?;
-    Ok(())
+    sandbox.wait_for_status(false);
 }
 
 #[test]
-fn restart_keeps_serving() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let port = free_port();
-    let guard = DaemonGuard::new(&temp, port);
+fn restart_keeps_serving() {
+    let sandbox = Sandbox::new();
+    sandbox.sign_in("codex");
+    sandbox.cmd().args(sandbox.start_args()).assert().success();
+    sandbox.wait_for_status(true);
 
-    let mut serve = Command::cargo_bin("cc-proxy")?;
-    for (key, value) in &guard.env {
-        serve.env(key, value);
-    }
-    serve
-        .args(["start", "--port", &port.to_string()])
-        .assert()
-        .success();
-    wait_for_status(&guard, true)?;
-
-    let mut restart = Command::cargo_bin("cc-proxy")?;
-    for (key, value) in &guard.env {
-        restart.env(key, value);
-    }
-    restart
-        .args(["restart", "--port", &port.to_string()])
+    sandbox
+        .cmd()
+        .args(["restart", "--port", &sandbox.port.to_string()])
         .assert()
         .success()
         .stdout(contains("restarted"));
 
-    wait_for_status(&guard, true)?;
-    Ok(())
+    sandbox.wait_for_status(true);
+    sandbox.assert_routed_to_proxy();
 }
 
-/// A stand-in `claude` that writes each argument it got on its own line.
-#[cfg(unix)]
-fn fake_claude(temp: &TempDir) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    use std::os::unix::fs::PermissionsExt;
-    let bin = temp.path().join("bin");
-    std::fs::create_dir_all(&bin)?;
-    let script = bin.join("claude");
-    std::fs::write(
-        &script,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CLAUDE_ARGS_OUT\"\n",
-    )?;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
-    Ok(bin)
-}
-
-#[cfg(unix)]
 #[test]
-fn claude_starts_the_proxy_and_passes_every_argument() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let port = free_port();
-    let guard = DaemonGuard::new(&temp, port);
-    let config_dir = temp.path().join("config");
-    std::fs::create_dir_all(&config_dir)?;
-    std::fs::write(
-        config_dir.join("config.json"),
-        r#"{"claude":{"model":"k3[1m]","fastModel":"k3"}}"#,
-    )?;
-    let bin = fake_claude(&temp)?;
-    let path = std::env::join_paths(
-        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-    )?;
-    let out = temp.path().join("args.txt");
+fn start_routes_claude_code_through_settings_and_stop_switches_it_off() {
+    let sandbox = Sandbox::new();
+    sandbox.sign_in("codex");
+    sandbox.write_settings(r#"{ "theme": "dark", "env": { "FOO": "1" } }"#);
 
-    let mut cmd = Command::cargo_bin("cc-proxy")?;
-    for (key, value) in &guard.env {
-        cmd.env(key, value);
-    }
-    cmd.env("PATH", path)
-        .env("CLAUDE_ARGS_OUT", &out)
-        .args(["claude", "--resume", "abc", "-p", "hi there", "--worktree"])
+    sandbox
+        .cmd()
+        .args(sandbox.start_args())
         .assert()
         .success()
-        .stderr(contains("Started cc-proxy"));
+        .stdout(contains("Claude Code goes to Codex"));
+    sandbox.wait_for_status(true);
 
-    let recorded = std::fs::read_to_string(&out)?;
-    let args: Vec<&str> = recorded.lines().collect();
-    assert_eq!(args[0], "--settings");
-    let settings: serde_json::Value = serde_json::from_str(args[1])?;
-    let env = &settings["env"];
-    assert_eq!(
-        env["ANTHROPIC_BASE_URL"],
-        format!("http://127.0.0.1:{port}")
-    );
-    assert_eq!(env["ANTHROPIC_MODEL"], "k3[1m]");
-    assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "k3");
-    assert_eq!(
-        args[2..],
-        ["--resume", "abc", "-p", "hi there", "--worktree"]
-    );
-    wait_for_status(&guard, true)?;
-    Ok(())
+    let settings = sandbox.settings();
+    assert_eq!(settings["theme"], "dark");
+    assert_eq!(settings["env"]["FOO"], "1");
+    sandbox.assert_routed_to_proxy();
+    assert_eq!(sandbox.route(), json!({"on": true, "provider": "codex"}));
+    sandbox
+        .cmd()
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(contains("Claude Code goes to Codex"));
+
+    sandbox
+        .cmd()
+        .arg("stop")
+        .assert()
+        .success()
+        .stdout(contains("Claude Code uses your Claude subscription"));
+
+    // Neutral values, not deleted keys: Claude Code never unsets a key it
+    // stops seeing, so a deleted key would leave the window on the proxy.
+    sandbox.assert_routed_to_anthropic();
+    let settings = sandbox.settings();
+    assert_eq!(settings["theme"], "dark");
+    assert_eq!(settings["env"]["FOO"], "1");
+    assert_eq!(sandbox.route()["on"], false);
 }
 
-#[cfg(unix)]
 #[test]
-fn claude_missing_from_path_says_how_to_fix_it() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let port = free_port();
-    let guard = DaemonGuard::new(&temp, port);
-    let empty = temp.path().join("empty");
-    std::fs::create_dir_all(&empty)?;
+fn use_switches_provider_and_claude_without_restarting_the_proxy() {
+    let sandbox = Sandbox::new();
+    sandbox.sign_in("codex");
+    sandbox.sign_in("kimi");
 
-    let mut cmd = Command::cargo_bin("cc-proxy")?;
-    for (key, value) in &guard.env {
-        cmd.env(key, value);
-    }
-    cmd.env("PATH", &empty)
-        .arg("claude")
+    // Two providers are signed in, so `start` asks. Enter takes the first.
+    sandbox
+        .cmd()
+        .args(sandbox.start_args())
+        .write_stdin("\n")
+        .assert()
+        .success()
+        .stdout(contains("Claude Code goes to Codex"));
+    sandbox.wait_for_status(true);
+    let pid = sandbox.pid();
+
+    sandbox
+        .cmd()
+        .args(["use", "kimi"])
+        .assert()
+        .success()
+        .stdout(contains("Claude Code goes to Kimi"));
+    assert_eq!(sandbox.route(), json!({"on": true, "provider": "kimi"}));
+    sandbox.assert_routed_to_proxy();
+
+    sandbox
+        .cmd()
+        .args(["use", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("Claude Code uses your Claude subscription"));
+    sandbox.assert_routed_to_anthropic();
+    assert_eq!(sandbox.route(), json!({"on": false, "provider": "kimi"}));
+
+    // The proxy ran through all of it, and picks the last provider up again.
+    sandbox.cmd().args(["use", "codex"]).assert().success();
+    sandbox.assert_routed_to_proxy();
+    assert_eq!(sandbox.pid(), pid);
+}
+
+#[test]
+fn use_refuses_a_provider_it_cannot_route_to() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .cmd()
+        .args(["use", "nobody"])
         .assert()
         .failure()
-        .code(127)
-        .stderr(contains("there's no `claude` on your PATH"));
-    Ok(())
-}
-
-/// `cc-proxy` with this test's isolated state, plus `extra` env.
-#[cfg(unix)]
-fn run_isolated(
-    guard: &DaemonGuard,
-    extra: &[(&str, &std::ffi::OsStr)],
-    args: &[&str],
-) -> Result<std::process::Output, Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("cc-proxy")?;
-    for (key, value) in &guard.env {
-        cmd.env(key, value);
-    }
-    for (key, value) in extra {
-        cmd.env(key, value);
-    }
-    Ok(cmd.env_remove("ZDOTDIR").args(args).output()?)
+        .stderr(contains("can't send Claude Code to `nobody`"));
+    assert!(!sandbox.settings_path().exists());
 }
 
 #[cfg(unix)]
 #[test]
-fn shell_install_adds_one_line_and_uninstall_restores_the_file()
--> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let guard = DaemonGuard::new(&temp, free_port());
-    let zsh = [("SHELL", std::ffi::OsStr::new("/bin/zsh"))];
-    let zshrc = temp.path().join(".zshrc");
-    let original = "export EDITOR=vim\nalias ll='ls -l'\n";
-    std::fs::write(&zshrc, original)?;
+fn a_killed_proxy_is_healed_by_the_next_command() {
+    let sandbox = Sandbox::new();
+    sandbox.sign_in("codex");
+    sandbox.cmd().args(sandbox.start_args()).assert().success();
+    sandbox.wait_for_status(true);
+    sandbox.assert_routed_to_proxy();
 
-    for _ in 0..2 {
-        let output = run_isolated(&guard, &zsh, &["shell", "install"])?;
-        assert!(output.status.success(), "{output:?}");
+    let killed = std::process::Command::new("kill")
+        .args(["-9", &sandbox.pid().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    while std::net::TcpStream::connect(("127.0.0.1", sandbox.port)).is_ok() {
+        std::thread::sleep(Duration::from_millis(50));
     }
-    let installed = std::fs::read_to_string(&zshrc)?;
-    assert!(installed.starts_with(original));
-    assert_eq!(installed.matches("# cc-proxy shell hook").count(), 1);
-    let function = temp.path().join("config/shell/claude.sh");
-    assert!(function.exists());
 
-    let output = run_isolated(&guard, &zsh, &["shell", "uninstall"])?;
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(std::fs::read_to_string(&zshrc)?, original);
-    assert!(!function.exists());
-    Ok(())
+    sandbox
+        .cmd()
+        .arg("models")
+        .assert()
+        .success()
+        .stderr(contains("cc-proxy wasn't running"));
+    sandbox.assert_routed_to_anthropic();
+    assert_eq!(sandbox.route()["on"], false);
+
+    // Healed once. The next command has nothing to say.
+    sandbox
+        .cmd()
+        .arg("models")
+        .assert()
+        .success()
+        .stderr(predicates::str::is_empty());
 }
 
 #[cfg(unix)]
 #[test]
-fn on_installs_and_refreshes_the_hook_without_editing_claude_settings()
--> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let guard = DaemonGuard::new(&temp, free_port());
-    let shell_env = [("SHELL", std::ffi::OsStr::new("/bin/zsh"))];
-    let zshrc = temp.path().join(".zshrc");
-    let original = "alias claude='claude --dangerously-skip-permissions'\n";
-    std::fs::write(&zshrc, original)?;
-    let settings_dir = temp.path().join(".claude");
-    std::fs::create_dir_all(&settings_dir)?;
-    let saved = "{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://example.invalid\"}}\n";
-    std::fs::write(settings_dir.join("settings.json"), saved)?;
-    let function = temp.path().join("config/shell/claude.sh");
+fn start_no_monitor_only_serves_and_leaves_settings_alone() {
+    let sandbox = Sandbox::new();
+    let before = "{\n  \"env\": { \"FOO\": \"1\" },\n  \"theme\": \"dark\"\n}\n";
+    sandbox.write_settings(before);
 
-    for _ in 0..2 {
-        // Simulate an earlier installed hook; on must refresh it too.
-        if function.exists() {
-            std::fs::write(&function, "claude() { command claude \"$@\"; }\n")?;
-        }
-        let output = run_isolated(&guard, &shell_env, &["on"])?;
-        assert!(output.status.success(), "{output:?}");
-        assert!(function.exists());
-        assert!(std::fs::read_to_string(&function)?.contains("function claude {"));
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_cc-proxy"))
+        .args(["start", "--no-monitor", "--port", &sandbox.port.to_string()])
+        .env("CCP_CONFIG_DIR", sandbox.config_dir())
+        .env("XDG_STATE_HOME", sandbox.temp.path().join("state"))
+        .env("HOME", sandbox.temp.path())
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while std::net::TcpStream::connect(("127.0.0.1", sandbox.port)).is_err() {
+        assert!(Instant::now() < deadline, "the service never came up");
+        std::thread::sleep(Duration::from_millis(20));
     }
-    let installed = std::fs::read_to_string(&zshrc)?;
-    assert!(installed.starts_with(original));
-    assert_eq!(installed.matches("# cc-proxy shell hook").count(), 1);
+
+    // A reboot starts this command, and a reboot must not route anything.
+    let after = std::fs::read_to_string(sandbox.settings_path()).unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(after, before);
+    assert_eq!(sandbox.route(), Value::Null);
+}
+
+#[test]
+fn a_settings_file_that_is_not_json_stops_start_before_anything_runs() {
+    let sandbox = Sandbox::new();
+    sandbox.sign_in("codex");
+    sandbox.write_settings("{ not json");
+
+    sandbox
+        .cmd()
+        .args(sandbox.start_args())
+        .assert()
+        .failure()
+        .stderr(contains("isn't valid JSON"))
+        .stderr(contains("changed nothing"));
+
     assert_eq!(
-        std::fs::read_to_string(settings_dir.join("settings.json"))?,
-        saved
+        std::fs::read_to_string(sandbox.settings_path()).unwrap(),
+        "{ not json"
     );
-    Ok(())
+    sandbox
+        .cmd()
+        .arg("status")
+        .assert()
+        .failure()
+        .stdout(contains("not running"));
 }
 
-#[cfg(unix)]
 #[test]
-fn the_hook_preserves_alias_flags_when_on_off_or_missing() -> Result<(), Box<dyn std::error::Error>>
-{
-    for shell_name in ["zsh", "bash"] {
-        // zsh isn't installed on every Linux machine; bash is our other supported shell.
-        let Some(shell_path) = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-            .map(|dir| dir.join(shell_name))
-            .find(|path| path.is_file())
-        else {
-            continue;
-        };
-        let temp = TempDir::new()?;
-        let port = free_port();
-        let guard = DaemonGuard::new(&temp, port);
-        let shell_env = [("SHELL", std::ffi::OsStr::new("/bin/zsh"))];
-        let installed = run_isolated(&guard, &shell_env, &["shell", "install"])?;
-        assert!(installed.status.success(), "{installed:?}");
-        let bin = fake_claude(&temp)?;
-        let cc_proxy_dir = assert_cmd::cargo::cargo_bin("cc-proxy")
-            .parent()
-            .ok_or("cc-proxy has no parent dir")?
-            .to_path_buf();
-        let path = std::env::join_paths([bin.clone(), cc_proxy_dir])?;
-        let out = temp.path().join("args.txt");
-        let alias_out = temp.path().join("alias.txt");
-        let script = temp.path().join("launch.sh");
-        std::fs::write(
-            &script,
-            r#"set -e
-if [ -n "$BASH_VERSION" ]; then shopt -s expand_aliases; fi
-if [ "$WITH_ALIAS" = 1 ]; then
-  alias claude='claude --dangerously-skip-permissions --append-system-prompt "keep it short"'
-fi
-. "$1"
-. "$1"
-claude --resume abc -p 'hi there'
-alias claude > "$ALIAS_OUT" || :
-"#,
-        )?;
-        for state in ["on", "off", "missing", "unaliased"] {
-            if state != "missing" {
-                let toggled = run_isolated(
-                    &guard,
-                    &shell_env,
-                    &[if state == "unaliased" { "on" } else { state }],
-                )?;
-                assert!(toggled.status.success(), "{toggled:?}");
-            }
-            let mut shell = std::process::Command::new(&shell_path);
-            shell.args(if shell_name == "zsh" {
-                &["-f"][..]
-            } else {
-                &["--noprofile", "--norc"][..]
-            });
-            shell
-                .arg(&script)
-                .arg(temp.path().join("config/shell/claude.sh"))
-                .env(
-                    "PATH",
-                    if state == "missing" {
-                        bin.as_os_str()
-                    } else {
-                        path.as_os_str()
-                    },
-                )
-                .env("CLAUDE_ARGS_OUT", &out)
-                .env("WITH_ALIAS", if state == "unaliased" { "0" } else { "1" })
-                .env("ALIAS_OUT", &alias_out);
-            for (key, value) in &guard.env {
-                shell.env(key, value);
-            }
-            let launched = shell.output()?;
-            assert!(
-                launched.status.success(),
-                "{shell_name} {state}: {launched:?}"
-            );
-            let recorded = std::fs::read_to_string(&out)?;
-            let args: Vec<_> = recorded.lines().collect();
-            let passed = if matches!(state, "on" | "unaliased") {
-                assert_eq!(args[0], "--settings");
-                let settings: serde_json::Value = serde_json::from_str(args[1])?;
-                assert_eq!(
-                    settings["env"]["ANTHROPIC_BASE_URL"],
-                    format!("http://127.0.0.1:{port}")
-                );
-                &args[2..]
-            } else {
-                &args[..]
-            };
-            let expected = [
-                "--dangerously-skip-permissions",
-                "--append-system-prompt",
-                "keep it short",
-                "--resume",
-                "abc",
-                "-p",
-                "hi there",
-            ];
-            let expected = if state == "unaliased" {
-                &expected[3..]
-            } else {
-                &expected[..]
-            };
-            assert_eq!(passed, expected, "{shell_name} {state}");
-            assert_eq!(
-                std::fs::read_to_string(&alias_out)?
-                    .contains("claude --dangerously-skip-permissions"),
-                state != "unaliased"
-            );
-        }
-    }
-    Ok(())
-}
+fn stop_still_succeeds_when_the_settings_file_is_not_json() {
+    let sandbox = Sandbox::new();
+    sandbox.write_settings("{ not json");
 
-#[cfg(unix)]
-#[test]
-fn the_hook_runs_plain_claude_when_cc_proxy_is_off() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = TempDir::new()?;
-    let guard = DaemonGuard::new(&temp, free_port());
-    let zsh = [("SHELL", std::ffi::OsStr::new("/bin/zsh"))];
-    for args in [&["shell", "install"][..], &["off"]] {
-        let output = run_isolated(&guard, &zsh, args)?;
-        assert!(output.status.success(), "{output:?}");
-    }
-
-    // Load the function the way the startup file does, then call it.
-    let cc_proxy_dir = assert_cmd::cargo::cargo_bin("cc-proxy")
-        .parent()
-        .ok_or("cc-proxy has no parent dir")?
-        .to_path_buf();
-    let path = std::env::join_paths(
-        [fake_claude(&temp)?, cc_proxy_dir]
-            .into_iter()
-            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-    )?;
-    let out = temp.path().join("args.txt");
-    let mut shell = std::process::Command::new("bash");
-    shell
-        .args(["--noprofile", "--norc"])
-        .arg("-c")
-        .arg(". \"$1\" && claude --resume abc -p 'hi there'")
-        .arg("sh")
-        .arg(temp.path().join("config/shell/claude.sh"))
-        .env("PATH", path)
-        .env("CLAUDE_ARGS_OUT", &out);
-    for (key, value) in &guard.env {
-        shell.env(key, value);
-    }
-    assert!(shell.status()?.success());
-
-    let recorded = std::fs::read_to_string(&out)?;
+    sandbox
+        .cmd()
+        .arg("stop")
+        .assert()
+        .success()
+        .stdout(contains("Couldn't switch Claude Code back"));
     assert_eq!(
-        recorded.lines().collect::<Vec<_>>(),
-        ["--resume", "abc", "-p", "hi there"]
+        std::fs::read_to_string(sandbox.settings_path()).unwrap(),
+        "{ not json"
     );
-    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn the_old_claude_command_removes_the_hook_and_says_what_to_do() {
+    let sandbox = Sandbox::new();
+    let zshrc = sandbox.temp.path().join(".zshrc");
+    let original = "export PATH=\"$HOME/bin:$PATH\"\n";
+    let hook = "[ -f '/x/claude.sh' ] && . '/x/claude.sh'  # cc-proxy shell hook\n";
+    std::fs::write(&zshrc, format!("{original}{hook}")).unwrap();
+
+    sandbox
+        .cmd()
+        .args(["claude", "-p", "hi"])
+        .assert()
+        .failure()
+        .stderr(contains("The shell hook is gone"))
+        .stderr(contains("~/.zshrc"))
+        .stderr(contains("run `claude` directly"));
+
+    assert_eq!(std::fs::read_to_string(zshrc).unwrap(), original);
+    assert!(!sandbox.settings_path().exists());
 }

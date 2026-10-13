@@ -1,4 +1,4 @@
-//! Questions on stdin and stdout, for `cc-proxy setup` and the login flows.
+//! Questions on stdin and stdout, for `cc-proxy start`, `cc-proxy use` and the login flows.
 //! Piped input answers them the same way a keyboard does.
 
 use std::io::{BufRead, Write};

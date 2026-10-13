@@ -17,7 +17,6 @@ use axum::{
     routing::get,
 };
 use cc_proxy::{
-    config::AliasProvider,
     monitor::{
         EndpointKind, MonitorHandle,
         remote::RemoteMonitor,
@@ -67,7 +66,7 @@ fn client() -> reqwest::Client {
 
 fn app(monitor: Option<MonitorHandle>) -> Router {
     app_with_features(
-        Arc::new(Registry::from_providers(AliasProvider::Codex, [])),
+        Arc::new(Registry::from_providers([])),
         monitor,
         AppFeatures {
             responses_api: false,

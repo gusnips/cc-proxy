@@ -27,7 +27,7 @@ use crate::{
     },
     registry::{Registry, normalize_incoming_model},
     request_identity::{CLAUDE_AGENT_HEADER, CLAUDE_PARENT_AGENT_HEADER, ConversationIdentity},
-    session::{self, SessionState},
+    session,
     traffic::{TrafficCaptureOptions, create_traffic_capture},
 };
 use axum::{
@@ -174,7 +174,7 @@ pub async fn serve_listener(
             ),
         ])),
     );
-    let app = app_with_monitor(Arc::new(Registry::with_default_alias()), monitor);
+    let app = app_with_monitor(Arc::new(Registry::new()), monitor);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -357,8 +357,10 @@ async fn handler_monitor(
     }
 }
 
+/// `version` lets `cc-proxy start`, `use` and `status` notice a proxy that is
+/// older than the binary after an upgrade.
 async fn healthz() -> Json<serde_json::Value> {
-    Json(json!({ "ok": true }))
+    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
 }
 
 async fn handler_opencode_account(State(state): State<Arc<AppState>>) -> Response {
@@ -424,9 +426,10 @@ async fn handler_models(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ModelsQuery>,
 ) -> Json<serde_json::Value> {
+    let route = crate::config::route();
     let mut data: Vec<Value> = state
         .registry
-        .all_supported_models()
+        .all_supported_models(route.target())
         .into_iter()
         .map(|(model, provider)| {
             json!({
@@ -994,18 +997,13 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
     };
     let now = current_millis();
     let session_state = session::existing_session(session_id.as_deref(), now);
-    let affinity = session_state
-        .as_ref()
-        .and_then(|session| session.affinity_provider.as_ref());
+    let route = crate::config::route();
     let Some(provider) = state
         .registry
-        .provider_for_model(&normalized_model, affinity)
+        .provider_for_model(&normalized_model, route.target())
     else {
         let response = OpenAiError::invalid(
-            format!(
-                "Unknown model \"{normalized_model}\". {}",
-                state.registry.unknown_model_message()
-            ),
+            state.registry.unroutable_model_message(&normalized_model),
             Some("model"),
         )
         .response();
@@ -1032,13 +1030,8 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
     {
         crate::providers::codex::clear_session_compaction(session_id);
     }
-    let current = session::record_session_request(
-        session_id.as_deref(),
-        session_state.as_ref(),
-        provider.name(),
-        &normalized_model,
-        now,
-    );
+    let current =
+        session::record_session_request(session_id.as_deref(), session_state.as_ref(), now);
     let effort = parsed
         .as_ref()
         .and_then(|parsed| {
@@ -1226,18 +1219,13 @@ async fn handler_chat_completions(
     };
     let now = current_millis();
     let session_state = session::existing_session(session_id.as_deref(), now);
-    let affinity = session_state
-        .as_ref()
-        .and_then(|session| session.affinity_provider.as_ref());
+    let route = crate::config::route();
     let Some(provider) = state
         .registry
-        .provider_for_model(&normalized_model, affinity)
+        .provider_for_model(&normalized_model, route.target())
     else {
         let response = OpenAiError::invalid(
-            format!(
-                "Unknown model \"{normalized_model}\". {}",
-                state.registry.unknown_model_message()
-            ),
+            state.registry.unroutable_model_message(&normalized_model),
             Some("model"),
         )
         .response();
@@ -1266,13 +1254,8 @@ async fn handler_chat_completions(
     {
         crate::providers::codex::clear_session_compaction(session_id);
     }
-    let current = session::record_session_request(
-        session_id.as_deref(),
-        session_state.as_ref(),
-        provider.name(),
-        &normalized_model,
-        now,
-    );
+    let current =
+        session::record_session_request(session_id.as_deref(), session_state.as_ref(), now);
     let effort = translated
         .as_ref()
         .and_then(|translated| translated.effort.clone())
@@ -1659,17 +1642,11 @@ async fn dispatch_request(
 
     let mut normalized_model = normalize_incoming_model(model);
     body.model = Some(normalized_model.clone());
-    let session_state = if let Some(session_id) = session_id.as_deref() {
-        session::existing_session(Some(session_id), now)
-    } else {
-        None
-    };
-    let session_affinity = session_state
-        .as_ref()
-        .and_then(|state| state.affinity_provider.as_ref());
+    let session_state = session::existing_session(session_id.as_deref(), now);
+    let route = crate::config::route();
     let original_provider = state
         .registry
-        .provider_for_model(&normalized_model, session_affinity);
+        .provider_for_model(&normalized_model, route.target());
     let configured_auto_review_model = crate::config::auto_review_model();
     let auto_review_route = original_provider.as_ref().and_then(|provider| {
         apply_auto_review_model(
@@ -1685,7 +1662,9 @@ async fn dispatch_request(
     }
 
     let provider = if auto_review_route.is_some() {
-        state.registry.provider_for_model(&normalized_model, None)
+        state
+            .registry
+            .provider_for_model(&normalized_model, route.target())
     } else {
         original_provider
     };
@@ -1703,10 +1682,7 @@ async fn dispatch_request(
             let response = json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
-                format!(
-                    "Unknown model \"{normalized_model}\". {}",
-                    state.registry.unknown_model_message()
-                ),
+                state.registry.unroutable_model_message(&normalized_model),
             );
             log_request_completed(
                 &log,
@@ -1770,14 +1746,8 @@ async fn dispatch_request(
         .ok()
         .flatten()
         .map(str::to_string);
-    let current = session::record_session_request_with_affinity_update(
-        session_id.as_deref(),
-        session_state.as_ref(),
-        provider.name(),
-        &normalized_model,
-        auto_review_route.is_none(),
-        now,
-    );
+    let current =
+        session::record_session_request(session_id.as_deref(), session_state.as_ref(), now);
     if let Some(monitor) = state.monitor.as_ref() {
         if let Some(current) = current.as_ref() {
             monitor.session_sequence_resolved(&req_id, current.seq);
@@ -2271,11 +2241,6 @@ fn set_mode(path: &Path, mode: u32) {
     {
         let _ = (path, mode);
     }
-}
-
-#[allow(dead_code)]
-fn _unused(session_state: Option<&SessionState>) {
-    let _ = session_state;
 }
 
 #[cfg(test)]

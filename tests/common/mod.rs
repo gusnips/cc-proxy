@@ -83,6 +83,37 @@ impl Drop for EnvGuard {
     }
 }
 
+/// Routing on for one provider, in a config dir of its own. Keep the value
+/// for the whole test: dropping it puts the environment back.
+pub struct Routed {
+    // Fields drop in this order: the environment is restored while the lock
+    // is still held.
+    _env: EnvGuard,
+    config: tempfile::TempDir,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Routed {
+    /// What `cc-proxy use` writes, as the proxy reads it on the next request.
+    pub fn set(&self, on: bool, provider: &str) {
+        let route = json!({"route": {"on": on, "provider": provider}});
+        std::fs::write(self.config.path().join("config.json"), route.to_string()).unwrap();
+    }
+}
+
+pub fn routed_to(provider: &str) -> Routed {
+    let lock = env_lock();
+    let config = tempfile::tempdir().unwrap();
+    let env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let routed = Routed {
+        _env: env,
+        config,
+        _lock: lock,
+    };
+    routed.set(true, provider);
+    routed
+}
+
 /// Send `POST /v1/messages` through the in-process app. The registry is built
 /// here, after the caller set its environment: some providers read their
 /// config when they are built.
@@ -95,7 +126,7 @@ pub async fn call_messages_body_with_headers(body: Value, headers: &[(&str, &str
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
-    app(Arc::new(Registry::with_default_alias()))
+    app(Arc::new(Registry::new()))
         .oneshot(request.body(Body::from(body.to_string())).unwrap())
         .await
         .unwrap()

@@ -47,7 +47,7 @@ async fn call_messages_body(body: Value) -> Response {
 
 async fn call_responses_body(body: Value) -> Response {
     let _no_proxy_env = EnvGuard::set("NO_PROXY", "127.0.0.1,localhost");
-    app_with_options(Arc::new(Registry::with_default_alias()), None, true)
+    app_with_options(Arc::new(Registry::new()), None, true)
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -1046,7 +1046,7 @@ async fn codex_standalone_search_uses_conversation_identity_owner() {
 
 #[tokio::test]
 async fn smoke_healthz_returns_ok() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -1064,7 +1064,10 @@ async fn smoke_healthz_returns_ok() {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap();
-    assert_eq!(body, json!({"ok": true}));
+    assert_eq!(
+        body,
+        json!({"ok": true, "version": env!("CARGO_PKG_VERSION")})
+    );
 }
 
 #[tokio::test]
@@ -1081,7 +1084,7 @@ async fn smoke_codex_model_routes_to_real_provider() {
 
 #[test]
 fn smoke_kimi_model_is_registered() {
-    let registry = Registry::with_default_alias();
+    let registry = Registry::new();
     let provider = registry.provider_for_model("kimi-for-coding", None);
     assert!(
         provider.is_some(),

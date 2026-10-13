@@ -171,9 +171,8 @@ fn model_resolution_accepts_legacy_cursor_agent() {
 #[test]
 fn registry_routes_cursor_model_to_cursor_provider() {
     use cc_proxy::Registry;
-    use cc_proxy::config::AliasProvider;
 
-    let registry = Registry::new(AliasProvider::Codex);
+    let registry = Registry::new();
     let provider = registry.provider_for_model("cursor:gpt-5.5", None);
     assert!(provider.is_some());
     assert_eq!(provider.unwrap().name(), "cursor");
@@ -647,9 +646,8 @@ fn sse_message_delta_contains_usage() {
 #[test]
 fn registry_provider_for_legacy_cursor_model() {
     use cc_proxy::Registry;
-    use cc_proxy::config::AliasProvider;
 
-    let registry = Registry::new(AliasProvider::Codex);
+    let registry = Registry::new();
 
     // Legacy models
     for model in &[

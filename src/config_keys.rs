@@ -18,8 +18,6 @@ enum ConfigKind {
     Port,
     /// true/false (also 1/0, yes/no, on/off).
     Bool,
-    /// One of a fixed set.
-    Provider,
     /// Codex auto-review effort, or off to inherit ordinary effort.
     AutoReviewEffort,
     /// Codex tier, validated by the request translator.
@@ -38,8 +36,6 @@ struct ConfigKey {
     blurb: &'static str,
 }
 
-const PROVIDERS: &[&str] = &["codex", "kimi"];
-
 static CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         path: "port",
@@ -56,13 +52,6 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "listener address",
     },
     ConfigKey {
-        path: "aliasProvider",
-        kind: ConfigKind::Provider,
-        env: &["CCP_ALIAS_PROVIDER"],
-        default: Some("codex"),
-        blurb: "provider for bare model IDs (codex|kimi)",
-    },
-    ConfigKey {
         path: "autoReviewModel",
         kind: ConfigKind::Str,
         env: &["CCP_AUTO_REVIEW_MODEL"],
@@ -75,27 +64,6 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         env: &["CCP_AUTO_REVIEW_EFFORT"],
         default: None,
         blurb: "effort for routed Codex security reviews (none|low|medium|high|xhigh|max; off inherits)",
-    },
-    ConfigKey {
-        path: "claude.enabled",
-        kind: ConfigKind::Bool,
-        env: &[],
-        default: Some("true"),
-        blurb: "plain `claude` uses the proxy, once `cc-proxy shell install` added the hook",
-    },
-    ConfigKey {
-        path: "claude.model",
-        kind: ConfigKind::Str,
-        env: &[],
-        default: None,
-        blurb: "model `cc-proxy claude` starts Claude Code on",
-    },
-    ConfigKey {
-        path: "claude.fastModel",
-        kind: ConfigKind::Str,
-        env: &[],
-        default: None,
-        blurb: "model for Claude Code's small background requests",
     },
     ConfigKey {
         path: "log.verbose",
@@ -238,17 +206,6 @@ fn parse_value(key: &ConfigKey, raw: &str) -> Result<serde_json::Value> {
             crate::providers::codex::translate::request::normalize_service_tier(value)?;
             Ok(serde_json::Value::String(value.to_string()))
         }
-        ConfigKind::Provider => {
-            let value = raw.trim().to_string();
-            if !PROVIDERS.contains(&value.as_str()) {
-                anyhow::bail!(
-                    "{} must be one of {}; got `{raw}`",
-                    key.path,
-                    PROVIDERS.join("|")
-                );
-            }
-            Ok(serde_json::Value::String(value))
-        }
     }
 }
 
@@ -388,11 +345,21 @@ pub fn run_config_list() -> Result<()> {
 /// Write one dotted key to config.json, keeping every other key. Returns
 /// the file written.
 pub(crate) fn write_value(path: &str, value: serde_json::Value) -> Result<std::path::PathBuf> {
+    write_values([(path, value)])
+}
+
+/// Write several dotted keys in one step, so a proxy that reads the file per
+/// request never sees half of the change.
+pub(crate) fn write_values<'a>(
+    values: impl IntoIterator<Item = (&'a str, serde_json::Value)>,
+) -> Result<std::path::PathBuf> {
     let mut root = read_file()?;
     if !root.is_object() {
         root = serde_json::json!({});
     }
-    set_dotted(&mut root, path, value);
+    for (path, value) in values {
+        set_dotted(&mut root, path, value);
+    }
     config::write_config_json_at(&paths::config_dir(), &root)
 }
 
@@ -510,10 +477,6 @@ mod tests {
         let flag = find_key("codex.fullLane").unwrap();
         assert_eq!(parse_value(flag, "ON").unwrap(), serde_json::json!(true));
         assert!(parse_value(flag, "maybe").is_err());
-
-        let provider = find_key("aliasProvider").unwrap();
-        assert!(parse_value(provider, "kimi").is_ok());
-        assert!(parse_value(provider, "Muse").is_err());
 
         let secret = find_key("opencode.apiKey").unwrap();
         assert!(parse_value(secret, "  ").is_err());

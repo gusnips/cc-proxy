@@ -442,8 +442,8 @@ mod tests {
     #[test]
     fn wrapping_never_splits_a_command() {
         assert_eq!(
-            wrap("run `cc-proxy shell install` now", 12),
-            ["run", "`cc-proxy shell install`", "now"]
+            wrap("run `cc-proxy use claude` now", 12),
+            ["run", "`cc-proxy use claude`", "now"]
         );
     }
 
