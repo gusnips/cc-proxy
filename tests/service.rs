@@ -2,6 +2,7 @@
 // switches on and off in Claude Code's settings. Each test gets its own HOME,
 // config dir, state dir and port, so none of them touches the real ones.
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -56,6 +57,16 @@ impl Sandbox {
 
     fn sign_in(&self, provider: &str) {
         common::write_auth(&self.config_dir(), provider);
+    }
+
+    /// OpenCode Go signs in with a key in config.json, not an auth file.
+    fn sign_in_with_key(&self) {
+        std::fs::create_dir_all(self.config_dir()).unwrap();
+        std::fs::write(
+            self.config_dir().join("config.json"),
+            r#"{"opencode":{"apiKey":"test-key"}}"#,
+        )
+        .unwrap();
     }
 
     fn settings_path(&self) -> PathBuf {
@@ -302,6 +313,135 @@ fn use_switches_provider_and_claude_without_restarting_the_proxy() {
     sandbox.cmd().args(["use", "codex"]).assert().success();
     sandbox.assert_routed_to_proxy();
     assert_eq!(sandbox.pid(), pid);
+}
+
+#[test]
+fn use_asks_which_model_a_claude_name_gets_when_it_cannot_tell_and_asks_once() {
+    let sandbox = Sandbox::new();
+    sandbox.sign_in_with_key();
+
+    // OpenCode Go resells other vendors' models, so nothing in it is a sure
+    // match. Enter takes the guesses.
+    sandbox
+        .cmd()
+        .args(["use", "opencode"])
+        .write_stdin("\n")
+        .assert()
+        .success()
+        .stdout(contains("Use these?"))
+        .stdout(contains("Claude Code goes to OpenCode Go"));
+    let kept = sandbox.route()["tiers"]["opencode"].clone();
+    for tier in ["fable", "opus", "sonnet", "haiku"] {
+        assert!(kept[tier].is_string(), "{tier} was not kept: {kept}");
+    }
+
+    // The answer is kept, so the next `use` has nothing left to ask.
+    sandbox
+        .cmd()
+        .args(["use", "opencode"])
+        .assert()
+        .success()
+        .stdout(contains("Use these?").not());
+}
+
+#[test]
+fn use_keeps_nothing_when_nobody_answers_the_model_question() {
+    let sandbox = Sandbox::new();
+    sandbox.sign_in_with_key();
+
+    sandbox
+        .cmd()
+        .args(["use", "opencode"])
+        .write_stdin("")
+        .assert()
+        .success()
+        .stdout(contains("Use these?"))
+        .stdout(contains("No answer"));
+    assert!(
+        sandbox.route().get("tiers").is_none(),
+        "{}",
+        sandbox.route()
+    );
+    sandbox.assert_routed_to_proxy();
+}
+
+#[test]
+fn use_takes_an_api_key_for_a_provider_that_signs_in_with_one() {
+    let sandbox = Sandbox::new();
+
+    // Not signed in: it offers to, and the key line is the second answer.
+    sandbox
+        .cmd()
+        .args(["use", "glm"])
+        .write_stdin("y\ntest-key\n")
+        .assert()
+        .success()
+        .stdout(contains("GLM isn't signed in. Sign in now?"))
+        .stdout(contains("Claude Code goes to GLM"));
+    sandbox.assert_routed_to_proxy();
+    assert_eq!(sandbox.route()["provider"], "glm");
+}
+
+#[test]
+fn models_map_shows_chooses_and_resets_a_claude_name() {
+    let sandbox = Sandbox::new();
+
+    sandbox
+        .cmd()
+        .args(["models", "map", "--provider", "grok"])
+        .assert()
+        .success()
+        .stdout(contains("Claude names on Grok:"))
+        .stdout(contains(
+            "haiku   grok-composer-2.5-fast (picked by cc-proxy)",
+        ));
+
+    sandbox
+        .cmd()
+        .args(["models", "map", "Opus", "grok-4.5", "--provider", "grok"])
+        .assert()
+        .success()
+        .stdout(contains("opus    grok-4.5 (your choice)"));
+    assert_eq!(sandbox.route()["tiers"]["grok"]["opus"], "grok-4.5");
+
+    sandbox
+        .cmd()
+        .args(["models", "map", "opus", "--reset", "--provider", "grok"])
+        .assert()
+        .success()
+        .stdout(contains("opus    grok-4.7 (picked by cc-proxy)"));
+    assert!(sandbox.route().is_null(), "{}", sandbox.route());
+}
+
+#[test]
+fn models_map_names_what_is_wrong_with_what_you_typed() {
+    let sandbox = Sandbox::new();
+
+    sandbox
+        .cmd()
+        .args([
+            "models",
+            "map",
+            "opus",
+            "no-such-model",
+            "--provider",
+            "grok",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("doesn't serve a model called `no-such-model`"));
+    sandbox
+        .cmd()
+        .args(["models", "map", "gemini", "grok-4.5", "--provider", "grok"])
+        .assert()
+        .failure()
+        .stderr(contains("fable, opus, sonnet, haiku"));
+    sandbox
+        .cmd()
+        .args(["models", "map"])
+        .assert()
+        .failure()
+        .stderr(contains("Name a provider with `--provider`"));
 }
 
 #[test]

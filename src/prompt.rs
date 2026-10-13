@@ -95,16 +95,22 @@ pub fn choose(question: &str, options: &[String], default: usize) -> Result<usiz
 
 /// A yes/no question. Enter, or input that has ended, takes `default`.
 pub fn confirm(question: &str, default: bool) -> Result<bool> {
+    Ok(ask_yes_no(question, default)?.unwrap_or(default))
+}
+
+/// Like `confirm`, but `None` when the input has ended, for a question whose
+/// answer gets saved: no answer is not a yes.
+pub fn ask_yes_no(question: &str, default: bool) -> Result<Option<bool>> {
     let hint = if default { "[Y/n]" } else { "[y/N]" };
     loop {
         print!("{question} {hint} ");
         let Some(answer) = read_line()? else {
-            return Ok(default);
+            return Ok(None);
         };
         match answer.to_ascii_lowercase().as_str() {
-            "" => return Ok(default),
-            "y" | "yes" => return Ok(true),
-            "n" | "no" => return Ok(false),
+            "" => return Ok(Some(default)),
+            "y" | "yes" => return Ok(Some(true)),
+            "n" | "no" => return Ok(Some(false)),
             _ => println!("Answer y or n."),
         }
     }

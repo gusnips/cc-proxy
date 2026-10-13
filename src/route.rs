@@ -18,7 +18,9 @@ use crate::ui::{self, Mood};
 use crate::{claude_settings, config, config_keys, daemon};
 
 /// The providers `start` and `use` can send Claude Code to.
-pub const PROVIDERS: [&str; 2] = ["codex", "kimi"];
+pub const PROVIDERS: [&str; 7] = [
+    "codex", "kimi", "cursor", "grok", "copilot", "glm", "opencode",
+];
 
 /// What `cc-proxy use` takes to mean "no routing".
 pub const CLAUDE: &str = "claude";
