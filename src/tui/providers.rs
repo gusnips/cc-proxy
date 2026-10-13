@@ -65,7 +65,7 @@ impl ProvidersPanel {
 /// Sends the sign-in states at once, then the same rows with usage added:
 /// reading usage asks each provider, and can take seconds.
 fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
-    let registry = Registry::with_default_alias();
+    let registry = Registry::new();
     let mut rows: Vec<ProviderRow> = registry
         .list_provider_names()
         .into_iter()
@@ -169,8 +169,8 @@ pub fn render_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, panel: &Provid
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::raw("  "),
-        Span::styled("cc-proxy setup", Style::default().fg(WHITE)),
-        Span::styled(" adds a provider  ", Style::default().fg(DIM)),
+        Span::styled("cc-proxy use <provider>", Style::default().fg(WHITE)),
+        Span::styled(" signs in and switches  ", Style::default().fg(DIM)),
         Span::styled("Esc", Style::default().fg(TEAL)),
         Span::styled(" close", Style::default().fg(DIM)),
     ]));
@@ -239,7 +239,7 @@ mod tests {
             "API key set",
             "Kimi",
             "not set up",
-            "cc-proxy setup",
+            "cc-proxy use <provider>",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in\n{text}");
         }

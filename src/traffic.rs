@@ -4,7 +4,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use crate::config::AliasProvider;
 use crate::logging::REDACT_KEYS;
 use crate::paths;
 use crate::providers::codex::translate::reasoning_signature::is_proxy_reasoning_signature;
@@ -470,11 +469,6 @@ fn set_mode(path: &Path, mode: u32) {
             let _ = fs::set_permissions(path, perm);
         }
     }
-}
-
-#[allow(dead_code)]
-fn _provider_alias(_provider: &str) -> Option<AliasProvider> {
-    None
 }
 
 #[cfg(test)]

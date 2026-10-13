@@ -1022,7 +1022,7 @@ fn render_sessions(
             "Sessions",
             focused,
             "No sessions yet",
-            "Run `cc-proxy claude` and its requests group here.",
+            "Open Claude Code and its requests group here.",
         );
         return;
     }
@@ -1912,9 +1912,9 @@ pub fn setup_text(port: u16, registry: &Registry) -> String {
         .collect::<Vec<_>>()
         .join("  ");
     [
-        "Use the proxy for new Claude Code sessions:".to_string(),
-        "cc-proxy on".to_string(),
-        "Or start one session: cc-proxy claude".to_string(),
+        "Send Claude Code through the proxy:".to_string(),
+        "cc-proxy start".to_string(),
+        "Switch provider: cc-proxy use <provider>".to_string(),
         String::new(),
         format!(
             "Proxy: {}",
@@ -2776,14 +2776,14 @@ mod tests {
     fn setup_overlay_counts_wrapped_paths_before_placing_the_commands() {
         for path in ["folder/".repeat(20), "配置/".repeat(30)] {
             let setup = format!(
-                "Logs: /{path}proxy.log\nConfig: /{path}config.json\n\nUse the proxy:\ncc-proxy on"
+                "Logs: /{path}proxy.log\nConfig: /{path}config.json\n\nUse the proxy:\ncc-proxy start"
             );
             for (width, height) in [(120, 40), (80, 24)] {
                 let screen = draw(width, height, |frame| {
                     render_setup_overlay(frame, frame.area(), &setup)
                 });
                 let text = buffer_text(&screen);
-                assert!(text.contains("cc-proxy on"), "{text}");
+                assert!(text.contains("cc-proxy start"), "{text}");
                 assert!(text.contains("toggle setup"), "{text}");
             }
         }

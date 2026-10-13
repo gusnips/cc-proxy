@@ -1,10 +1,13 @@
 use anyhow::Result;
 use cc_proxy::{
-    config, daemon, logging,
+    config, daemon, legacy_hook, logging,
     monitor::MonitorHandle,
     paths,
-    registry::{ANTHROPIC_STYLE_ALIASES, Registry},
+    registry::Registry,
+    route,
     server::{self, ServerConfig},
+    start_flow::{self, Pick},
+    tiers,
     tui::{self, MonitorExit, MonitorUiConfig},
     ui::{self, Mood},
 };
@@ -31,38 +34,32 @@ struct Cli {
 enum Commands {
     /// Print version information
     Version,
-    /// Sign in to a provider, pick your models and get ready to run claude
-    Setup,
-    /// Start Claude Code on the proxy, passing every argument to claude
-    #[command(disable_help_flag = true)]
+    /// Old shell functions still call this. It removes the hook and says what to do next
+    #[command(hide = true, disable_help_flag = true)]
     Claude {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
     },
-    /// Add or remove the hook that sends plain `claude` through cc-proxy
-    Shell {
-        #[command(subcommand)]
-        command: ShellCommand,
-    },
-    /// Send plain `claude` through the proxy, setting up the shell hook if needed
-    On,
-    /// Use your saved Claude Code connection again
-    Off,
-    /// Start the proxy as a background service (default)
+    /// Start the proxy as a background service and send Claude Code through it (default)
     #[command(alias = "serve")]
     Start {
         #[arg(long)]
         port: Option<u16>,
-        /// Run in the foreground without the monitor dashboard
+        /// Only serve, in the foreground. Leaves Claude Code's settings alone
         #[arg(long = "no-monitor", action = ArgAction::SetTrue)]
         no_monitor: bool,
-        /// Run in the foreground with the monitor dashboard attached
+        /// Run in the foreground with the monitor dashboard. Quitting it switches routing off
         #[arg(long, conflicts_with = "no_monitor", action = ArgAction::SetTrue)]
         monitor: bool,
     },
-    /// Stop the background proxy service
+    /// Switch where Claude Code goes: a provider, or `claude` for your own subscription
+    Use {
+        /// codex, kimi or claude. Leave it out to pick from a list
+        target: Option<String>,
+    },
+    /// Switch routing off and stop the background proxy service
     Stop,
-    /// Show whether the background proxy service is running
+    /// Show whether the proxy is running and where Claude Code goes
     Status,
     /// Restart the background proxy service
     Restart {
@@ -83,6 +80,8 @@ enum Commands {
     Models {
         #[arg(long)]
         full: bool,
+        #[command(subcommand)]
+        command: Option<ModelsCommand>,
     },
     /// View or change config.json values
     Config {
@@ -153,11 +152,20 @@ enum ProviderGroup {
 }
 
 #[derive(Debug, Subcommand)]
-enum ShellCommand {
-    /// Add the hook to your shell's startup file (zsh, bash or fish)
-    Install,
-    /// Remove the hook and turn cc-proxy off for plain `claude`
-    Uninstall,
+enum ModelsCommand {
+    /// Show or choose the model each Claude name (fable, opus, sonnet, haiku) uses
+    Map {
+        /// The Claude name to choose a model for
+        name: Option<String>,
+        /// The model it should use
+        model: Option<String>,
+        /// Forget your choice and let cc-proxy pick again
+        #[arg(long)]
+        reset: bool,
+        /// The provider to change. Defaults to the one Claude Code goes to now
+        #[arg(long)]
+        provider: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -201,19 +209,16 @@ fn run() -> Result<()> {
         monitor: false,
     });
 
+    if heals_first(&commands) {
+        route::heal();
+    }
+
     match commands {
         Commands::Version => {
             println!("cc-proxy {}", VERSION);
             Ok(())
         }
-        Commands::Setup => cc_proxy::setup::run(),
-        Commands::Claude { args } => cc_proxy::claude::run(args),
-        Commands::Shell { command } => match command {
-            ShellCommand::Install => cc_proxy::shell::install(),
-            ShellCommand::Uninstall => cc_proxy::shell::uninstall(),
-        },
-        Commands::On => cc_proxy::shell::set(true),
-        Commands::Off => cc_proxy::shell::set(false),
+        Commands::Claude { .. } => old_claude_command(),
         Commands::Start {
             port,
             no_monitor,
@@ -224,71 +229,13 @@ fn run() -> Result<()> {
             }
             match select_serve_mode(no_monitor, monitor) {
                 ServeMode::Daemon => start_daemon(port),
-                ServeMode::Plain => {
-                    let bind_address = config::bind_address();
-                    let effective_port = port.unwrap_or_else(config::port);
-                    let registry = Registry::with_default_alias();
-                    let runtime = tokio::runtime::Builder::new_multi_thread()
-                        .enable_all()
-                        .build()?;
-                    print_server_banner(&bind_address, effective_port, &registry);
-                    runtime
-                        .block_on(run_service(ServerConfig {
-                            bind_address,
-                            port: effective_port,
-                            monitor: Some(MonitorHandle::default()),
-                        }))
-                        .map_err(|err| anyhow::anyhow!(err))
-                }
-                ServeMode::Monitor => {
-                    let bind_address = config::bind_address();
-                    let effective_port = port.unwrap_or_else(config::port);
-                    let registry = Registry::with_default_alias();
-                    let runtime = tokio::runtime::Builder::new_multi_thread()
-                        .enable_all()
-                        .build()?;
-                    let _stderr_guard = logging::suppress_stderr();
-                    let monitor = MonitorHandle::default();
-                    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-                    let (shutdown_complete_tx, shutdown_complete_rx) = std::sync::mpsc::channel();
-                    let listener = runtime
-                        .block_on(server::bind_proxy_listener(&bind_address, effective_port))?;
-                    let local_addr = listener.local_addr()?;
-                    let monitor_listen_url =
-                        listen_url(&local_addr.ip().to_string(), local_addr.port());
-                    let server_monitor = monitor.clone();
-                    let server_task = runtime.spawn(async move {
-                        let result =
-                            server::serve_listener(listener, Some(server_monitor), async move {
-                                let _ = shutdown_rx.await;
-                            })
-                            .await;
-                        let _ = shutdown_complete_tx.send(());
-                        result
-                    });
-                    let ui_result = tui::run_monitor(
-                        monitor,
-                        MonitorUiConfig {
-                            listen_url: monitor_listen_url,
-                            port: effective_port,
-                            registry: &registry,
-                            shutdown: Some(shutdown_tx),
-                            shutdown_complete: Some(shutdown_complete_rx),
-                        },
-                    );
-                    if matches!(&ui_result, Ok(MonitorExit::ForceQuit)) {
-                        server_task.abort();
-                        let _ = runtime.block_on(server_task);
-                        std::process::exit(130);
-                    }
-                    let server_result = runtime.block_on(server_task)?;
-                    ui_result?;
-                    server_result.map_err(|err| anyhow::anyhow!(err))
-                }
+                ServeMode::Plain => serve_plain(port),
+                ServeMode::Monitor => serve_with_monitor(port),
             }
         }
+        Commands::Use { target } => use_target(target.as_deref()),
         Commands::Demo => {
-            let registry = Registry::with_default_alias();
+            let registry = Registry::new();
             tui::run_mock_monitor(config::port(), &registry)
         }
         Commands::Monitor { url } => {
@@ -319,8 +266,26 @@ fn run() -> Result<()> {
             tui::run_attached_monitor(|| monitor.snapshot(), url.to_string())?;
             Ok(())
         }
-        Commands::Models { full } => {
-            print_models(&Registry::with_default_alias(), full);
+        Commands::Models {
+            command:
+                Some(ModelsCommand::Map {
+                    name,
+                    model,
+                    reset,
+                    provider,
+                }),
+            ..
+        } => cc_proxy::models_map::run(
+            name.as_deref(),
+            model.as_deref(),
+            reset,
+            provider.as_deref(),
+        ),
+        Commands::Models {
+            full,
+            command: None,
+        } => {
+            print_models(&Registry::new(), full);
             Ok(())
         }
         Commands::Config { command } => match command {
@@ -448,65 +413,288 @@ fn select_serve_mode(no_monitor: bool, monitor: bool) -> ServeMode {
     }
 }
 
-fn start_daemon(port: Option<u16>) -> Result<()> {
+/// Commands that check, before they run, that a routed Claude Code still has
+/// a proxy to talk to. The ones that start or stop the proxy do their own.
+fn heals_first(command: &Commands) -> bool {
+    !matches!(
+        command,
+        Commands::Start { .. }
+            | Commands::Stop
+            | Commands::Use { .. }
+            | Commands::Restart { .. }
+            | Commands::Version
+            | Commands::Demo
+            | Commands::Claude { .. }
+    )
+}
+
+/// What the old `claude` shell function runs. It has nothing left to start:
+/// take the function out, and say what to do.
+fn old_claude_command() -> Result<()> {
+    let removed = legacy_hook::remove()?;
+    let took_out = if removed.is_empty() {
+        String::new()
+    } else {
+        format!(" cc-proxy took it out of {}.", removed.join(", "))
+    };
+    anyhow::bail!(
+        "The shell hook is gone.{took_out} Run `unset -f claude` or open a new terminal, \
+         then run `claude` directly."
+    )
+}
+
+/// Remove the hook older versions added, returning a note when there was one.
+/// A file that can't be written is worth a note, not a failed start.
+fn remove_old_hook() -> Option<String> {
+    match legacy_hook::remove() {
+        Ok(files) if files.is_empty() => None,
+        Ok(files) => Some(format!(
+            "Removed the old `claude` hook from {}. Open a new terminal, or run \
+             `unset -f claude`.",
+            files.join(", ")
+        )),
+        Err(error) => Some(format!("Couldn't remove the old `claude` hook: {error:#}")),
+    }
+}
+
+/// A proxy that is up, and what to tell the user about it.
+struct Proxy {
+    /// Where Claude Code reaches it.
+    url: String,
+    port: u16,
+    lines: Vec<String>,
+}
+
+/// Start the background proxy, or take the one that already runs: ours, or
+/// one something else started (a Homebrew service).
+fn ensure_proxy(port: Option<u16>) -> Result<Proxy> {
+    if let daemon::DaemonStatus::Unmanaged { port: serving } = daemon::describe()
+        && port.is_none_or(|wanted| wanted == serving)
+    {
+        return Ok(Proxy {
+            url: daemon::client_url("127.0.0.1", serving),
+            port: serving,
+            lines: vec![
+                "cc-proxy is already running".into(),
+                format!(
+                    "It serves port {serving} and cc-proxy didn't start it, so `cc-proxy stop` \
+                     can't stop it."
+                ),
+            ],
+        });
+    }
     let label = format!(
         "starting cc-proxy on port {}",
         port.unwrap_or_else(config::port)
     );
-    match ui::waiting(&label, || daemon::serve_background(port))? {
-        daemon::ServeOutcome::AlreadyRunning(info) => {
-            let hint = match port {
-                Some(wanted) if wanted != info.port => format!(
-                    "It serves port {}, so `--port {wanted}` was ignored. Move it with \
+    Ok(
+        match ui::waiting(&label, || daemon::serve_background(port))? {
+            daemon::ServeOutcome::AlreadyRunning(info) => {
+                let mut lines = vec!["cc-proxy is already running".into(), address(&info)];
+                if let Some(wanted) = port.filter(|wanted| *wanted != info.port) {
+                    lines.push(format!(
+                        "It serves port {}, so `--port {wanted}` was ignored. Move it with \
                      `cc-proxy restart --port {wanted}`, or run a second one in the \
                      foreground with `cc-proxy start --no-monitor --port {wanted}`.",
-                    info.port,
-                ),
-                _ => "Restart it with `cc-proxy restart`.".to_string(),
-            };
-            ui::print_card(
-                Mood::Awake,
-                &["cc-proxy is already running".into(), address(&info), hint],
-            );
-        }
-        daemon::ServeOutcome::Started(info) => ui::print_card(
-            Mood::Awake,
-            &[
-                "cc-proxy started".into(),
-                address(&info),
-                format!("Logs go to {}", paths::log_file().display()),
-                "`cc-proxy on` makes plain `claude` use it. `cc-proxy claude` starts a \
-                 session now. `cc-proxy monitor` shows traffic; `cc-proxy stop` stops the service."
-                    .into(),
-            ],
-        ),
+                        info.port,
+                    ));
+                }
+                Proxy {
+                    url: info.listen_url(),
+                    port: info.port,
+                    lines,
+                }
+            }
+            daemon::ServeOutcome::Started(info) => Proxy {
+                url: info.listen_url(),
+                port: info.port,
+                lines: vec![
+                    "cc-proxy started".into(),
+                    address(&info),
+                    format!("Logs go to {}", paths::log_file().display()),
+                ],
+            },
+        },
+    )
+}
+
+/// Point Claude Code at the proxy for a provider, or back at Anthropic.
+fn set_route(pick: Pick, url: &str) -> Result<()> {
+    match pick {
+        Pick::Provider(provider) => route::activate(provider, url),
+        Pick::Claude => route::deactivate(),
     }
+}
+
+/// Where Claude Code goes now, and what to run to change that.
+fn route_lines(pick: Pick) -> Vec<String> {
+    let mut lines = route::status_lines();
+    if let Pick::Provider(provider) = pick {
+        lines.insert(
+            1,
+            "Windows that are already open follow within a few seconds.".into(),
+        );
+        let mappings = tiers::mapping(&Registry::new(), &config::route(), provider);
+        lines.splice(2..2, tiers::describe(&mappings));
+    }
+    lines
+}
+
+fn start_daemon(port: Option<u16>) -> Result<()> {
+    route::preflight()?;
+    let hook_note = remove_old_hook();
+    let pick = start_flow::pick(None)?;
+    let proxy = ensure_proxy(port)?;
+    set_route(pick, &proxy.url)?;
+
+    let mut lines = proxy.lines;
+    lines.extend(route_lines(pick));
+    lines.extend(route::version_note(proxy.port));
+    lines.extend(hook_note);
+    lines.push("`cc-proxy monitor` shows traffic. `cc-proxy stop` switches routing off.".into());
+    ui::print_card(Mood::Awake, &lines);
     Ok(())
+}
+
+/// `cc-proxy use`: switch where Claude Code goes, with the proxy kept running.
+fn use_target(target: Option<&str>) -> Result<()> {
+    route::preflight()?;
+    let pick = start_flow::pick(target)?;
+    let mut lines = Vec::new();
+    let mut proxy_port = None;
+    match pick {
+        Pick::Provider(_) => {
+            let proxy = ensure_proxy(None)?;
+            set_route(pick, &proxy.url)?;
+            proxy_port = Some(proxy.port);
+            lines.extend(proxy.lines);
+        }
+        Pick::Claude => route::deactivate()?,
+    }
+    lines.extend(route_lines(pick));
+    lines.extend(proxy_port.and_then(route::version_note));
+    ui::print_card(Mood::Awake, &lines);
+    Ok(())
+}
+
+/// Serve in the foreground and leave Claude Code's settings alone. This is
+/// what Homebrew and systemd run, so a reboot never routes anything.
+fn serve_plain(port: Option<u16>) -> Result<()> {
+    let bind_address = config::bind_address();
+    let effective_port = port.unwrap_or_else(config::port);
+    let registry = Registry::new();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    print_server_banner(&bind_address, effective_port, &registry);
+    runtime
+        .block_on(run_service(ServerConfig {
+            bind_address,
+            port: effective_port,
+            monitor: Some(MonitorHandle::default()),
+        }))
+        .map_err(|err| anyhow::anyhow!(err))
+}
+
+/// Serve in the foreground with the dashboard. Routing lasts as long as the
+/// dashboard does.
+fn serve_with_monitor(port: Option<u16>) -> Result<()> {
+    route::preflight()?;
+    if let Some(note) = remove_old_hook() {
+        ui::print_note(Mood::Awake, &[note]);
+    }
+    // Asked before the dashboard takes the screen.
+    let pick = start_flow::pick(None)?;
+    let bind_address = config::bind_address();
+    let effective_port = port.unwrap_or_else(config::port);
+    let registry = Registry::new();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let stderr_guard = logging::suppress_stderr();
+    let monitor = MonitorHandle::default();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let (shutdown_complete_tx, shutdown_complete_rx) = std::sync::mpsc::channel();
+    let listener = runtime.block_on(server::bind_proxy_listener(&bind_address, effective_port))?;
+    let local_addr = listener.local_addr()?;
+    let ip = local_addr.ip().to_string();
+    set_route(pick, &daemon::client_url(&ip, local_addr.port()))?;
+    let monitor_listen_url = listen_url(&ip, local_addr.port());
+    let server_monitor = monitor.clone();
+    let server_task = runtime.spawn(async move {
+        let result = server::serve_listener(listener, Some(server_monitor), async move {
+            let _ = shutdown_rx.await;
+        })
+        .await;
+        let _ = shutdown_complete_tx.send(());
+        result
+    });
+    let ui_result = tui::run_monitor(
+        monitor,
+        MonitorUiConfig {
+            listen_url: monitor_listen_url,
+            port: effective_port,
+            registry: &registry,
+            shutdown: Some(shutdown_tx),
+            shutdown_complete: Some(shutdown_complete_rx),
+        },
+    );
+    // The dashboard is gone, and so is the proxy: switch routing off before
+    // anything below can return early.
+    let routing_off = route::deactivate();
+    drop(stderr_guard);
+    if let Err(error) = &routing_off {
+        ui::eprint_note(
+            Mood::Unsure,
+            &[format!(
+                "Couldn't switch Claude Code back to your subscription: {error:#}"
+            )],
+        );
+    }
+    if matches!(&ui_result, Ok(MonitorExit::ForceQuit)) {
+        server_task.abort();
+        let _ = runtime.block_on(server_task);
+        std::process::exit(130);
+    }
+    let server_result = runtime.block_on(server_task)?;
+    ui_result?;
+    server_result.map_err(|err| anyhow::anyhow!(err))
 }
 
 fn address(info: &daemon::DaemonInfo) -> String {
     format!("{} · pid {}", info.listen_url(), info.pid)
 }
 
-/// How the proxy comes back after a stop.
-fn start_hint() -> String {
-    if cc_proxy::shell::plain_claude_uses_proxy() {
-        "Plain `claude` starts it again the next time you run it.".into()
-    } else {
-        "Start it with `cc-proxy start`.".into()
-    }
+fn start_hint() -> &'static str {
+    "Start it with `cc-proxy start`."
 }
 
 fn stop_daemon() -> Result<()> {
-    let lines = match ui::waiting("stopping cc-proxy", daemon::stop_service)? {
-        daemon::StopOutcome::NotRunning => vec!["cc-proxy is not running".into(), start_hint()],
-        daemon::StopOutcome::Stopped { pid } => vec![
-            "cc-proxy stopped".into(),
-            format!("pid {pid} has exited."),
-            start_hint(),
-        ],
+    // Routing goes off first, so Claude Code is back on your subscription even
+    // when the proxy is slow to stop or isn't ours to stop.
+    let routing_off = route::deactivate();
+    let (mood, mut lines) = match ui::waiting("stopping cc-proxy", daemon::stop_service)? {
+        daemon::StopOutcome::NotRunning => (Mood::Asleep, vec!["cc-proxy is not running".into()]),
+        daemon::StopOutcome::Stopped { pid } => (
+            Mood::Asleep,
+            vec!["cc-proxy stopped".into(), format!("pid {pid} has exited.")],
+        ),
+        daemon::StopOutcome::Unmanaged { port } => (
+            Mood::Unsure,
+            vec![
+                format!("Something answers on port {port}, but cc-proxy didn't start it"),
+                "Stop it with `brew services stop cc-proxy`, or stop that process yourself.".into(),
+            ],
+        ),
     };
-    ui::print_card(Mood::Asleep, &lines);
+    match &routing_off {
+        Ok(()) => lines.push("Claude Code uses your Claude subscription.".into()),
+        Err(error) => lines.push(format!(
+            "Couldn't switch Claude Code back to your subscription: {error:#}"
+        )),
+    }
+    lines.push(start_hint().into());
+    ui::print_card(mood, &lines);
     Ok(())
 }
 
@@ -517,32 +705,28 @@ fn daemon_status() -> Result<()> {
                 Some(up) => format!("cc-proxy is running · up {up}"),
                 None => "cc-proxy is running".into(),
             };
-            ui::print_card(
-                Mood::Awake,
-                &[
-                    headline,
-                    address(&info),
-                    cc_proxy::shell::plain_claude_line().into(),
-                ],
-            );
+            let mut lines = vec![headline, address(&info)];
+            lines.extend(route::status_lines());
+            lines.extend(route::version_note(info.port));
+            ui::print_card(Mood::Awake, &lines);
             Ok(())
         }
         daemon::DaemonStatus::Unmanaged { port } => {
-            ui::print_card(
-                Mood::Unsure,
-                &[
-                    format!("Something answers on port {port}, but cc-proxy didn't start it"),
-                    "It has no pidfile, so `cc-proxy stop` can't stop it. Stop that \
-                     process yourself."
-                        .into(),
-                ],
-            );
+            let mut lines = vec![
+                format!("Something answers on port {port}, but cc-proxy didn't start it"),
+                "It has no pidfile, so `cc-proxy stop` can't stop it. Stop that process \
+                 yourself, or with `brew services stop cc-proxy`."
+                    .into(),
+            ];
+            lines.extend(route::status_lines());
+            lines.extend(route::version_note(port));
+            ui::print_card(Mood::Unsure, &lines);
             Ok(())
         }
         daemon::DaemonStatus::Stopped => {
             ui::print_card(
                 Mood::Asleep,
-                &["cc-proxy is not running".into(), start_hint()],
+                &["cc-proxy is not running".into(), start_hint().into()],
             );
             std::process::exit(1);
         }
@@ -558,7 +742,12 @@ fn uptime(started_at: &str) -> Option<String> {
 
 fn restart_daemon(port: Option<u16>) -> Result<()> {
     let info = ui::waiting("restarting cc-proxy", || daemon::restart_service(port))?;
-    ui::print_card(Mood::Awake, &["cc-proxy restarted".into(), address(&info)]);
+    let mut lines = vec!["cc-proxy restarted".into(), address(&info)];
+    // A new port means Claude Code's settings point at the old one.
+    if route::refresh(&info.listen_url())? {
+        lines.push("Claude Code's settings now point at the new address.".into());
+    }
+    ui::print_card(Mood::Awake, &lines);
     Ok(())
 }
 
@@ -569,9 +758,7 @@ fn reload_daemon() -> Result<()> {
             &[
                 "config reloaded".into(),
                 "Settings from the file apply on the next request.".into(),
-                "Bind address, port, alias provider and environment variables need \
-                 `cc-proxy restart`."
-                    .into(),
+                "Bind address, port and environment variables need `cc-proxy restart`.".into(),
             ],
         ),
         daemon::ReloadOutcome::ValidatedOnly => ui::print_card(
@@ -588,7 +775,7 @@ fn reload_daemon() -> Result<()> {
                 Mood::Asleep,
                 &[
                     "cc-proxy is not running, but the config file is valid".into(),
-                    start_hint(),
+                    start_hint().into(),
                 ],
             );
             std::process::exit(1);
@@ -598,7 +785,7 @@ fn reload_daemon() -> Result<()> {
 }
 
 fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
-    let registry = Registry::with_default_alias();
+    let registry = Registry::new();
     let provider = registry
         .provider(name)
         .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
@@ -692,13 +879,7 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     }
     print_models(registry, false);
     println!();
-    println!("Run cc-proxy on to make plain claude use this proxy.");
-    println!("Or start one session now: cc-proxy claude");
-}
-
-#[allow(dead_code)]
-fn alias_names() -> usize {
-    ANTHROPIC_STYLE_ALIASES.len()
+    println!("This only serves. Run `cc-proxy start` to send Claude Code through a provider.");
 }
 
 #[cfg(test)]
@@ -731,10 +912,9 @@ mod tests {
             vec!["cc-proxy", "start", "--monitor"],
             vec!["cc-proxy", "start", "--no-monitor"],
             vec!["cc-proxy", "serve", "--no-monitor"],
-            vec!["cc-proxy", "shell", "install"],
-            vec!["cc-proxy", "shell", "uninstall"],
-            vec!["cc-proxy", "on"],
-            vec!["cc-proxy", "off"],
+            vec!["cc-proxy", "use"],
+            vec!["cc-proxy", "use", "kimi"],
+            vec!["cc-proxy", "use", "claude"],
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
         }
@@ -742,16 +922,25 @@ mod tests {
     }
 
     #[test]
-    fn claude_passes_every_argument_through() {
+    fn the_removed_commands_are_gone() {
+        for command in ["setup", "shell", "on", "off"] {
+            assert!(
+                Cli::try_parse_from(["cc-proxy", command]).is_err(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn old_claude_function_arguments_still_parse() {
         let cli = Cli::try_parse_from([
             "cc-proxy", "claude", "--resume", "abc", "-p", "hi", "-v", "--help", "--",
         ])
         .unwrap();
 
-        let Some(Commands::Claude { args }) = cli.command else {
-            panic!("expected the claude command");
-        };
-        assert_eq!(args, ["--resume", "abc", "-p", "hi", "-v", "--help", "--"]);
+        let command = cli.command.unwrap();
+        assert!(matches!(command, Commands::Claude { .. }));
+        assert!(!heals_first(&command));
     }
 
     #[test]

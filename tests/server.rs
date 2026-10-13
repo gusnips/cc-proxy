@@ -5,7 +5,6 @@ use axum::response::IntoResponse;
 use cc_proxy::{
     MessagesRequest,
     anthropic::MAX_ANTHROPIC_REQUEST_BYTES,
-    config::AliasProvider,
     monitor::{MonitorHandle, RequestStatus},
     provider::{CliHandlers, Generation, GenerationBody, Provider, ProviderError, RequestContext},
     registry::Registry,
@@ -18,6 +17,9 @@ use cc_proxy::{
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tower::util::ServiceExt;
+
+mod common;
+use common::routed_to;
 
 fn body_string(json: &str) -> Body {
     Body::from(json.to_string())
@@ -184,14 +186,13 @@ fn translating_registry(
     model: &'static str,
     captured: Arc<Mutex<Option<Value>>>,
 ) -> Arc<Registry> {
-    Arc::new(Registry::from_providers(
-        AliasProvider::Kimi,
-        vec![Arc::new(TranslatingProvider {
+    Arc::new(Registry::from_providers(vec![
+        Arc::new(TranslatingProvider {
             name,
             model,
             captured,
-        }) as Arc<dyn Provider>],
-    ))
+        }) as Arc<dyn Provider>,
+    ]))
 }
 
 type CapturedIdentity = (Option<ConversationIdentity>, Option<String>);
@@ -245,23 +246,20 @@ impl Provider for IdentityCaptureProvider {
 }
 
 fn routed_registry() -> Arc<Registry> {
-    Arc::new(Registry::from_providers(
-        AliasProvider::Kimi,
-        vec![
-            Arc::new(FakeProvider {
-                name: "kimi",
-                models: vec!["kimi-k2.6".to_string()],
-            }) as Arc<dyn Provider>,
-            Arc::new(FakeProvider {
-                name: "grok",
-                models: vec!["grok-4.5".to_string()],
-            }),
-            Arc::new(FakeProvider {
-                name: "cursor",
-                models: vec!["cursor".to_string()],
-            }),
-        ],
-    ))
+    Arc::new(Registry::from_providers(vec![
+        Arc::new(FakeProvider {
+            name: "kimi",
+            models: vec!["kimi-k2.6".to_string()],
+        }) as Arc<dyn Provider>,
+        Arc::new(FakeProvider {
+            name: "grok",
+            models: vec!["grok-4.5".to_string()],
+        }),
+        Arc::new(FakeProvider {
+            name: "cursor",
+            models: vec!["cursor".to_string()],
+        }),
+    ]))
 }
 
 async fn call_identity_ingress(
@@ -290,10 +288,7 @@ async fn messages_ingress_forwards_only_strict_conversation_identity() {
     let provider = Arc::new(IdentityCaptureProvider {
         captured: captured.clone(),
     }) as Arc<dyn Provider>;
-    let app = app(Arc::new(Registry::from_providers(
-        AliasProvider::Codex,
-        [provider],
-    )));
+    let app = app(Arc::new(Registry::from_providers([provider])));
     let normal_body = || {
         json!({
             "model": "gpt-5.5",
@@ -432,7 +427,7 @@ async fn invalid_bind_address_is_actionable() {
 
 #[tokio::test]
 async fn healthz_returns_ok() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -450,12 +445,15 @@ async fn healthz_returns_ok() {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap();
-    assert_eq!(body, json!({"ok": true}));
+    assert_eq!(
+        body,
+        json!({"ok": true, "version": env!("CARGO_PKG_VERSION")})
+    );
 }
 
 #[tokio::test]
 async fn invalid_json_request_is_json_error() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -479,7 +477,7 @@ async fn invalid_json_request_is_json_error() {
 
 #[tokio::test]
 async fn empty_body_is_invalid_json() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -495,7 +493,7 @@ async fn empty_body_is_invalid_json() {
 
 #[tokio::test]
 async fn unknown_model_returns_400_with_summary() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -552,12 +550,11 @@ async fn messages_response(app: axum::Router, model: &str) -> axum::response::Re
 #[tokio::test]
 async fn successful_response_carries_a_request_id() {
     let registry = || {
-        Arc::new(Registry::from_providers(
-            AliasProvider::Codex,
-            [Arc::new(IdentityCaptureProvider {
+        Arc::new(Registry::from_providers([
+            Arc::new(IdentityCaptureProvider {
                 captured: Arc::new(Mutex::new(Vec::new())),
-            }) as Arc<dyn Provider>],
-        ))
+            }) as Arc<dyn Provider>,
+        ]))
     };
     let first = messages_response(app(registry()), "gpt-5.5").await;
     let second = messages_response(app(registry()), "gpt-5.5").await;
@@ -571,8 +568,7 @@ async fn successful_response_carries_a_request_id() {
 // the record most worth correlating with a proxy log.
 #[tokio::test]
 async fn rejected_request_carries_a_request_id() {
-    let response =
-        messages_response(app(Arc::new(Registry::with_default_alias())), "not-a-model").await;
+    let response = messages_response(app(Arc::new(Registry::new())), "not-a-model").await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(!request_id(&response).is_empty());
@@ -590,7 +586,7 @@ async fn provider_failure_response_carries_a_request_id() {
 
 #[tokio::test]
 async fn missing_model_returns_400() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -643,7 +639,7 @@ fn padded_messages_body_without_model(total_len: usize) -> String {
 async fn messages_body_over_16mib_clears_size_gate() {
     const OLD_LIMIT: usize = 16 * 1024 * 1024;
     const { assert!(MAX_ANTHROPIC_REQUEST_BYTES > OLD_LIMIT) };
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -669,7 +665,7 @@ async fn messages_body_over_16mib_clears_size_gate() {
 
 #[tokio::test]
 async fn messages_body_at_limit_clears_size_gate() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -696,7 +692,7 @@ async fn messages_body_at_limit_clears_size_gate() {
 #[tokio::test]
 async fn anthropic_bodies_over_limit_return_request_too_large() {
     for path in ["/v1/messages", "/v1/messages/count_tokens"] {
-        let response = app(Arc::new(Registry::with_default_alias()))
+        let response = app(Arc::new(Registry::new()))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -718,7 +714,7 @@ async fn anthropic_bodies_over_limit_return_request_too_large() {
 
 #[tokio::test]
 async fn known_model_reaches_codex_provider() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -743,7 +739,7 @@ async fn known_model_reaches_codex_provider() {
 
 #[tokio::test]
 async fn count_tokens_routes_to_provider() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -768,7 +764,7 @@ async fn count_tokens_routes_to_provider() {
 
 #[tokio::test]
 async fn context_window_hint_is_removed_before_provider_dispatch() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -788,7 +784,8 @@ async fn context_window_hint_is_removed_before_provider_dispatch() {
 
 #[tokio::test]
 async fn opus_5_alias_routes_to_provider() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let _routed = routed_to("codex");
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -813,7 +810,7 @@ async fn image_routes_reject_variations_wrong_media_and_oversized_generation() {
         images_api: true,
         transcriptions_api: false,
     };
-    let variation = app_with_features(Arc::new(Registry::with_default_alias()), None, features)
+    let variation = app_with_features(Arc::new(Registry::new()), None, features)
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -825,7 +822,7 @@ async fn image_routes_reject_variations_wrong_media_and_oversized_generation() {
         .unwrap();
     assert_eq!(variation.status(), StatusCode::NOT_FOUND);
 
-    let wrong_media = app_with_features(Arc::new(Registry::with_default_alias()), None, features)
+    let wrong_media = app_with_features(Arc::new(Registry::new()), None, features)
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -838,7 +835,7 @@ async fn image_routes_reject_variations_wrong_media_and_oversized_generation() {
         .unwrap();
     assert_eq!(wrong_media.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 
-    let oversized = app_with_features(Arc::new(Registry::with_default_alias()), None, features)
+    let oversized = app_with_features(Arc::new(Registry::new()), None, features)
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -856,7 +853,7 @@ async fn image_routes_reject_variations_wrong_media_and_oversized_generation() {
 async fn monitor_tracks_image_endpoint_without_session_affinity() {
     let monitor = MonitorHandle::new(10);
     let app = app_with_features(
-        Arc::new(Registry::with_default_alias()),
+        Arc::new(Registry::new()),
         Some(monitor.clone()),
         AppFeatures {
             responses_api: false,
@@ -891,7 +888,7 @@ async fn monitor_tracks_image_endpoint_without_session_affinity() {
 #[tokio::test]
 async fn image_edit_accepts_multipart_and_validates_fields() {
     let app = app_with_features(
-        Arc::new(Registry::with_default_alias()),
+        Arc::new(Registry::new()),
         None,
         AppFeatures {
             responses_api: false,
@@ -937,7 +934,7 @@ async fn image_edit_accepts_multipart_and_validates_fields() {
 #[tokio::test]
 async fn image_routes_are_independently_opt_in() {
     let disabled = app_with_features(
-        Arc::new(Registry::with_default_alias()),
+        Arc::new(Registry::new()),
         None,
         AppFeatures {
             responses_api: false,
@@ -959,7 +956,7 @@ async fn image_routes_are_independently_opt_in() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     let enabled = app_with_features(
-        Arc::new(Registry::with_default_alias()),
+        Arc::new(Registry::new()),
         None,
         AppFeatures {
             responses_api: false,
@@ -984,7 +981,7 @@ async fn image_routes_are_independently_opt_in() {
 #[tokio::test]
 async fn transcription_route_is_independently_opt_in_and_validates_multipart() {
     let disabled = app_with_features(
-        Arc::new(Registry::with_default_alias()),
+        Arc::new(Registry::new()),
         None,
         AppFeatures {
             responses_api: false,
@@ -1005,7 +1002,7 @@ async fn transcription_route_is_independently_opt_in_and_validates_multipart() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     let enabled = app_with_features(
-        Arc::new(Registry::with_default_alias()),
+        Arc::new(Registry::new()),
         None,
         AppFeatures {
             responses_api: false,
@@ -1044,7 +1041,7 @@ async fn transcription_route_is_independently_opt_in_and_validates_multipart() {
 #[tokio::test]
 async fn transcription_route_rejects_non_audio_uploads() {
     let app = app_with_features(
-        Arc::new(Registry::with_default_alias()),
+        Arc::new(Registry::new()),
         None,
         AppFeatures {
             responses_api: false,
@@ -1075,7 +1072,7 @@ async fn transcription_route_rejects_non_audio_uploads() {
 
 #[tokio::test]
 async fn native_responses_route_is_disabled_by_default_option() {
-    let app = app_with_options(Arc::new(Registry::with_default_alias()), None, false);
+    let app = app_with_options(Arc::new(Registry::new()), None, false);
     let response = app
         .oneshot(
             Request::builder()
@@ -1093,7 +1090,7 @@ async fn native_responses_route_is_disabled_by_default_option() {
 
 #[tokio::test]
 async fn enabled_native_responses_route_uses_openai_errors() {
-    let app = app_with_options(Arc::new(Registry::with_default_alias()), None, true);
+    let app = app_with_options(Arc::new(Registry::new()), None, true);
     let response = app
         .oneshot(
             Request::builder()
@@ -1119,7 +1116,7 @@ async fn enabled_native_responses_route_uses_openai_errors() {
 
 #[tokio::test]
 async fn chat_completions_route_uses_responses_api_gate() {
-    let disabled = app_with_options(Arc::new(Registry::with_default_alias()), None, false);
+    let disabled = app_with_options(Arc::new(Registry::new()), None, false);
     let response = disabled
         .oneshot(
             Request::builder()
@@ -1135,7 +1132,7 @@ async fn chat_completions_route_uses_responses_api_gate() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    let enabled = app_with_options(Arc::new(Registry::with_default_alias()), None, true);
+    let enabled = app_with_options(Arc::new(Registry::new()), None, true);
     let response = enabled
         .oneshot(
             Request::builder()
@@ -1160,6 +1157,7 @@ async fn chat_completions_route_uses_responses_api_gate() {
 
 #[tokio::test]
 async fn openai_routes_select_non_codex_providers_and_aliases() {
+    let _routed = routed_to("kimi");
     for (uri, request, expected) in [
         (
             "/v1/chat/completions",
@@ -1207,6 +1205,80 @@ async fn openai_routes_select_non_codex_providers_and_aliases() {
         };
         assert_eq!(text, Some(expected));
     }
+}
+
+/// Ask `/v1/responses` for `model`. The fake providers answer with their own name.
+async fn responses_answer(app: &axum::Router, model: &str) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(body_string(
+                    &json!({"model": model, "input": "hello"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    let text = value["output"][0]["content"][0]["text"]
+        .as_str()
+        .or_else(|| value["error"]["message"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    (status, text)
+}
+
+#[tokio::test]
+async fn claude_names_follow_the_route_with_no_restart() {
+    let routed = routed_to("kimi");
+    let app = app_with_options(routed_registry(), None, true);
+
+    assert_eq!(
+        responses_answer(&app, "sonnet").await,
+        (StatusCode::OK, "kimi".to_string())
+    );
+
+    // `cc-proxy use grok` writes this file. The same app picks it up.
+    routed.set(true, "grok");
+    assert_eq!(
+        responses_answer(&app, "sonnet").await,
+        (StatusCode::OK, "grok".to_string())
+    );
+
+    // `cc-proxy stop` and `cc-proxy use claude` write this.
+    routed.set(false, "grok");
+    let (status, message) = responses_answer(&app, "sonnet").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(message.contains("routing is off"), "{message}");
+
+    // A model named in full never needed the route.
+    assert_eq!(
+        responses_answer(&app, "kimi-k2.6").await,
+        (StatusCode::OK, "kimi".to_string())
+    );
+}
+
+#[tokio::test]
+async fn routing_is_off_until_a_command_turns_it_on() {
+    // No config.json at all, which is a fresh install.
+    let _routed = routed_to("kimi");
+    std::fs::remove_file(
+        std::path::Path::new(&std::env::var("CCP_CONFIG_DIR").unwrap()).join("config.json"),
+    )
+    .unwrap();
+    let app = app_with_options(routed_registry(), None, true);
+
+    let (status, message) = responses_answer(&app, "claude-sonnet-4-5").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(message.contains("routing is off"), "{message}");
 }
 
 #[tokio::test]
@@ -1347,7 +1419,7 @@ async fn non_codex_validation_uses_openai_errors_before_generation() {
 
 #[tokio::test]
 async fn chat_completions_validation_returns_openai_parameter_errors() {
-    let app = app_with_options(Arc::new(Registry::with_default_alias()), None, true);
+    let app = app_with_options(Arc::new(Registry::new()), None, true);
     let response = app
         .oneshot(
             Request::builder()
@@ -1374,7 +1446,7 @@ async fn chat_completions_validation_returns_openai_parameter_errors() {
 
 #[tokio::test]
 async fn unknown_routes_use_anthropic_not_found_error() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let response = app
         .oneshot(
             Request::builder()
@@ -1397,10 +1469,7 @@ async fn unknown_routes_use_anthropic_not_found_error() {
 #[tokio::test]
 async fn monitor_records_successful_request_events() {
     let monitor = MonitorHandle::new(10);
-    let app = app_with_monitor(
-        Arc::new(Registry::with_default_alias()),
-        Some(monitor.clone()),
-    );
+    let app = app_with_monitor(Arc::new(Registry::new()), Some(monitor.clone()));
     let response = app
         .oneshot(
             Request::builder()
@@ -1445,10 +1514,7 @@ async fn monitor_records_successful_request_events() {
 #[tokio::test]
 async fn monitor_records_invalid_json_failure() {
     let monitor = MonitorHandle::new(10);
-    let app = app_with_monitor(
-        Arc::new(Registry::with_default_alias()),
-        Some(monitor.clone()),
-    );
+    let app = app_with_monitor(Arc::new(Registry::new()), Some(monitor.clone()));
     let response = app
         .oneshot(
             Request::builder()
@@ -1472,10 +1538,7 @@ async fn monitor_records_invalid_json_failure() {
 #[tokio::test]
 async fn monitor_records_unknown_model_failure() {
     let monitor = MonitorHandle::new(10);
-    let app = app_with_monitor(
-        Arc::new(Registry::with_default_alias()),
-        Some(monitor.clone()),
-    );
+    let app = app_with_monitor(Arc::new(Registry::new()), Some(monitor.clone()));
     let response = app
         .oneshot(
             Request::builder()
@@ -1521,7 +1584,7 @@ async fn get_models(app: axum::Router, uri: &str) -> (StatusCode, Value) {
 
 #[tokio::test]
 async fn models_endpoint_lists_supported_models() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let (status, value) = get_models(app, "/v1/models").await;
 
     assert_eq!(status, StatusCode::OK);
@@ -1540,27 +1603,49 @@ async fn models_endpoint_lists_supported_models() {
 }
 
 #[tokio::test]
-async fn models_endpoint_includes_claude_prefixed_aliases_for_discovery() {
+async fn models_endpoint_leads_with_claude_names_while_routing_is_on() {
     // Claude Code's gateway model discovery ignores ids that don't start with
-    // "claude" or "anthropic", so the alias entries are what make
+    // "claude" or "anthropic", so these entries are what make
     // CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 useful at all.
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let _routed = routed_to("codex");
+    let app = app(Arc::new(Registry::new()));
     let (status, value) = get_models(app, "/v1/models?limit=1000").await;
 
     assert_eq!(status, StatusCode::OK);
-    let ids: Vec<&str> = value["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["id"].as_str().unwrap())
-        .collect();
-    assert!(ids.iter().any(|id| id.starts_with("claude-")));
-    assert!(ids.contains(&"claude-opus-5"));
+    let data = value["data"].as_array().unwrap();
+    let ids: Vec<&str> = data.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        ids[..4],
+        [
+            "claude-fable",
+            "claude-opus",
+            "claude-sonnet",
+            "claude-haiku"
+        ]
+    );
+    let label = data[1]["display_name"].as_str().unwrap();
+    assert!(label.starts_with("Opus: "), "{label}");
+    assert!(label.ends_with("(codex)"), "{label}");
+}
+
+#[tokio::test]
+async fn models_endpoint_has_no_claude_names_while_routing_is_off() {
+    let routed = routed_to("codex");
+    routed.set(false, "codex");
+    let app = app(Arc::new(Registry::new()));
+    let (status, value) = get_models(app, "/v1/models?limit=1000").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let data = value["data"].as_array().unwrap();
+    assert!(
+        data.iter()
+            .all(|m| !m["id"].as_str().unwrap().starts_with("claude-"))
+    );
 }
 
 #[tokio::test]
 async fn models_endpoint_respects_limit() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let (status, value) = get_models(app, "/v1/models?limit=2").await;
 
     assert_eq!(status, StatusCode::OK);
@@ -1572,7 +1657,7 @@ async fn models_endpoint_respects_limit() {
 
 #[tokio::test]
 async fn models_endpoint_tolerates_unknown_query_params() {
-    let app = app(Arc::new(Registry::with_default_alias()));
+    let app = app(Arc::new(Registry::new()));
     let (status, _) = get_models(app, "/v1/models?limit=1000&after_id=x").await;
     assert_eq!(status, StatusCode::OK);
 }

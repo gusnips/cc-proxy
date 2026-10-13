@@ -127,6 +127,11 @@ impl Provider for KimiProvider {
         KIMI_MODELS.iter().map(|s| s.to_string()).collect()
     }
 
+    /// `kimi-for-coding` is the older line; every Claude name means the newest.
+    fn catalog(&self) -> Vec<String> {
+        vec![KIMI_DEFAULT_MODEL.to_string()]
+    }
+
     fn cli(&self) -> &'static dyn CliHandlers {
         &KIMI_CLI
     }

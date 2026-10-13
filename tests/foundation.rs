@@ -2,7 +2,7 @@ use cc_proxy::anthropic::{
     encode_sse_event, parse_sse_events, parse_sse_events_with_stats, schema::MessagesRequest,
 };
 use cc_proxy::auth::{AuthStorage, InMemoryAuthStore};
-use cc_proxy::config::{AliasProvider, load_config_for_env};
+use cc_proxy::config::load_config_for_env;
 use cc_proxy::logging::{create_logger, redact_value};
 use cc_proxy::paths::{self, DirResolverEnv};
 use cc_proxy::retry::{RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_MS, compute_backoff_delay};
@@ -270,25 +270,6 @@ fn config_env_precedence_and_defaults() {
 
     env.insert("PORT".to_string(), "19999".to_string());
     assert_eq!(load_config_for_env(&env).port, 19999);
-
-    env.insert("CCP_ALIAS_PROVIDER".to_string(), "kimi".to_string());
-    assert!(matches!(
-        load_config_for_env(&env).alias_provider,
-        AliasProvider::Kimi
-    ));
-}
-
-#[test]
-fn alias_provider_has_expected_default() {
-    let config = TempDir::new().unwrap();
-    let env = HashMap::from([(
-        "CCP_CONFIG_DIR".to_string(),
-        config.path().to_string_lossy().into_owned(),
-    )]);
-    assert!(matches!(
-        load_config_for_env(&env).alias_provider,
-        AliasProvider::Codex
-    ));
 }
 
 #[test]

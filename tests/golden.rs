@@ -143,7 +143,6 @@ impl Provider {
 /// Settings from the developer's shell that would change what a provider
 /// sends or how it answers.
 const CLEARED_ENV: &[&str] = &[
-    "CCP_ALIAS_PROVIDER",
     "CCP_TRAFFIC_LOG",
     "CCP_USER_AGENT",
     "CCP_CODEX_MODEL",

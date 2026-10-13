@@ -1,16 +1,14 @@
 use crate::{
     anthropic::{json_error, schema::MessagesRequest},
-    config::AliasProvider,
     provider::{CliHandlers, Provider, RequestContext},
     providers::codex::translate::model_allowlist::advertised_models,
+    tiers::TIERS,
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use axum::{http::StatusCode, response::Response};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-
-pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &["haiku", "sonnet", "opus", "fable"];
 
 pub const CURSOR_PREFIXES: &[&str] = &["cursor:", "cursor-plan:", "cursor-ask:"];
 
@@ -33,13 +31,18 @@ pub(crate) const GLM_MODELS: &[&str] =
     &["glm-5.3", "glm-5.3-flash", "glm-5.3-highspeed", "glm-5.2"];
 
 pub struct Registry {
-    alias_provider: AliasProvider,
     models: BTreeMap<String, Vec<String>>,
     handlers: BTreeMap<String, Arc<dyn Provider>>,
 }
 
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Registry {
-    pub fn new(alias_provider: AliasProvider) -> Self {
+    pub fn new() -> Self {
         let mut models: BTreeMap<String, Vec<String>> = BTreeMap::new();
         models.insert("codex".into(), advertised_models());
         models.insert(
@@ -82,21 +85,10 @@ impl Registry {
             handlers.insert(name.clone(), handler);
         }
 
-        Self {
-            alias_provider,
-            models,
-            handlers,
-        }
+        Self { models, handlers }
     }
 
-    pub fn with_default_alias() -> Self {
-        Self::new(crate::config::alias_provider())
-    }
-
-    pub fn from_providers(
-        alias_provider: AliasProvider,
-        providers: impl IntoIterator<Item = Arc<dyn Provider>>,
-    ) -> Self {
+    pub fn from_providers(providers: impl IntoIterator<Item = Arc<dyn Provider>>) -> Self {
         let mut models = BTreeMap::new();
         let mut handlers = BTreeMap::new();
         for provider in providers {
@@ -104,11 +96,7 @@ impl Registry {
             models.insert(name.clone(), provider.supported_models());
             handlers.insert(name, provider);
         }
-        Self {
-            alias_provider,
-            models,
-            handlers,
-        }
+        Self { models, handlers }
     }
 
     pub fn list_provider_names(&self) -> Vec<String> {
@@ -122,7 +110,23 @@ impl Registry {
     }
 
     pub fn supported_models_for(&self, provider: &str) -> Vec<String> {
-        let mut models = self.models.get(provider).cloned().unwrap_or_default();
+        let models = self.models.get(provider).cloned().unwrap_or_default();
+        self.routable(provider, models)
+    }
+
+    /// The models a Claude name can map to on this provider, in the form that
+    /// routes back to it.
+    pub fn catalog_for(&self, provider: &str) -> Vec<String> {
+        let models = self
+            .handlers
+            .get(provider)
+            .map(|handler| handler.catalog())
+            .unwrap_or_default();
+        self.routable(provider, models)
+    }
+
+    /// `models` for `provider`, sorted, without the ids another provider owns.
+    fn routable(&self, provider: &str, mut models: Vec<String>) -> Vec<String> {
         if provider == "opencode" {
             // Bare IDs owned by another provider's catalog stay with that
             // provider; only the `opencode-go/` qualified form selects the
@@ -139,13 +143,6 @@ impl Registry {
                 model.starts_with(crate::providers::opencode::model::MODEL_PREFIX)
                     || !claimed.contains(model.as_str())
             });
-        }
-        if provider == self.alias_provider.as_str() {
-            for alias in ANTHROPIC_STYLE_ALIASES {
-                if !models.iter().any(|value| value == alias) {
-                    models.push((*alias).to_string());
-                }
-            }
         }
         models.sort_unstable();
         models
@@ -169,11 +166,10 @@ impl Registry {
         out
     }
 
-    pub fn provider_for_model(
-        &self,
-        raw_model: &str,
-        session_affinity: Option<&AliasProvider>,
-    ) -> Option<Arc<dyn Provider>> {
+    /// The provider that serves `raw_model`. Claude's own names (`sonnet`,
+    /// `claude-opus-4-8`) serve nowhere until `tiers::resolve` turns them into
+    /// the model chosen for them.
+    pub fn provider_for_model(&self, raw_model: &str) -> Option<Arc<dyn Provider>> {
         let normalized = normalize_incoming_model(raw_model);
         // Any `copilot/` ID routes to GitHub Copilot, whose own `gpt-*` and
         // `claude-*` ids would otherwise collide with the native providers'.
@@ -186,10 +182,6 @@ impl Registry {
         // refresh on their side never breaks routing on ours.
         if normalized.starts_with(crate::providers::opencode::model::MODEL_PREFIX) {
             return self.handlers.get("opencode").cloned();
-        }
-        if is_anthropic_alias(&normalized) {
-            let target = session_affinity.unwrap_or(&self.alias_provider);
-            return self.handlers.get(target.as_str()).cloned();
         }
         if is_cursor_model(&normalized) {
             return self.handlers.get("cursor").cloned();
@@ -254,25 +246,25 @@ pub fn normalize_incoming_model(model: &str) -> String {
     model.to_string()
 }
 
+/// The tier a Claude name asks for: `sonnet`, `claude-sonnet`, or
+/// `claude-sonnet-<anything>` with any version or date after it.
 pub fn anthropic_model_family(model: &str) -> Option<&str> {
-    let family = if let Some(claude_model) = model.strip_prefix("claude-") {
-        let (family, suffix) = claude_model.split_once('-')?;
-        if suffix.is_empty()
-            || !suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
-        {
-            return None;
-        }
-        family
-    } else {
-        model
+    let family = match model.strip_prefix("claude-") {
+        None => model,
+        Some(claude_model) => match claude_model.split_once('-') {
+            None => claude_model,
+            Some((family, suffix)) => {
+                let plain = suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'));
+                if suffix.is_empty() || !plain {
+                    return None;
+                }
+                family
+            }
+        },
     };
-    ANTHROPIC_STYLE_ALIASES.contains(&family).then_some(family)
-}
-
-pub fn is_anthropic_alias(model: &str) -> bool {
-    anthropic_model_family(model).is_some()
+    TIERS.contains(&family).then_some(family)
 }
 
 pub fn is_cursor_model(model: &str) -> bool {
@@ -397,28 +389,21 @@ mod tests {
 
     #[test]
     fn codex_tier_routing_does_not_change_other_providers() {
-        let registry = Registry::new(AliasProvider::Kimi);
+        let registry = Registry::new();
         for model in [
             "gpt-6-astra-ultrafast",
             "gpt-6-astra-ultrafast[1m]",
             "gpt-9-unlisted-ultrafast",
         ] {
-            assert_eq!(
-                registry.provider_for_model(model, None).unwrap().name(),
-                "codex"
-            );
+            assert_eq!(registry.provider_for_model(model).unwrap().name(), "codex");
         }
         for (model, provider) in [
-            ("haiku", "kimi"),
             ("grok-9-ultrafast", "grok"),
             ("kimi-k9-fast", "kimi"),
             ("cursor:gpt-6-astra-ultrafast", "cursor"),
             ("opencode-go/gpt-6-astra-ultrafast", "opencode"),
         ] {
-            assert_eq!(
-                registry.provider_for_model(model, None).unwrap().name(),
-                provider
-            );
+            assert_eq!(registry.provider_for_model(model).unwrap().name(), provider);
         }
     }
 
@@ -429,77 +414,36 @@ mod tests {
     }
 
     #[test]
-    fn alias_routes_to_configured_provider() {
-        let registry = Registry::new(AliasProvider::Kimi);
-        let p = registry.provider_for_model("haiku", None);
-        assert!(p.is_some());
-        assert_eq!(p.expect("provider").name(), "kimi");
-    }
-
-    #[test]
-    fn opus_4_8_routes_to_configured_provider() {
-        let registry = Registry::new(AliasProvider::Codex);
-        let p = registry.provider_for_model("claude-opus-4-8", None);
-        assert!(p.is_some());
-        assert_eq!(p.expect("provider").name(), "codex");
-    }
-
-    #[test]
-    fn claude_5_aliases_route_to_configured_provider() {
-        let registry = Registry::new(AliasProvider::Codex);
-        for model in [
-            "claude-sonnet-5",
-            "claude-opus-5",
-            "claude-opus-5-5",
-            "fable",
-            "claude-fable-5",
-        ] {
-            let p = registry.provider_for_model(model, None);
-            assert!(p.is_some(), "{model} should route to a provider");
-            assert_eq!(p.expect("provider").name(), "codex");
-        }
-    }
-
-    #[test]
-    fn claude_versions_route_by_family_and_preserve_affinity() {
-        for (alias_provider, configured_provider) in [
-            (AliasProvider::Codex, "codex"),
-            (AliasProvider::Kimi, "kimi"),
-        ] {
-            let registry = Registry::new(alias_provider);
-            for family in ANTHROPIC_STYLE_ALIASES {
-                for model in [
-                    format!("claude-{family}-5-5"),
-                    format!("claude-{family}-99-7"),
-                    format!("claude-{family}-99.7"),
-                    format!("claude-{family}-latest"),
-                    format!("claude-{family}-99-7-20990101[1m]"),
-                ] {
-                    for (affinity, expected_provider) in [
-                        (None, configured_provider),
-                        (Some(&AliasProvider::Codex), "codex"),
-                        (Some(&AliasProvider::Kimi), "kimi"),
-                    ] {
-                        assert_eq!(
-                            registry
-                                .provider_for_model(&model, affinity)
-                                .map(|provider| provider.name()),
-                            Some(expected_provider),
-                            "{model}"
-                        );
-                    }
-                }
+    fn claude_names_belong_to_a_tier_whatever_follows_the_family() {
+        for tier in TIERS {
+            for model in [
+                tier.to_string(),
+                format!("claude-{tier}"),
+                format!("claude-{tier}-5-5"),
+                format!("claude-{tier}-99-7"),
+                format!("claude-{tier}-99.7"),
+                format!("claude-{tier}-latest"),
+                format!("claude-{tier}-99-7-20990101"),
+            ] {
+                assert_eq!(anthropic_model_family(&model), Some(tier), "{model}");
             }
         }
     }
 
     #[test]
+    fn claude_names_serve_nowhere_until_a_tier_resolves_them() {
+        let registry = Registry::new();
+        for model in ["sonnet", "claude-opus-4-8", "claude-haiku", "fable"] {
+            assert!(registry.provider_for_model(model).is_none(), "{model}");
+        }
+    }
+
+    #[test]
     fn claude_family_lookup_rejects_unrelated_and_incomplete_ids() {
-        let registry = Registry::new(AliasProvider::Codex);
+        let registry = Registry::new();
         for model in [
             "claude-sonnetwork-5-5",
             "claude-other-5-5",
-            "claude-sonnet",
             "claude-sonnet-",
             "claude-sonnet-99 7",
             "claude-sonnet-99/7",
@@ -507,10 +451,7 @@ mod tests {
             "definitely-not-a-model",
         ] {
             assert_eq!(anthropic_model_family(model), None, "{model}");
-            assert!(
-                registry.provider_for_model(model, None).is_none(),
-                "{model}"
-            );
+            assert!(registry.provider_for_model(model).is_none(), "{model}");
         }
         for (model, provider) in [
             ("copilot/claude-sonnet-5-5", "copilot"),
@@ -519,7 +460,7 @@ mod tests {
             assert_eq!(anthropic_model_family(model), None, "{model}");
             assert_eq!(
                 registry
-                    .provider_for_model(model, Some(&AliasProvider::Kimi))
+                    .provider_for_model(model)
                     .map(|provider| provider.name()),
                 Some(provider),
                 "{model}"
@@ -529,24 +470,24 @@ mod tests {
 
     #[test]
     fn cursor_prefix_routes() {
-        let registry = Registry::new(AliasProvider::Codex);
+        let registry = Registry::new();
         assert_eq!(
             registry
-                .provider_for_model("cursor:gpt-5.5", None)
+                .provider_for_model("cursor:gpt-5.5")
                 .unwrap()
                 .name(),
             "cursor"
         );
         assert_eq!(
             registry
-                .provider_for_model("cursor-plan:gpt-5.5", None)
+                .provider_for_model("cursor-plan:gpt-5.5")
                 .unwrap()
                 .name(),
             "cursor"
         );
         assert_eq!(
             registry
-                .provider_for_model("cursor-ask:gpt-5.5", None)
+                .provider_for_model("cursor-ask:gpt-5.5")
                 .unwrap()
                 .name(),
             "cursor"
@@ -555,50 +496,44 @@ mod tests {
 
     #[test]
     fn grok_4_7_routes_to_grok() {
-        let registry = Registry::new(AliasProvider::Codex);
+        let registry = Registry::new();
         assert_eq!(
-            registry
-                .provider_for_model("grok-4.7", None)
-                .unwrap()
-                .name(),
+            registry.provider_for_model("grok-4.7").unwrap().name(),
             "grok"
         );
     }
 
     #[test]
     fn gpt_6_sol_and_luna_route_to_codex() {
-        let registry = Registry::new(AliasProvider::Codex);
+        let registry = Registry::new();
         for model in ["gpt-6-sol", "gpt-6-sol-fast", "gpt-6-luna", "gpt-6.1-sol"] {
-            assert_eq!(
-                registry.provider_for_model(model, None).unwrap().name(),
-                "codex"
-            );
+            assert_eq!(registry.provider_for_model(model).unwrap().name(), "codex");
         }
     }
 
     #[test]
     fn unlisted_gpt_models_forward_to_codex_raw() {
-        let registry = Registry::new(AliasProvider::Codex);
+        let registry = Registry::new();
         for model in ["gpt-9-future", "gpt-9-future-fast"] {
             assert_eq!(
-                registry.provider_for_model(model, None).unwrap().name(),
+                registry.provider_for_model(model).unwrap().name(),
                 "codex",
                 "{model}"
             );
         }
         assert!(
             registry
-                .provider_for_model("definitely-not-a-model", None)
+                .provider_for_model("definitely-not-a-model")
                 .is_none()
         );
     }
 
     #[test]
     fn unlisted_prefixed_models_forward_to_native_providers() {
-        let registry = Registry::new(AliasProvider::Codex);
+        let registry = Registry::new();
         for (model, owner) in [("kimi-k9", "kimi"), ("grok-9", "grok"), ("glm-9", "glm")] {
             assert_eq!(
-                registry.provider_for_model(model, None).unwrap().name(),
+                registry.provider_for_model(model).unwrap().name(),
                 owner,
                 "{model}"
             );
@@ -606,7 +541,7 @@ mod tests {
         // IDs the OpenCode Go catalog resells still match the loop first.
         assert_eq!(
             registry
-                .provider_for_model("kimi-k2.7-code", None)
+                .provider_for_model("kimi-k2.7-code")
                 .unwrap()
                 .name(),
             "opencode"
@@ -615,14 +550,14 @@ mod tests {
 
     #[test]
     fn copilot_namespace_wins_over_the_native_ids_it_shares() {
-        let registry = Registry::new(AliasProvider::Codex);
+        let registry = Registry::new();
         for (model, owner) in [
             ("copilot/gpt-5.5", "copilot"),
             ("copilot/claude-opus-4.8", "copilot"),
             ("gpt-5.5", "codex"),
         ] {
             assert_eq!(
-                registry.provider_for_model(model, None).unwrap().name(),
+                registry.provider_for_model(model).unwrap().name(),
                 owner,
                 "{model}"
             );
@@ -631,17 +566,17 @@ mod tests {
 
     #[test]
     fn opencode_models_route_without_stealing_existing_provider_ids() {
-        let registry = Registry::new(AliasProvider::Codex);
+        let registry = Registry::new();
         assert_eq!(
             registry
-                .provider_for_model("kimi-k2.7-code", None)
+                .provider_for_model("kimi-k2.7-code")
                 .unwrap()
                 .name(),
             "opencode"
         );
         assert_eq!(
             registry
-                .provider_for_model("opencode-go/kimi-k2.6", None)
+                .provider_for_model("opencode-go/kimi-k2.6")
                 .unwrap()
                 .name(),
             "opencode"
@@ -649,23 +584,20 @@ mod tests {
         // Refreshed catalog entries behave the same way.
         assert_eq!(
             registry
-                .provider_for_model("deepseek-v4.1-flash", None)
+                .provider_for_model("deepseek-v4.1-flash")
                 .unwrap()
                 .name(),
             "opencode"
         );
         assert_eq!(
             registry
-                .provider_for_model("space-bunny-free", None)
+                .provider_for_model("space-bunny-free")
                 .unwrap()
                 .name(),
             "opencode"
         );
         assert_eq!(
-            registry
-                .provider_for_model("kimi-k2.6", None)
-                .unwrap()
-                .name(),
+            registry.provider_for_model("kimi-k2.6").unwrap().name(),
             "kimi"
         );
         for (model, owner) in [
@@ -676,13 +608,10 @@ mod tests {
             ("grok-4.7", "grok"),
             ("kimi-k3", "kimi"),
         ] {
-            assert_eq!(
-                registry.provider_for_model(model, None).unwrap().name(),
-                owner
-            );
+            assert_eq!(registry.provider_for_model(model).unwrap().name(), owner);
             assert_eq!(
                 registry
-                    .provider_for_model(&format!("opencode-go/{model}"), None)
+                    .provider_for_model(&format!("opencode-go/{model}"))
                     .unwrap()
                     .name(),
                 "opencode"
@@ -694,7 +623,7 @@ mod tests {
     fn opencode_prefix_routes_unknown_models_upstream() {
         // IDs OpenCode Go adds on their side keep routing here even before
         // the local catalog learns them; their API reports unknown IDs.
-        let registry = Registry::new(AliasProvider::Codex);
+        let registry = Registry::new();
         for model in [
             "opencode-go/some-future-model",
             "opencode-go/grok-5",
@@ -703,22 +632,18 @@ mod tests {
             "opencode-go/gpt-6-sol[1m]",
         ] {
             assert_eq!(
-                registry.provider_for_model(model, None).unwrap().name(),
+                registry.provider_for_model(model).unwrap().name(),
                 "opencode",
                 "{model}"
             );
         }
         // Bare unknown IDs still have no provider.
-        assert!(
-            registry
-                .provider_for_model("some-future-model", None)
-                .is_none()
-        );
+        assert!(registry.provider_for_model("some-future-model").is_none());
     }
 
     #[test]
     fn opencode_lists_only_unconflicted_bare_ids() {
-        let registry = Registry::new(AliasProvider::Codex);
+        let registry = Registry::new();
         let models = registry.supported_models_for("opencode");
         for id in [
             "gpt-5.6-luna",
@@ -759,14 +684,14 @@ mod tests {
 
     #[test]
     fn glm_model_routes_to_glm_provider() {
-        let registry = Registry::new(AliasProvider::Codex);
+        let registry = Registry::new();
         for model in ["glm-5.3", "glm-5.3-flash", "glm-5.2"] {
-            let p = registry.provider_for_model(model, None);
+            let p = registry.provider_for_model(model);
             assert!(p.is_some(), "{model} should route to a provider");
             assert_eq!(p.expect("provider").name(), "glm");
         }
         // The [1m] compaction hint is stripped before routing.
-        let p = registry.provider_for_model("glm-5.2[1m]", None);
+        let p = registry.provider_for_model("glm-5.2[1m]");
         assert_eq!(p.expect("provider").name(), "glm");
     }
 }

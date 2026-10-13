@@ -42,7 +42,7 @@ cc-proxy targets Claude Code's practical Anthropic API usage rather than complet
 
 - Local registration does not guarantee account access to a model.
 - Unknown model IDs have no implicit provider fallback.
-- Anthropic-style aliases route only to the configured Codex or Kimi alias provider.
+- Claude names (`opus`, `sonnet`, `haiku`, `fable`) are served only while routing is on, and only by the provider `cc-proxy start` or `use` picked.
 - `[1m]` is a Claude Code client hint and does not change upstream context.
 - Provider context limits can be lower than Claude Code's local threshold.
 - Switching provider or model can clear provider-specific continuation assumptions while Claude Code retains portable history.

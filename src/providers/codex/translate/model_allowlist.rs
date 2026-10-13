@@ -121,51 +121,25 @@ pub fn service_tier_for_model(model: &str, tier: ServiceTier) -> ServiceTier {
     }
 }
 
-/// The OpenAI family that plays the same role as a Claude family. Only the
-/// pairing lives here. Versions never do: `latest_in_family` finds them.
-fn openai_family(claude_family: &str) -> Option<&'static str> {
-    match claude_family {
-        "fable" => Some("astra"),
-        "opus" => Some("sol"),
-        "sonnet" => Some("terra"),
-        "haiku" => Some("luna"),
-        _ => None,
-    }
+/// The models a Claude name can map to: the baseline plus the listed
+/// API-supported models in the Codex CLI cache, without the local `-fast`
+/// copies of each. `crate::tiers` finds the newest of each family in it.
+pub fn tier_catalog() -> Vec<String> {
+    let mut models: Vec<String> = ALLOWED_MODELS
+        .iter()
+        .map(|model| (*model).to_string())
+        .chain(listed_catalog_models())
+        .collect();
+    models.sort_unstable();
+    models.dedup();
+    models
 }
 
-/// `gpt-<version>-<family>` as numeric parts, so 6.10 beats 6.9.
-fn gpt_version(slug: &str, family: &str) -> Option<Vec<u32>> {
-    slug.strip_prefix("gpt-")?
-        .strip_suffix(family)?
-        .strip_suffix('-')?
-        .split('.')
-        .map(|part| part.parse().ok())
-        .collect()
-}
-
-/// Highest-version `gpt-<version>-<family>` among `slugs`. Other names
-/// (`gpt-5.3-codex`, `gpt-6-sol-mini`, `gpt-5.5`) never match.
-fn latest_in_family<'a>(family: &str, slugs: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
-    slugs
-        .into_iter()
-        .filter_map(|slug| Some((gpt_version(slug, family)?, slug)))
-        .max_by(|(a, _), (b, _)| a.cmp(b))
-        .map(|(_, slug)| slug)
-}
-
-/// Newest model the proxy knows for a Claude family: baseline plus the
-/// listed API-supported models in the Codex CLI cache.
+/// Newest model the proxy knows for a Claude family.
 pub fn latest_for_claude_family(claude_family: &str) -> Option<String> {
-    let family = openai_family(claude_family)?;
-    let catalog = listed_catalog_models();
-    latest_in_family(
-        family,
-        ALLOWED_MODELS
-            .iter()
-            .copied()
-            .chain(catalog.iter().map(String::as_str)),
-    )
-    .map(str::to_string)
+    crate::tiers::derive(&tier_catalog(), false)
+        .remove(claude_family)
+        .map(|guess| guess.model)
 }
 
 fn resolve_model_alias(model: &str) -> ResolvedModel {
@@ -482,40 +456,25 @@ mod tests {
     }
 
     #[test]
-    fn latest_in_family_ranks_versions_as_numbers_within_one_family() {
-        let slugs = [
-            "gpt-5.6-sol",
-            "gpt-6-sol",
-            "gpt-6.9-sol",
-            "gpt-6.10-sol",
-            "gpt-7-terra",
-            "gpt-5.3-codex",
-            "gpt-6-sol-mini",
-            "gpt-x-sol",
-            "gpt--sol",
-            "gpt-5.5",
-            "claude-sol",
-        ];
-        assert_eq!(latest_in_family("sol", slugs), Some("gpt-6.10-sol"));
-        assert_eq!(latest_in_family("terra", slugs), Some("gpt-7-terra"));
-        assert_eq!(latest_in_family("astra", slugs), None);
-        // `luna` must not match the tail of a longer family name.
-        assert_eq!(latest_in_family("luna", ["gpt-9-moonluna"]), None);
-    }
-
-    #[test]
     fn baseline_covers_every_claude_family_with_its_newest_model() {
+        let baseline: Vec<String> = ALLOWED_MODELS.iter().map(|m| (*m).to_string()).collect();
+        let found = crate::tiers::derive(&baseline, false);
         for (claude_family, expected) in [
             ("fable", "gpt-6-astra"),
             ("opus", "gpt-6.1-sol"),
             ("sonnet", "gpt-5.6-terra"),
             ("haiku", "gpt-6-luna"),
         ] {
-            let family = openai_family(claude_family).unwrap();
-            let slugs = ALLOWED_MODELS.iter().copied();
-            assert_eq!(latest_in_family(family, slugs), Some(expected));
+            assert_eq!(found[claude_family].model, expected, "{claude_family}");
         }
-        assert_eq!(openai_family("claude"), None);
+    }
+
+    #[test]
+    fn the_tier_catalog_leaves_out_the_local_fast_copies() {
+        let catalog = tier_catalog();
+        assert!(catalog.contains(&"gpt-6-sol".to_string()));
+        assert!(catalog.iter().all(|model| !model.ends_with("-fast")));
+        assert!(catalog.iter().all(|model| !model.ends_with("-ultrafast")));
     }
 
     #[test]

@@ -67,7 +67,14 @@ impl DaemonStatus {
 #[derive(Debug, PartialEq, Eq)]
 pub enum StopOutcome {
     NotRunning,
-    Stopped { pid: u32 },
+    Stopped {
+        pid: u32,
+    },
+    /// Something answers on the port that `cc-proxy start` didn't start, such
+    /// as a Homebrew service. It is not ours to stop.
+    Unmanaged {
+        port: u16,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -280,31 +287,38 @@ pub fn describe() -> DaemonStatus {
     }
 }
 
+/// What a proxy on this port answers to `GET /healthz`, headers included, or
+/// `None` when nothing answers. A reply that stalls half way keeps what came.
+fn healthz(port: u16) -> Option<String> {
+    use std::io::{Read, Write};
+    let socket: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().ok()?;
+    let mut stream =
+        std::net::TcpStream::connect_timeout(&socket, Duration::from_millis(500)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    stream
+        .write_all(b"GET /healthz HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+        .ok()?;
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    (!response.is_empty()).then(|| String::from_utf8_lossy(&response).into_owned())
+}
+
 /// True when something answers `/healthz` with HTTP 200 on this port,
 /// whatever process it belongs to.
 pub fn probe_port_health(port: u16) -> bool {
-    use std::io::{Read, Write};
-    let socket: std::net::SocketAddr = match format!("127.0.0.1:{port}").parse() {
-        Ok(address) => address,
-        Err(_) => return false,
-    };
-    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&socket, Duration::from_millis(500))
-    else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-    if stream
-        .write_all(b"GET /healthz HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
-        .is_err()
-    {
-        return false;
-    }
-    let mut head = [0u8; 15];
-    match stream.read_exact(&mut head) {
-        Ok(()) => head.starts_with(b"HTTP/1.0 200") || head.starts_with(b"HTTP/1.1 200"),
-        Err(_) => false,
-    }
+    healthz(port).is_some_and(|response| {
+        response.starts_with("HTTP/1.0 200") || response.starts_with("HTTP/1.1 200")
+    })
+}
+
+/// The version a proxy on this port reports at `/healthz`. `None` when nothing
+/// answers, or when the proxy is old enough not to say.
+pub fn running_version(port: u16) -> Option<String> {
+    let response = healthz(port)?;
+    let (_, body) = response.split_once("\r\n\r\n")?;
+    let health: serde_json::Value = serde_json::from_str(body).ok()?;
+    health["version"].as_str().map(str::to_string)
 }
 
 /// Wait until the daemon answers health checks, watching for early exit of
@@ -390,10 +404,7 @@ pub fn serve_background(port: Option<u16>) -> anyhow::Result<ServeOutcome> {
 pub fn stop_service() -> anyhow::Result<StopOutcome> {
     let info = match describe() {
         DaemonStatus::Running(info) => info,
-        DaemonStatus::Unmanaged { port } => anyhow::bail!(
-            "a proxy answers on port {port} but has no pidfile, so it was not \
-             started by `cc-proxy start`. Stop that process directly."
-        ),
+        DaemonStatus::Unmanaged { port } => return Ok(StopOutcome::Unmanaged { port }),
         DaemonStatus::Stopped => return Ok(StopOutcome::NotRunning),
     };
     terminate_gracefully(info.pid)
@@ -563,8 +574,8 @@ async fn run_daemon_loop(
 }
 
 /// Re-read the config file on SIGHUP and log what changed. File-backed
-/// settings already apply on the next request; bind address, port,
-/// alias provider, and process environment need a restart.
+/// settings already apply on the next request; bind address, port and
+/// process environment need a restart.
 #[cfg(unix)]
 fn reload_notice(bind_address: &str, port: u16) {
     let fresh = config::load_config();
@@ -593,9 +604,7 @@ fn reload_notice(bind_address: &str, port: u16) {
     }
     fields.insert(
         "note".to_string(),
-        serde_json::Value::String(
-            "aliasProvider and environment changes apply on restart".to_string(),
-        ),
+        serde_json::Value::String("environment changes apply on restart".to_string()),
     );
     log.info("config reloaded", Some(fields));
 }

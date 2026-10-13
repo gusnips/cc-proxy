@@ -1,6 +1,6 @@
 [package]
 name = "cc-proxy"
-version = "0.1.56"
+version = "0.2.0"
 description = "Anthropic-compatible proxy for Claude Code provider backends"
 edition = "2024"
 authors = ["Claude Code Proxy contributors"]
@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }
 anyhow = "1.0"
 thiserror = "2.0"
 axum = { version = "0.8", features = ["macros", "multipart"] }

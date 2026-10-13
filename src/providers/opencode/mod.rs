@@ -207,6 +207,10 @@ impl Provider for OpenCodeProvider {
         advertised_models()
     }
 
+    fn aggregator(&self) -> bool {
+        true
+    }
+
     fn cli(&self) -> &'static dyn CliHandlers {
         &OPENCODE_CLI
     }

@@ -53,7 +53,6 @@ fn clear_proxy_environment() -> Vec<EnvGuard> {
 fn configure_codex(config_dir: &Path, base_url: &str) -> Vec<EnvGuard> {
     vec![
         EnvGuard::set("CCP_CONFIG_DIR", config_dir),
-        EnvGuard::set("CCP_ALIAS_PROVIDER", "codex"),
         EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket"),
         EnvGuard::set("CCP_CODEX_BASE_URL", base_url),
         EnvGuard::set("CCP_CODEX_PREVIOUS_RESPONSE_ID", "0"),
@@ -82,7 +81,7 @@ async fn call_messages(session_id: &str) -> (StatusCode, String) {
 }
 
 async fn call_messages_with_stream(session_id: &str, stream: bool) -> (StatusCode, String) {
-    let response = app(Arc::new(Registry::with_default_alias()))
+    let response = app(Arc::new(Registry::new()))
         .oneshot(
             Request::builder()
                 .method(Method::POST)

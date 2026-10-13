@@ -1,30 +1,14 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::paths;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AliasProvider {
-    Codex,
-    Kimi,
-}
-
-impl AliasProvider {
-    pub fn as_str(&self) -> &str {
-        match self {
-            AliasProvider::Codex => "codex",
-            AliasProvider::Kimi => "kimi",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
     pub bind_address: String,
     pub port: u16,
-    pub alias_provider: AliasProvider,
     pub log_verbose: bool,
     pub log_stderr: bool,
     pub config_dir: PathBuf,
@@ -35,8 +19,6 @@ struct FileConfig {
     #[serde(rename = "bindAddress")]
     pub bind_address: Option<String>,
     pub port: Option<u16>,
-    #[serde(rename = "aliasProvider")]
-    pub alias_provider: Option<String>,
     #[serde(rename = "autoReviewModel")]
     pub auto_review_model: Option<String>,
     #[serde(rename = "autoReviewEffort")]
@@ -48,7 +30,7 @@ struct FileConfig {
     pub grok: Option<GrokConfig>,
     pub opencode: Option<OpenCodeConfig>,
     pub glm: Option<GlmConfig>,
-    pub claude: Option<ClaudeConfig>,
+    pub route: Option<RouteConfig>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -132,27 +114,19 @@ struct GlmConfig {
     pub base_url: Option<String>,
 }
 
-/// What `cc-proxy claude` starts Claude Code on.
+/// Whether Claude Code is sent through the proxy, and to which provider.
 #[derive(Deserialize, Clone)]
-struct ClaudeConfig {
-    pub enabled: Option<bool>,
-    pub model: Option<String>,
-    #[serde(rename = "fastModel")]
-    pub fast_model: Option<String>,
+struct RouteConfig {
+    pub on: Option<bool>,
+    pub provider: Option<String>,
+    /// The user's own choices, provider then tier then model id.
+    pub tiers: Option<BTreeMap<String, BTreeMap<String, Option<String>>>>,
 }
 
 #[derive(Deserialize)]
 struct FileLog {
     pub verbose: Option<bool>,
     pub stderr: Option<bool>,
-}
-
-fn parse_alias(raw: &str) -> Option<AliasProvider> {
-    match raw {
-        "codex" => Some(AliasProvider::Codex),
-        "kimi" => Some(AliasProvider::Kimi),
-        _ => None,
-    }
 }
 
 fn read_file_config(config_dir: &Path) -> Option<FileConfig> {
@@ -203,7 +177,6 @@ fn load_config_from_env(env: &HashMap<String, String>, config_dir: PathBuf) -> L
     let mut out = LoadedConfig {
         bind_address: "127.0.0.1".to_string(),
         port: 18765,
-        alias_provider: AliasProvider::Codex,
         log_verbose: false,
         log_stderr: false,
         config_dir: config_dir.clone(),
@@ -213,18 +186,6 @@ fn load_config_from_env(env: &HashMap<String, String>, config_dir: PathBuf) -> L
         out.bind_address = raw.clone();
     } else if let Some(bind_address) = file.as_ref().and_then(|f| f.bind_address.clone()) {
         out.bind_address = bind_address;
-    }
-
-    if let Some(raw) = env.get("CCP_ALIAS_PROVIDER") {
-        if let Some(alias) = parse_alias(raw) {
-            out.alias_provider = alias;
-        }
-    } else if let Some(alias_provider) = file
-        .as_ref()
-        .and_then(|f| f.alias_provider.as_deref())
-        .and_then(parse_alias)
-    {
-        out.alias_provider = alias_provider;
     }
 
     if let Some(raw) = env.get("PORT") {
@@ -277,10 +238,6 @@ pub fn bind_address() -> String {
     load_config().bind_address
 }
 
-pub fn alias_provider() -> AliasProvider {
-    load_config().alias_provider
-}
-
 pub fn log_verbose() -> bool {
     load_config().log_verbose
 }
@@ -298,9 +255,6 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     }
     if env.contains_key("PORT") {
         out.push("port (env)".to_string());
-    }
-    if env.contains_key("CCP_ALIAS_PROVIDER") {
-        out.push("aliasProvider (env)".to_string());
     }
     if env.contains_key("CCP_LOG_VERBOSE") {
         out.push("log.verbose (env)".to_string());
@@ -394,9 +348,6 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
         }
         if let Some(p) = file_cfg.port {
             out.push(format!("port: {p}"));
-        }
-        if let Some(alias) = file_cfg.alias_provider {
-            out.push(format!("aliasProvider: {alias}"));
         }
         if file_cfg
             .auto_review_model
@@ -757,9 +708,9 @@ pub(crate) fn write_config_json_at(
     dir: &Path,
     root: &serde_json::Value,
 ) -> anyhow::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
     let path = dir.join("config.json");
-    std::fs::write(&path, serde_json::to_string_pretty(root)?)?;
+    // One step, so a proxy that reads the file per request never sees half of it.
+    crate::fsutil::write_atomic(&path, serde_json::to_string_pretty(root)?.as_bytes())?;
     Ok(path)
 }
 
@@ -1125,27 +1076,56 @@ pub fn codex_model() -> Option<String> {
     None
 }
 
-/// Whether plain `claude`, through the shell hook, uses the proxy. On unless
-/// `cc-proxy off` (or `shell uninstall`) wrote false.
-pub fn claude_enabled() -> bool {
-    read_file_config(&paths::config_dir())
-        .and_then(|file| file.claude?.enabled)
-        .unwrap_or(true)
+/// Where Claude Code's own model names go, read from config.json each time so
+/// `cc-proxy use` takes effect on the next request without a restart. Off
+/// unless `cc-proxy start` or `use` turned it on: a missing or unreadable
+/// file never routes anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Route {
+    pub on: bool,
+    /// The last provider picked. Kept when routing goes off, so `start` can offer it again.
+    pub provider: Option<String>,
+    /// The models the user chose for a Claude name: provider, then tier.
+    pub tiers: BTreeMap<String, BTreeMap<String, String>>,
 }
 
-/// Main model for `cc-proxy claude`. Unset, Claude Code picks its own and
-/// the proxy routes it like any other Claude model id.
-pub fn claude_model() -> Option<String> {
-    read_file_config(&paths::config_dir())
-        .and_then(|file| file.claude?.model)
-        .filter(|model| !model.is_empty())
+impl Route {
+    /// The provider Claude model names go to, or `None` while routing is off.
+    pub fn target(&self) -> Option<&str> {
+        self.provider.as_deref().filter(|_| self.on)
+    }
+
+    /// The model the user chose for `tier` on `provider`.
+    pub fn tier(&self, provider: &str, tier: &str) -> Option<&str> {
+        self.tiers.get(provider)?.get(tier).map(String::as_str)
+    }
 }
 
-/// Model for Claude Code's small background requests (titles, summaries).
-pub fn claude_fast_model() -> Option<String> {
-    read_file_config(&paths::config_dir())
-        .and_then(|file| file.claude?.fast_model)
-        .filter(|model| !model.is_empty())
+pub fn route() -> Route {
+    let Some(RouteConfig {
+        on,
+        provider,
+        tiers,
+    }) = read_file_config(&paths::config_dir()).and_then(|file| file.route)
+    else {
+        return Route::default();
+    };
+    let tiers = tiers
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(provider, chosen)| {
+            let chosen = chosen
+                .into_iter()
+                .filter_map(|(tier, model)| Some((tier, model.filter(|model| !model.is_empty())?)))
+                .collect();
+            (provider, chosen)
+        })
+        .collect();
+    Route {
+        on: on.unwrap_or(false),
+        provider: provider.filter(|name| !name.is_empty()),
+        tiers,
+    }
 }
 
 pub fn auto_review_model() -> Option<String> {
@@ -1498,6 +1478,24 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(root.get("opencode").is_none());
         assert!(!clear_opencode_api_key().unwrap());
+    }
+
+    #[test]
+    fn route_reads_the_users_tier_choices_and_skips_empty_ones() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set("CCP_CONFIG_DIR", dir.path());
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"route":{"on":true,"provider":"codex","tiers":{"codex":{"opus":"gpt-6-sol","haiku":""}}}}"#,
+        )
+        .unwrap();
+
+        let route = route();
+        assert_eq!(route.target(), Some("codex"));
+        assert_eq!(route.tier("codex", "opus"), Some("gpt-6-sol"));
+        assert_eq!(route.tier("codex", "haiku"), None);
+        assert_eq!(route.tier("kimi", "opus"), None);
     }
 
     #[test]

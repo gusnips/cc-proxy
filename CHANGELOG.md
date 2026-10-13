@@ -3,6 +3,76 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.0 (2026-10-13)
+
+This release replaces the shell hook with a setting that Claude Code reads
+everywhere. Some commands and config keys are gone. Read "Upgrading" below.
+
+- `cc-proxy start` now sends Claude Code through the proxy. It writes a few
+  lines to the `env` block of `~/.claude/settings.json` (or the folder
+  `CLAUDE_CONFIG_DIR` names). Claude Code reads that file again whenever it
+  changes, so windows that are already open follow within a few seconds,
+  and so do editors and new terminals. There is nothing to source and no
+  `exec zsh`.
+- `start` asks which provider when you are signed in to more than one, and
+  which one to sign in to when you aren't signed in to any. "Claude Code
+  subscription, no routing" is always on the list.
+- `cc-proxy use <provider>` switches provider with no restart. `use claude`
+  goes back to your Claude subscription and leaves the proxy running. All
+  seven providers work: Codex, Kimi, Cursor, Grok, GitHub Copilot, GLM and
+  OpenCode Go. `use glm` offers to sign in and reads the API key.
+- `cc-proxy stop` switches Claude Code back first, even when the proxy is
+  already dead, then stops it. Routing never comes back by itself. Before,
+  the next `claude` started the proxy again.
+- Switching off writes values that point back at Anthropic. It doesn't delete
+  the keys, because Claude Code never unsets a key it stops seeing.
+- Your own values are kept. `ANTHROPIC_BASE_URL` and
+  `CLAUDE_CODE_OAUTH_TOKEN` are saved under a `cc-proxy` key in the same file
+  and put back when routing turns off. A tuning switch you already set is
+  never touched. Key order, formatting and symlinks are kept. A file that
+  isn't valid JSON is never overwritten: `start` stops and names the problem.
+- If the proxy dies while routing is on (a crash, a reboot), the next
+  cc-proxy command notices, switches routing off and says so.
+- Claude names now follow the provider you picked. `opus`, `sonnet`, `haiku`,
+  `fable` and `claude-<name>` with any version map to a model that provider
+  offers today. cc-proxy reads the family word in each model ID (`sol`,
+  `terra`, `luna`, `flash`, ...) and takes the newest version, comparing
+  versions as numbers. It keeps no list of versions, so a new model counts
+  the day it is listed. Codex uses the same rules instead of its own copy.
+- When it can't tell which model a name should get, for example on OpenCode
+  Go, `start` shows its guesses and asks once. Your answer is saved.
+- `cc-proxy models map` shows which model each name uses and who decided it.
+  `cc-proxy models map opus gpt-6.1-sol` chooses one, and `--reset` undoes
+  it. It applies on the next request.
+- `/v1/models` starts with `claude-fable`, `claude-opus`, `claude-sonnet` and
+  `claude-haiku` while routing is on, so Claude Code's `/model` picker lists
+  them.
+- A missing or unreadable `config.json` now means routing is off. Before,
+  plain `claude` used the proxy in that case.
+- `/healthz` reports the proxy's version. `start`, `use` and `status` warn
+  when the running proxy is older than the installed binary, as it is after
+  `brew upgrade` until it restarts.
+- `start --no-monitor`, which Homebrew and systemd run, only serves. It never
+  touches `settings.json`, so a reboot never routes anything.
+- `status` warns when your settings pin a model, or hold an API key that
+  hides the limit reset time.
+
+### Upgrading
+
+- Run `cc-proxy start`. It removes the old shell hook from your startup file.
+  Then run `unset -f claude` or open a new terminal, and use `claude` as
+  usual.
+- Removed commands: `cc-proxy claude`, `on`, `off`, `shell install`,
+  `shell uninstall` and `setup`. `cc-proxy claude` still runs, but only to
+  remove the hook and say what to do.
+- Removed config keys: `claude.enabled`, `claude.model`, `claude.fastModel`,
+  `aliasProvider` and the variable `CCP_ALIAS_PROVIDER`. Use `cc-proxy use`
+  to pick the provider and `cc-proxy models map` to pick a model for a name.
+- Claude Code windows that are already open keep the old connection until you
+  restart them once. After that they follow every switch.
+- After `brew upgrade`, run `brew services restart cc-proxy` so the proxy
+  runs the new version.
+
 ## v0.1.56 (2026-10-12)
 
 - When a Codex usage window runs out, Claude Code now says so and shows when

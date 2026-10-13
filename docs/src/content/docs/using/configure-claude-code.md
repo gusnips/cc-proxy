@@ -1,60 +1,60 @@
 ---
 title: Configure Claude Code
-description: Set Claude Code client variables for cc-proxy without mixing them with CCP proxy configuration.
+description: What cc-proxy writes to Claude Code's settings.json, how it treats values you set yourself, and how to set the same variables by hand.
 ---
 
-Claude Code reads its API connection when the process starts. These variables belong to **Claude Code**, not to the proxy server.
+`cc-proxy start` and `cc-proxy use <provider>` send Claude Code to the proxy by editing one file: the `env` block of `~/.claude/settings.json`. If you set `CLAUDE_CONFIG_DIR`, cc-proxy edits `settings.json` in that folder instead.
 
-## The short way
+Claude Code reads this file again whenever it changes, in every open window. That is why a switch reaches terminals, editors and windows that are already running, with no shell hook and no restart.
 
-```sh
-cc-proxy claude
-```
+## What cc-proxy writes
 
-`cc-proxy claude` starts the proxy if it isn't running, then runs `claude` with your arguments. It passes the connection in one `--settings` flag for that session. If you pass your own `--settings` JSON or file, cc-proxy keeps those values and overrides only the proxy connection. No settings file is changed.
+| Key in `env`                                 | Value while routing is on | Why                                                                                                                                                                                                                                                                  |
+| -------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ANTHROPIC_BASE_URL`                         | `http://127.0.0.1:18765`  | Sends API requests to the proxy. The port follows your config.                                                                                                                                                                                                       |
+| `CLAUDE_CODE_OAUTH_TOKEN`                    | `unused`                  | Satisfies Claude Code's credential check, and keeps your real login token away from the proxy. The proxy never uses this value. Use it instead of `ANTHROPIC_AUTH_TOKEN`: with that one, Claude Code ignores usage-limit headers and can't show when a limit resets. |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`   | `1`                       | Cuts background traffic sent to the provider.                                                                                                                                                                                                                        |
+| `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK`  | `1`                       | Stops Claude Code from retrying a half-finished stream without streaming, which can run tool calls twice.                                                                                                                                                            |
+| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | `1`                       | Lets Claude Code's `/model` picker list `claude-opus`, `claude-sonnet`, `claude-haiku` and `claude-fable` from the proxy.                                                                                                                                            |
 
-Two config keys choose the models:
+cc-proxy keeps the order of your keys and the text of every value it doesn't change. If `settings.json` is a symlink, it writes to the file the link points to. If the file isn't valid JSON, `start` and `use` stop and say where the problem is. Nothing is overwritten.
 
-| Config key         | Sets                                                                                                           |
-| ------------------ | -------------------------------------------------------------------------------------------------------------- |
-| `claude.model`     | `ANTHROPIC_MODEL`, the model each session starts on. Unset, Claude Code picks its own and the proxy routes it. |
-| `claude.fastModel` | `ANTHROPIC_DEFAULT_HAIKU_MODEL`, the model for small background requests.                                      |
+## Values you set yourself
 
-```sh
-cc-proxy config set claude.model k3[1m]
-```
+- **`ANTHROPIC_BASE_URL` and `CLAUDE_CODE_OAUTH_TOKEN`.** cc-proxy takes these over while routing is on. It saves what you had under a top-level `cc-proxy` key in the same file, and puts it back when routing turns off.
+- **The three switches below them.** cc-proxy sets one only if you haven't. A value you wrote is never changed, in either direction.
+- **If you edit a key by hand while routing is on,** cc-proxy sees that your value differs from what it wrote and leaves it alone when routing turns off.
 
-`--model` on the command line still wins for that session.
+## Turning it off
 
-## Plain `claude` through the proxy
+`cc-proxy stop` and `cc-proxy use claude` don't delete the keys. Claude Code adds `env` values from this file but never removes one it stops seeing, so a deleted key would leave an open window pointed at the proxy. cc-proxy writes values that point back at Anthropic instead:
 
-```sh
-cc-proxy on
-```
+- `ANTHROPIC_BASE_URL` becomes `https://api.anthropic.com`, or your saved value.
+- `CLAUDE_CODE_OAUTH_TOKEN` becomes an empty string, or your saved value.
 
-`on` installs or refreshes the shell hook and turns the proxy connection on. You don't need a separate `shell install` command, environment exports or edits to `settings.json`.
+Your Claude Code login is used again right away.
 
-It adds one line to the file your shell reads when a terminal opens:
-`~/.zshrc` for zsh, `~/.bashrc` for bash on Linux, `~/.bash_profile` for bash
-on macOS. fish gets `~/.config/fish/functions/claude.fish` instead. That line
-defines a `claude` command that runs `cc-proxy claude` while cc-proxy is on,
-and plain Claude Code while it's off. It sets no environment variables, so
-nothing else on your machine sees the proxy.
+If the proxy stops without a `stop` (a crash, a reboot, `kill`), the next `cc-proxy` command notices that nothing answers and does the same. Until then, new Claude Code windows can't connect.
 
-```sh
-cc-proxy off   # use your saved Claude connection
-cc-proxy on    # use the proxy again
-```
+## Which model a Claude name gets
 
-`on` and `off` reach every terminal that has loaded the hook. In zsh and bash, an alias such as `alias claude='claude --dangerously-skip-permissions'` keeps its flags. You don't need to remove it.
+Claude Code asks for `opus`, `sonnet`, `haiku` and `fable`, or a longer name such as `claude-opus-4-8`. cc-proxy turns each into a model of the provider you picked. See [Models and routing](/using/models-and-routing/) and `cc-proxy models map`.
 
-After the first `on`, run `exec zsh` (or your shell's name) once in an existing terminal. New terminals load the hook themselves. A Claude Code session that's already open keeps its connection until you quit it. `off` stops adding proxy settings; it doesn't undo connection values you saved yourself. If you added proxy variables to `~/.claude/settings.json` by hand, remove those once to make `off` return to your normal login.
+If your `settings.json` pins a model (`ANTHROPIC_MODEL` or one of the `ANTHROPIC_DEFAULT_*_MODEL` keys), Claude Code sends that exact name. The proxy serves it as given. `cc-proxy status` warns about pinned names.
 
-`cc-proxy shell uninstall` removes the hook and turns cc-proxy off.
+## Limits
 
-The hook works with zsh, bash and fish. On Windows, run `cc-proxy claude`.
+- A window that was open before `settings.json` existed never sees changes. Restart it once.
+- A window that started on a plain Claude login keeps its feature flags after a switch. It keeps working. Restart it for the full set.
+- A project's `.claude/settings.json` beats the user file. If a project sets its own `ANTHROPIC_BASE_URL`, that project ignores cc-proxy.
+- `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `apiKeyHelper` take priority over the placeholder token. Claude Code then can't show limit reset times. `cc-proxy status` warns when any of them is set.
+- Claude Code and cc-proxy can write the file at the same moment. cc-proxy checks the file again right before it writes and tries once more. There is no lock.
+- Only the folder `CLAUDE_CONFIG_DIR` points to is managed.
+- Some hosts, such as the desktop app or an SDK, may protect or skip user-level `env`. There, set the variables yourself.
 
-## Minimal client contract
+## Set the variables yourself
+
+Use this to launch one session without `cc-proxy start`, or on a host that skips user-level `env`:
 
 ```sh
 ANTHROPIC_BASE_URL=http://127.0.0.1:18765 \
@@ -66,14 +66,9 @@ CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
   claude
 ```
 
-| Claude Code variable                          | Purpose                                                                                                                                                                                                                                                       |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ANTHROPIC_BASE_URL`                          | Sends Anthropic API requests to the local proxy.                                                                                                                                                                                                              |
-| `CLAUDE_CODE_OAUTH_TOKEN`                     | Satisfies Claude Code's credential check. The proxy does not use it for upstream auth. Use it instead of `ANTHROPIC_AUTH_TOKEN`: with that one Claude Code ignores usage-limit headers, so it can't show when a limit resets or continue by itself afterward. |
-| `ANTHROPIC_MODEL`                             | Selects the main request model and therefore the provider.                                                                                                                                                                                                    |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL`               | Selects the model for title generation, token-related background work, and other small requests. Use a model the proxy routes. It replaces the older `ANTHROPIC_SMALL_FAST_MODEL`.                                                                            |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`  | Reduces background traffic sent to the subscription provider.                                                                                                                                                                                                 |
-| `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` | Prevents Claude Code from retrying a partially completed stream as non-streaming, which can duplicate tool calls.                                                                                                                                             |
+Claude Code lets `settings.json` beat process variables. If cc-proxy has written to that file (it has, once you ran `cc-proxy start`), the file's values win, and after `cc-proxy stop` that means Anthropic. Run `cc-proxy start` first, or pass the same values in `claude --settings '{"env":{...}}'`, which beats the file.
+
+`ANTHROPIC_MODEL` picks the main model, and therefore the provider. `ANTHROPIC_DEFAULT_HAIKU_MODEL` picks the model for titles and other small requests. It replaces the older `ANTHROPIC_SMALL_FAST_MODEL`. Use models the proxy routes.
 
 The proxy always makes streaming upstream requests. It can still accumulate a non-streaming Anthropic response when the client requests one.
 
@@ -84,31 +79,11 @@ A trailing `[1m]` tells Claude Code to use its larger local context policy. The 
 OpenAI's [GPT-5.6 subscription update](https://x.com/thsottiaux/status/2076495156757577895)
 sets the ChatGPT context limit to 272K tokens. Set
 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000` with `gpt-5.6-sol[1m]` so Claude Code
-compacts before the upstream limit.
+compacts before the upstream limit. Put it in the `env` block of `settings.json`. cc-proxy never changes a key you set there.
 
 Grok 4.5 and Grok 4.6 are 500,000 tokens. Set `CLAUDE_CODE_MAX_CONTEXT_TOKENS=500000` and omit `[1m]`.
 
 For a provider and model with a different real context limit, choose a safe value or omit the override. `DISABLE_AUTO_COMPACT=1` disables automatic compaction while preserving manual `/compact`, but the session can then hit the upstream limit.
-
-## Persistent Claude Code settings
-
-If every Claude Code session should use the proxy, put client variables in `~/.claude/settings.json`:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:18765",
-    "CLAUDE_CODE_OAUTH_TOKEN": "unused",
-    "ANTHROPIC_MODEL": "gpt-6-sol[1m]",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-6-luna[1m]",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": 272000,
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1,
-    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": 1
-  }
-}
-```
-
-Use process-level variables or a wrapper when you also launch Claude Code directly against Anthropic. See [Switching models and backends](/using/switching-models-and-backends/).
 
 ## Proxy settings are separate
 

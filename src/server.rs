@@ -27,7 +27,8 @@ use crate::{
     },
     registry::{Registry, normalize_incoming_model},
     request_identity::{CLAUDE_AGENT_HEADER, CLAUDE_PARENT_AGENT_HEADER, ConversationIdentity},
-    session::{self, SessionState},
+    session,
+    tiers::{self, TIERS},
     traffic::{TrafficCaptureOptions, create_traffic_capture},
 };
 use axum::{
@@ -174,7 +175,7 @@ pub async fn serve_listener(
             ),
         ])),
     );
-    let app = app_with_monitor(Arc::new(Registry::with_default_alias()), monitor);
+    let app = app_with_monitor(Arc::new(Registry::new()), monitor);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -357,8 +358,10 @@ async fn handler_monitor(
     }
 }
 
+/// `version` lets `cc-proxy start`, `use` and `status` notice a proxy that is
+/// older than the binary after an upgrade.
 async fn healthz() -> Json<serde_json::Value> {
-    Json(json!({ "ok": true }))
+    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
 }
 
 async fn handler_opencode_account(State(state): State<Arc<AppState>>) -> Response {
@@ -415,28 +418,54 @@ struct ModelsQuery {
     limit: Option<usize>,
 }
 
+/// `claude-opus` and its siblings, each labelled with the model that answers
+/// it. Empty while routing is off.
+fn claude_model_entries(registry: &Registry, route: &crate::config::Route) -> Vec<Value> {
+    let Some(provider) = route.target() else {
+        return Vec::new();
+    };
+    TIERS
+        .iter()
+        .filter_map(|tier| {
+            let id = format!("claude-{tier}");
+            let model = tiers::resolve(registry, route, &id).ok()?;
+            let mut name = tier.to_string();
+            name[..1].make_ascii_uppercase();
+            Some(json!({
+                "type": "model",
+                "object": "model",
+                "id": id,
+                "display_name": format!("{name}: {model} ({provider})"),
+            }))
+        })
+        .collect()
+}
+
 /// Anthropic-shaped model listing so Claude Code's gateway model discovery
 /// (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) finds the proxy's models.
 /// Claude Code only adds entries whose id starts with `claude` or `anthropic`,
-/// so the Anthropic-style aliases are what surface in its `/model` picker;
-/// raw provider ids are still listed for other Anthropic-compatible clients.
+/// so while routing is on, one `claude-<tier>` entry per tier leads the list
+/// and is what its `/model` picker shows. Raw provider ids follow, for other
+/// Anthropic-compatible clients.
 async fn handler_models(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ModelsQuery>,
 ) -> Json<serde_json::Value> {
-    let mut data: Vec<Value> = state
-        .registry
-        .all_supported_models()
-        .into_iter()
-        .map(|(model, provider)| {
-            json!({
-                "type": "model",
-                "object": "model",
-                "id": model,
-                "display_name": format!("{model} ({provider})"),
-            })
-        })
-        .collect();
+    let mut data = claude_model_entries(&state.registry, &crate::config::route());
+    data.extend(
+        state
+            .registry
+            .all_supported_models()
+            .into_iter()
+            .map(|(model, provider)| {
+                json!({
+                    "type": "model",
+                    "object": "model",
+                    "id": model,
+                    "display_name": format!("{model} ({provider})"),
+                })
+            }),
+    );
     let has_more = query.limit.is_some_and(|limit| data.len() > limit);
     if let Some(limit) = query.limit {
         data.truncate(limit);
@@ -448,6 +477,32 @@ async fn handler_models(
         "first_id": data.first().and_then(|entry| entry.get("id")).cloned(),
         "last_id": data.last().and_then(|entry| entry.get("id")).cloned(),
     }))
+}
+
+/// A Claude name in an OpenAI-shaped body becomes the model chosen for it.
+/// The body is rewritten to match, because providers read the model from it.
+fn resolve_openai_model(
+    registry: &Registry,
+    body: &mut Value,
+    normalized_model: &str,
+) -> Result<String, OpenAiError> {
+    let resolved = tiers::resolve(registry, &crate::config::route(), normalized_model)
+        .map_err(|message| OpenAiError::invalid(message, Some("model")))?;
+    if resolved != normalized_model {
+        body["model"] = json!(&resolved);
+    }
+    Ok(resolved)
+}
+
+fn unknown_model_text(registry: &Registry, model: &str) -> String {
+    format!(
+        "Unknown model \"{model}\". {}",
+        registry.unknown_model_message()
+    )
+}
+
+fn unknown_model_error(registry: &Registry, model: &str) -> OpenAiError {
+    OpenAiError::invalid(unknown_model_text(registry, model), Some("model"))
 }
 
 async fn handler_messages(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
@@ -974,7 +1029,7 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
             return monitor_response_body(response, request_guard);
         }
     };
-    let body: Value = match parse_native_json_body(&body_bytes) {
+    let mut body: Value = match parse_native_json_body(&body_bytes) {
         Ok(body) => body,
         Err(response) => {
             log_native_request_completed(
@@ -992,23 +1047,15 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
         Ok(model) => model,
         Err(error) => return monitor_response_body(error.response(), request_guard),
     };
+    let normalized_model = match resolve_openai_model(&state.registry, &mut body, &normalized_model)
+    {
+        Ok(model) => model,
+        Err(error) => return monitor_response_body(error.response(), request_guard),
+    };
     let now = current_millis();
     let session_state = session::existing_session(session_id.as_deref(), now);
-    let affinity = session_state
-        .as_ref()
-        .and_then(|session| session.affinity_provider.as_ref());
-    let Some(provider) = state
-        .registry
-        .provider_for_model(&normalized_model, affinity)
-    else {
-        let response = OpenAiError::invalid(
-            format!(
-                "Unknown model \"{normalized_model}\". {}",
-                state.registry.unknown_model_message()
-            ),
-            Some("model"),
-        )
-        .response();
+    let Some(provider) = state.registry.provider_for_model(&normalized_model) else {
+        let response = unknown_model_error(&state.registry, &normalized_model).response();
         return monitor_response_body(response, request_guard);
     };
     let parsed = if provider.name() == "codex" {
@@ -1032,13 +1079,8 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
     {
         crate::providers::codex::clear_session_compaction(session_id);
     }
-    let current = session::record_session_request(
-        session_id.as_deref(),
-        session_state.as_ref(),
-        provider.name(),
-        &normalized_model,
-        now,
-    );
+    let current =
+        session::record_session_request(session_id.as_deref(), session_state.as_ref(), now);
     let effort = parsed
         .as_ref()
         .and_then(|parsed| {
@@ -1206,7 +1248,7 @@ async fn handler_chat_completions(
             return monitor_response_body(response, request_guard);
         }
     };
-    let body = match parse_native_json_body(&body_bytes) {
+    let mut body = match parse_native_json_body(&body_bytes) {
         Ok(body) => body,
         Err(response) => {
             log_native_request_completed(
@@ -1224,23 +1266,15 @@ async fn handler_chat_completions(
         Ok(model) => model,
         Err(error) => return monitor_response_body(error.response(), request_guard),
     };
+    let normalized_model = match resolve_openai_model(&state.registry, &mut body, &normalized_model)
+    {
+        Ok(model) => model,
+        Err(error) => return monitor_response_body(error.response(), request_guard),
+    };
     let now = current_millis();
     let session_state = session::existing_session(session_id.as_deref(), now);
-    let affinity = session_state
-        .as_ref()
-        .and_then(|session| session.affinity_provider.as_ref());
-    let Some(provider) = state
-        .registry
-        .provider_for_model(&normalized_model, affinity)
-    else {
-        let response = OpenAiError::invalid(
-            format!(
-                "Unknown model \"{normalized_model}\". {}",
-                state.registry.unknown_model_message()
-            ),
-            Some("model"),
-        )
-        .response();
+    let Some(provider) = state.registry.provider_for_model(&normalized_model) else {
+        let response = unknown_model_error(&state.registry, &normalized_model).response();
         return monitor_response_body(response, request_guard);
     };
     let (translated, parsed) = if provider.name() == "codex" {
@@ -1266,13 +1300,8 @@ async fn handler_chat_completions(
     {
         crate::providers::codex::clear_session_compaction(session_id);
     }
-    let current = session::record_session_request(
-        session_id.as_deref(),
-        session_state.as_ref(),
-        provider.name(),
-        &normalized_model,
-        now,
-    );
+    let current =
+        session::record_session_request(session_id.as_deref(), session_state.as_ref(), now);
     let effort = translated
         .as_ref()
         .and_then(|translated| translated.effort.clone())
@@ -1658,18 +1687,16 @@ async fn dispatch_request(
     };
 
     let mut normalized_model = normalize_incoming_model(model);
+    // A Claude name becomes the model chosen for it. When none is, the name
+    // serves nowhere and `refusal` is what to tell the client.
+    let mut refusal = None;
+    match tiers::resolve(&state.registry, &crate::config::route(), &normalized_model) {
+        Ok(resolved) => normalized_model = resolved,
+        Err(message) => refusal = Some(message),
+    }
     body.model = Some(normalized_model.clone());
-    let session_state = if let Some(session_id) = session_id.as_deref() {
-        session::existing_session(Some(session_id), now)
-    } else {
-        None
-    };
-    let session_affinity = session_state
-        .as_ref()
-        .and_then(|state| state.affinity_provider.as_ref());
-    let original_provider = state
-        .registry
-        .provider_for_model(&normalized_model, session_affinity);
+    let session_state = session::existing_session(session_id.as_deref(), now);
+    let original_provider = state.registry.provider_for_model(&normalized_model);
     let configured_auto_review_model = crate::config::auto_review_model();
     let auto_review_route = original_provider.as_ref().and_then(|provider| {
         apply_auto_review_model(
@@ -1685,7 +1712,7 @@ async fn dispatch_request(
     }
 
     let provider = if auto_review_route.is_some() {
-        state.registry.provider_for_model(&normalized_model, None)
+        state.registry.provider_for_model(&normalized_model)
     } else {
         original_provider
     };
@@ -1700,14 +1727,9 @@ async fn dispatch_request(
                     ("model".to_string(), json!(&normalized_model)),
                 ])),
             );
-            let response = json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!(
-                    "Unknown model \"{normalized_model}\". {}",
-                    state.registry.unknown_model_message()
-                ),
-            );
+            let message =
+                refusal.unwrap_or_else(|| unknown_model_text(&state.registry, &normalized_model));
+            let response = json_error(StatusCode::BAD_REQUEST, "invalid_request_error", message);
             log_request_completed(
                 &log,
                 RequestLogContext {
@@ -1770,14 +1792,8 @@ async fn dispatch_request(
         .ok()
         .flatten()
         .map(str::to_string);
-    let current = session::record_session_request_with_affinity_update(
-        session_id.as_deref(),
-        session_state.as_ref(),
-        provider.name(),
-        &normalized_model,
-        auto_review_route.is_none(),
-        now,
-    );
+    let current =
+        session::record_session_request(session_id.as_deref(), session_state.as_ref(), now);
     if let Some(monitor) = state.monitor.as_ref() {
         if let Some(current) = current.as_ref() {
             monitor.session_sequence_resolved(&req_id, current.seq);
@@ -2271,11 +2287,6 @@ fn set_mode(path: &Path, mode: u32) {
     {
         let _ = (path, mode);
     }
-}
-
-#[allow(dead_code)]
-fn _unused(session_state: Option<&SessionState>) {
-    let _ = session_state;
 }
 
 #[cfg(test)]
