@@ -16,7 +16,7 @@ cc-proxy exposes Anthropic Messages and optional OpenAI-compatible routes. Every
 ## Anthropic requests
 
 1. Claude Code sends an Anthropic Messages request to `/v1/messages`.
-2. The registry normalizes a trailing `[1m]`, resolves aliases, and selects a provider from the model ID.
+2. The registry normalizes a trailing `[1m]`, turns a Claude name into the model chosen for it (see [Claude names](/using/models-and-routing/#claude-names)), and selects a provider from the model ID.
 3. The provider loads its proxy-owned credential and refreshes an expiring access token when needed.
 4. The request translator maps system content, user and assistant messages, images, tools, tool results, thinking controls, and output settings into the upstream shape.
 5. The upstream stream is reduced into typed text, thinking, tool, usage, and completion events.
@@ -35,7 +35,7 @@ Each provider login belongs to cc-proxy. The proxy does not read native Codex, G
 
 ## Routing boundary
 
-Routing happens per request, not per server process or API surface. Codex IDs, Kimi IDs, Grok IDs, OpenCode Go IDs, Cursor prefixes, and configured Anthropic-style aliases can share one listener across `/v1/messages`, `/v1/chat/completions`, and `/v1/responses`. Unknown model IDs return HTTP 400 with the supported catalog.
+Routing happens per request, not per server process or API surface. Codex IDs, Kimi IDs, Grok IDs, OpenCode Go IDs, Cursor prefixes, and Claude names can share one listener across `/v1/messages`, `/v1/chat/completions`, and `/v1/responses`. Unknown model IDs return HTTP 400 with the supported catalog.
 
 ## Session state
 

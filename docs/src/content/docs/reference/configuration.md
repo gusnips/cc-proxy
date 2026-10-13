@@ -13,11 +13,11 @@ These settings configure the proxy process. Claude Code client settings such as 
 {
   "bindAddress": "127.0.0.1",
   "port": 18765,
-  "aliasProvider": "codex",
   "autoReviewModel": "gpt-5.6-terra",
-  "claude": {
-    "model": "gpt-6-sol",
-    "fastModel": "gpt-6-luna"
+  "route": {
+    "on": true,
+    "provider": "codex",
+    "tiers": { "codex": { "haiku": "gpt-6-luna" } }
   },
   "codex": {
     "originator": "cc-proxy",
@@ -69,11 +69,7 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 | `CCP_BIND_ADDRESS`       | `bindAddress`      | `127.0.0.1`               | Listener IP address.                                                                                                                   |
 | `PORT`                   | `port`             | `18765`                   | Listener port.                                                                                                                         |
 | `CCP_CONFIG_DIR`         | none               | Platform config directory | Replaces the configuration and file-backed auth root.                                                                                  |
-| `CCP_ALIAS_PROVIDER`     | `aliasProvider`    | `codex`                   | Routes recognized Anthropic-style aliases through `codex` or `kimi`.                                                                   |
 | `CCP_AUTO_REVIEW_MODEL`  | `autoReviewModel`  | newest luna for Codex     | Routes Claude Code's non-streaming, tool-free Bash security-review classifier through a routable model.                                |
-| none                     | `claude.enabled`   | `true`                    | Whether plain `claude` uses the proxy, once `cc-proxy shell install` has added the hook. `cc-proxy on` and `cc-proxy off` set it.      |
-| none                     | `claude.model`     | unset                     | The model `cc-proxy claude` starts Claude Code on, as `ANTHROPIC_MODEL`.                                                               |
-| none                     | `claude.fastModel` | unset                     | The model for Claude Code's small background requests under `cc-proxy claude`, as `ANTHROPIC_DEFAULT_HAIKU_MODEL`.                     |
 | `CCP_AUTO_REVIEW_EFFORT` | `autoReviewEffort` | unset                     | Sets `none`, `low`, `medium`, `high`, `xhigh`, or `max` only for auto-review requests routed to Codex. `off` inherits ordinary effort. |
 | `CCP_LOG_STDERR`         | `log.stderr`       | `false`                   | Mirrors logs to stderr when present in the environment, regardless of its value.                                                       |
 | `CCP_LOG_VERBOSE`        | `log.verbose`      | `false`                   | Preserves full string fields in structured logs when present, regardless of its value.                                                 |
@@ -81,6 +77,18 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 | `XDG_STATE_HOME`         | none               | `~/.local/state`          | State base on macOS and Linux.                                                                                                         |
 
 `CCP_CONFIG_DIR` affects `config.json` and file-backed provider auth. It does not relocate the state directory.
+
+## Routing state
+
+`cc-proxy start`, `use` and `stop` keep the routing state in a `route` object in `config.json`. The proxy reads it on every request, so a switch needs no restart, even when a Homebrew service runs the proxy. `config set` does not take these keys. Use the commands.
+
+| Config key                      | Default | Meaning                                                                                                                                        |
+| ------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `route.on`                      | `false` | Whether Claude names are served. Only `start` and `use <provider>` turn it on. `stop` and `use claude` turn it off.                            |
+| `route.provider`                | unset   | The provider Claude Code goes to. It stays set while routing is off, so `start` can offer it again.                                            |
+| `route.tiers.<provider>.<name>` | unset   | The model you chose for a Claude name (`fable`, `opus`, `sonnet`, `haiku`). Written by `cc-proxy models map` and by the question `start` asks. |
+
+A missing, unreadable or malformed `config.json` means routing is off. Nothing is routed by accident.
 
 Codex auto-review classifier requests use the newest luna model by default. Requests routed through other providers retain their requested model. `CCP_AUTO_REVIEW_MODEL` or `autoReviewModel` selects an explicit routable model for detected classifier requests without changing the session's provider affinity. Normal messages, streaming requests, tool-using requests, and token counting retain their requested model.
 

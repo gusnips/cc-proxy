@@ -25,7 +25,7 @@ The consent page says "GitHub Copilot Chat". cc-proxy uses the same client id as
 Every Copilot model starts with `copilot/`, so a Copilot `gpt-5.5` never collides with the Codex one.
 
 ```sh
-cc-proxy claude --model copilot/gpt-5.5
+claude --model copilot/gpt-5.5
 ```
 
 `cc-proxy models` lists the models your account can run. The list is saved at sign-in. Until then, cc-proxy shows a short built-in list. Any other `copilot/<id>` is sent as written, and Copilot says if it does not know the id.
@@ -41,10 +41,10 @@ Copilot bills one premium request each time you start a turn, and lets the agent
 
 ## Settings
 
-| Environment | Purpose |
-| --- | --- |
-| `CCP_COPILOT_BASE_URL` | Sends chat to this host instead of the one your Copilot token names. |
-| `CCP_COPILOT_GITHUB_URL` | The GitHub site for sign-in. Default `https://github.com`. |
+| Environment                  | Purpose                                                                      |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| `CCP_COPILOT_BASE_URL`       | Sends chat to this host instead of the one your Copilot token names.         |
+| `CCP_COPILOT_GITHUB_URL`     | The GitHub site for sign-in. Default `https://github.com`.                   |
 | `CCP_COPILOT_GITHUB_API_URL` | The GitHub API that issues Copilot tokens. Default `https://api.github.com`. |
 
 These are for testing against a mock server. GitHub Enterprise Server is not supported.

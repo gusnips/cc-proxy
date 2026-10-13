@@ -1,6 +1,6 @@
 ---
 title: Getting started
-description: Install cc-proxy, authenticate with Codex, start the server, and open one working Claude Code session.
+description: Install cc-proxy, sign in to Codex, turn routing on, and open one working Claude Code session.
 ---
 
 This path gets one Codex-backed Claude Code session working. See [Choosing a provider](/providers/choosing-a-provider/) for Kimi, Grok, OpenCode Go, and Cursor Agent.
@@ -24,8 +24,6 @@ Windows archives and binaries for every supported platform are on the [GitHub re
 Update later with `cc-proxy update` (add `--check` to only report), or by
 re-running the install command and restarting the service.
 
-Short on time? `cc-proxy setup` does steps 2 to 4 for any provider: it signs you in, picks the models and says what to run.
-
 ## 2. Sign in to Codex
 
 Use a **ChatGPT Plus or Pro account**, not an OpenAI API account:
@@ -36,16 +34,18 @@ cc-proxy codex auth login
 
 For SSH or another headless environment, use `cc-proxy codex auth device` instead.
 
-## 3. Turn it on for Claude Code
+## 3. Turn routing on
 
 ```sh
-cc-proxy on
+cc-proxy start
 ```
 
-This installs the shell hook and turns on the proxy connection. In an
-existing zsh terminal, run `exec zsh` once. New terminals load it themselves.
-Use `exec bash` or `exec fish` if that's your shell. Your zsh or bash alias
-keeps its flags; no Claude settings file needs editing.
+This starts the proxy in the background and sends Claude Code to it. If you
+are signed in to more than one provider, it asks which one. If you aren't
+signed in to any, it asks which one to sign in to.
+
+cc-proxy writes a few lines to the `env` block of `~/.claude/settings.json`.
+That is all. There is no shell hook to install and nothing to source.
 
 ## 4. Open Claude Code
 
@@ -53,17 +53,32 @@ keeps its flags; no Claude settings file needs editing.
 claude
 ```
 
-It starts the proxy in the background if needed, then opens Claude Code on
-it. Send a prompt. You can see the request with `cc-proxy monitor`.
-`cc-proxy off` uses your saved Claude connection again for new sessions.
+Send a prompt. You can watch the request with `cc-proxy monitor`.
 
-On Windows, or without the shell hook, run `cc-proxy claude` instead.
-`--resume`, `--worktree` and your other Claude flags work as usual.
+Claude Code windows that are already open follow the change within a few
+seconds. Editors and new terminals work the same way.
 
-To choose a model, use `claude --model opus` for one session or save a default:
+## Switch or turn it off
 
 ```sh
-cc-proxy config set claude.model opus
+cc-proxy use kimi     # another provider
+cc-proxy use claude   # your Claude subscription; the proxy keeps running
+cc-proxy stop         # your Claude subscription, and the proxy stops
 ```
 
-For persistent settings, provider switching, and model discovery, continue to [Configure Claude Code](/using/configure-claude-code/) and [Models and routing](/using/models-and-routing/).
+Routing never comes back by itself. Run `cc-proxy start` or
+`cc-proxy use <provider>` when you want it again.
+
+## Choose a model
+
+Claude Code asks for `opus`, `sonnet`, `haiku` and `fable`. cc-proxy gives each
+name a model from the provider you picked. To see them, or to change one:
+
+```sh
+cc-proxy models map
+cc-proxy models map haiku gpt-6-luna
+```
+
+`claude --model <id>` with a full model id, such as `gpt-6.1-sol`, works too.
+
+For the exact settings lines, provider switching and model discovery, continue to [Configure Claude Code](/using/configure-claude-code/) and [Models and routing](/using/models-and-routing/).

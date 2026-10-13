@@ -14,10 +14,10 @@ The server exposes the Anthropic and OpenAI routes supported by the proxy. Each 
 Liveness check:
 
 ```json
-{"ok":true}
+{ "ok": true, "version": "0.2.0" }
 ```
 
-It does not verify provider credentials or upstream availability.
+`version` is the version of the running proxy. `cc-proxy start`, `use` and `status` compare it with the installed binary and warn when they differ, which happens after `brew upgrade` until the proxy restarts. It does not verify provider credentials or upstream availability.
 
 ## `GET /monitor`
 
@@ -69,7 +69,7 @@ Unknown models return HTTP 400 with the supported catalog. Missing provider auth
 Accepts the same basic Anthropic request shape and returns:
 
 ```json
-{"input_tokens":1234}
+{ "input_tokens": 1234 }
 ```
 
 Codex tokenizes text locally with `o200k_base` and adds estimates for images, encrypted reasoning, and protocol framing. Kimi, Grok, and OpenCode Go use local text heuristics, while Cursor estimates the rendered prompt from its character length. Counts support Claude Code compaction behavior and are estimates rather than provider billing values.
@@ -95,7 +95,9 @@ Returns Anthropic-shaped model discovery:
 
 An optional `limit` query truncates `data` and sets `has_more`. The route does not expose a pagination cursor.
 
-Claude Code gateway discovery filters IDs according to its own model rules. See [Models and routing](/using/models-and-routing/).
+While routing is on, the list starts with `claude-fable`, `claude-opus`, `claude-sonnet` and `claude-haiku`. Each `display_name` says which model it uses now, for example `Opus: gpt-6.1-sol (codex)`. While routing is off, those four are left out.
+
+Claude Code gateway discovery filters IDs according to its own model rules. See [Models and routing](/using/models-and-routing/#gateway-model-discovery).
 
 ## `POST /v1/chat/completions`
 
@@ -186,7 +188,7 @@ Codex Responses uses native passthrough and forwards `parallel_tool_calls` uncha
 
 ## OpenAI routing, sessions, and errors
 
-Both OpenAI routes strip a trailing `[1m]`, resolve configured aliases, and choose the provider from `model`. Aliases follow `aliasProvider`, while explicit provider model IDs keep their provider. Unknown models return HTTP 400 with the supported model list.
+Both OpenAI routes strip a trailing `[1m]`, turn Claude names into the model chosen for them, and choose the provider from `model`. Claude names follow the provider routing points at. Explicit provider model IDs keep their provider. Unknown models return HTTP 400 with the supported model list.
 
 For requests that need a stable session, set one of these headers:
 

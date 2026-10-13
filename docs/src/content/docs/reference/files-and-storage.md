@@ -7,11 +7,11 @@ cc-proxy separates configuration and credentials from runtime state.
 
 ## Directory roots
 
-| Platform | Configuration root | State root |
-| --- | --- | --- |
-| macOS | `~/.config/cc-proxy` | `${XDG_STATE_HOME:-~/.local/state}/cc-proxy` |
-| Linux | `${XDG_CONFIG_HOME:-~/.config}/cc-proxy` | `${XDG_STATE_HOME:-~/.local/state}/cc-proxy` |
-| Windows | `%APPDATA%/cc-proxy` | `%LOCALAPPDATA%/cc-proxy` |
+| Platform | Configuration root                       | State root                                   |
+| -------- | ---------------------------------------- | -------------------------------------------- |
+| macOS    | `~/.config/cc-proxy`                     | `${XDG_STATE_HOME:-~/.local/state}/cc-proxy` |
+| Linux    | `${XDG_CONFIG_HOME:-~/.config}/cc-proxy` | `${XDG_STATE_HOME:-~/.local/state}/cc-proxy` |
+| Windows  | `%APPDATA%/cc-proxy`                     | `%LOCALAPPDATA%/cc-proxy`                    |
 
 A `config.json` left in the previous `claude-code-proxy` configuration root is
 still read when the new location has none, and file-backed provider
@@ -29,6 +29,10 @@ running and removed.
 ## Configuration
 
 `config.json` lives directly under the configuration root. See [Configuration](/reference/configuration/) for its schema and precedence.
+
+## Claude Code's settings file
+
+`cc-proxy start`, `use` and `stop` edit one file that isn't in either root: `settings.json` in Claude Code's config folder. That is `~/.claude/settings.json`, or the folder `CLAUDE_CONFIG_DIR` names. cc-proxy changes only the `env` block and one top-level `cc-proxy` key that holds your earlier values. Everything else in the file, including key order and formatting, stays as it was. A symlink is followed. A file that isn't valid JSON is never overwritten. See [Configure Claude Code](/using/configure-claude-code/).
 
 ## Provider credentials
 

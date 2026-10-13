@@ -11,11 +11,23 @@ Check the process and liveness route:
 curl http://127.0.0.1:18765/healthz
 ```
 
-A healthy listener returns `{"ok":true}`. Confirm `ANTHROPIC_BASE_URL` uses the same address and port. `cc-proxy start --port 11435` and `PORT=11435` change the listener port. `--port` wins for that command.
+A healthy listener returns `{"ok":true,"version":"..."}`. Confirm `ANTHROPIC_BASE_URL` uses the same address and port. `cc-proxy start --port 11435` and `PORT=11435` change the listener port. `--port` wins for that command.
 
 `cc-proxy status` reports the background service state. If it claims a proxy
 answers without a pidfile, that process was not started by `cc-proxy start`.
 Stop it directly before starting the service on the same port.
+
+If Claude Code says it can't connect right after a crash or a reboot, routing is still on but nothing answers. Run any cc-proxy command, for example `cc-proxy status`. It sees that the proxy is gone, sends Claude Code back to your Claude subscription and says so. Then run `cc-proxy start` to route again.
+
+## Claude Code ignores a switch
+
+`cc-proxy start`, `use` and `stop` change `settings.json`, and open windows follow within a few seconds. A window can miss the change when:
+
+- it was open before `~/.claude/settings.json` existed. Restart it once.
+- a project's `.claude/settings.json` sets its own `ANTHROPIC_BASE_URL`. Project settings beat your user file.
+- the host skips user-level `env`, as some desktop and SDK launches do. Set the variables yourself (see [Configure Claude Code](/using/configure-claude-code/#set-the-variables-yourself)).
+
+`cc-proxy status` shows where Claude Code goes now and warns about a pinned model or an API key in your settings.
 
 ## Authentication error
 
@@ -35,7 +47,9 @@ OpenCode Go has no `auth status` command; configure its API key through
 
 ## Model returns HTTP 400
 
-Run:
+If the message says routing is off, that Claude Code window still points at the proxy but you ran `cc-proxy stop` or `cc-proxy use claude`. Restart the window, or run `cc-proxy start` to route it again. If it says cc-proxy has no model for a name, run `cc-proxy models map <name> <model>`.
+
+Otherwise run:
 
 ```sh
 cc-proxy models
@@ -46,7 +60,7 @@ An unknown local ID returns a catalog in the error. A known ID can still be reje
 
 ## Background requests fail
 
-Set `ANTHROPIC_DEFAULT_HAIKU_MODEL` to a concrete routable ID. Claude Code sends title and small background tasks through that model independently of the main model.
+Claude Code sends titles and other small background tasks to its `haiku` model, independently of the main model. Run `cc-proxy models map` to see which model `haiku` gets. If it is wrong, run `cc-proxy models map haiku <model>`.
 
 ## A tool runs twice
 
@@ -92,7 +106,7 @@ CCP_CURSOR_AGENT_BUNDLE=/path/to/cursor-agent/index.js \
 
 Upstream limits are shared with other clients on the same account. Codex limit responses and Kimi HTTP 429 responses surface as HTTP 429 with `retry-after`. Wait for the indicated interval or reduce concurrent traffic.
 
-When a Codex usage window runs out, Claude Code shows when it resets and can continue the task by itself after that. Sessions started with `cc-proxy claude` or the shell hook do this. If you set the variables yourself, use `CLAUDE_CODE_OAUTH_TOKEN=unused` instead of `ANTHROPIC_AUTH_TOKEN`. See [Configure Claude Code](/using/configure-claude-code/).
+When a Codex usage window runs out, Claude Code shows when it resets and can continue the task by itself after that. Sessions routed by `cc-proxy start` do this. If you set the variables yourself, use `CLAUDE_CODE_OAUTH_TOKEN=unused` instead of `ANTHROPIC_AUTH_TOKEN`. See [Configure Claude Code](/using/configure-claude-code/).
 
 ## Find the complete error
 

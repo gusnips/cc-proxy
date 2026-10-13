@@ -21,106 +21,45 @@ cc-proxy version
 
 Each prints `cc-proxy <version>`.
 
-## `setup`
-
-```sh
-cc-proxy setup
-```
-
-Asks a few questions, one line each, and saves the answers:
-
-1. A plan you already pay for (Codex, Kimi, Cursor, Grok, GitHub Copilot) or an API key (GLM, OpenCode Go), then which one.
-2. The sign-in for that provider. If one is already saved, it asks before replacing it.
-3. For GLM and OpenCode Go, a check of the key. GLM gets a 1-token message and OpenCode Go a usage request. If the provider refuses the key, `setup` stops and doesn't save it. If the provider can't be reached, it saves the key and says so.
-4. The main model and the fast model, saved as `claude.model` and `claude.fastModel`. Enter keeps the first model for the main one and the same model for the fast one.
-5. Whether to add the shell hook (see `shell install`).
-
-It ends with the command to run: `claude` once the hook is in place, `cc-proxy claude` otherwise. Piped input answers the questions the same way a keyboard does.
-
-## `claude`
-
-```sh
-cc-proxy claude [claude arguments...]
-```
-
-Starts Claude Code on the proxy. If nothing answers on the configured port,
-it starts the background service first. Then it runs
-`claude --settings '<json>'` followed by your arguments.
-If you supply `--settings` as inline JSON or a file, cc-proxy merges the proxy
-connection into it rather than passing a second flag that would replace it.
-Your other values and flags stay intact.
-`cc-proxy claude --help` shows Claude Code's own help.
-
-The JSON holds the variables in
-[Configure Claude Code](/using/configure-claude-code/), plus `claude.model` and
-`claude.fastModel` from `config.json` when they are set. Settings passed this
-way rank above `~/.claude/settings.json` and the project's settings, for that
-session only.
-
-On Unix, cc-proxy replaces itself with `claude`, so the exit code and signals
-are Claude Code's own. On Windows it waits for `claude` and exits with its
-code. If there's no `claude` on `PATH`, it exits with code 127.
-
-## `shell install`, `shell uninstall`, `on`, `off`
-
-```sh
-cc-proxy shell install
-cc-proxy shell uninstall
-cc-proxy on
-cc-proxy off
-```
-
-`on` installs or refreshes the hook and makes plain `claude` use the proxy.
-You don't need to run `shell install` first; it does the same setup.
-The hook picks the shell from `$SHELL`:
-
-| Shell         | What it writes                                                                                                                                                              |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| zsh           | One line in `$ZDOTDIR/.zshrc`, or `~/.zshrc`                                                                                                                                |
-| bash on Linux | One line in `~/.bashrc`                                                                                                                                                     |
-| bash on macOS | One line in `~/.bash_profile`. With no `.bash_profile`, it goes in the `~/.bash_login` or `~/.profile` you have, because bash reads only the first of the three that exists |
-| fish          | `$XDG_CONFIG_HOME/fish/functions/claude.fish`, or `~/.config/fish/functions/claude.fish`                                                                                    |
-
-For zsh and bash, the line loads a `claude` function from `shell/claude.sh`
-in the config directory. Reinstalling refreshes that function without adding
-a second startup line. Existing zsh and bash aliases keep their flags.
-Any other shell exits with code 1 and says to run `cc-proxy claude` instead.
-
-After the first install, run `exec zsh` (or your shell's name) once in an
-existing terminal. New terminals load the hook themselves.
-
-`shell uninstall` removes the line from every one of those files, deletes
-the function files it wrote, and turns cc-proxy off, so terminals that are
-still open go back to plain Claude Code.
-
-`on` and `off` set `claude.enabled` in `config.json`. The `claude` function
-asks cc-proxy on every call, so the change applies in every terminal that
-has loaded the hook. `off` stops injecting connection settings; any proxy
-values you saved by hand still apply. Claude settings files are never changed.
-`cc-proxy claude`, typed out in full, always uses the proxy.
-
 ## `start`
 
 ```sh
 cc-proxy start [--port <PORT>] [--no-monitor | --monitor]
 ```
 
-Starts the proxy as a background service and exits once it answers health
-checks, printing its pid and listening address. A second `start` reports the
-running pid instead of starting another copy. The service is tracked in a
-pidfile under the state directory; `status`, `stop`, `restart`, and `reload`
-all resolve through it.
+Turns routing on and starts the proxy as a background service. It exits once the proxy answers health checks, printing its pid and listening address.
 
-| Option          | Behavior                                                                |
-| --------------- | ----------------------------------------------------------------------- |
-| `--port <PORT>` | Overrides `PORT`, `config.json`, and the default for this invocation.   |
-| `--no-monitor`  | Runs in the foreground with plain output instead of starting a service. |
-| `--monitor`     | Runs in the foreground with the monitor dashboard attached.             |
+1. It removes the shell hook that older versions added, if it finds one.
+2. It picks the provider. With one provider signed in, it uses that one. With several, it asks, and the last choice is the default. "Claude Code subscription, no routing" is always on the list. With none signed in, it asks which one to sign in to.
+3. It asks which model a Claude name should use, only for names it can't match with confidence. Answers are saved. See [Claude names](/using/models-and-routing/#claude-names).
+4. It starts the service, or reuses one that already answers on the port, such as a Homebrew service.
+5. It writes the `env` block in Claude Code's `settings.json` and sets `route.on` in `config.json`. Open Claude Code windows follow within a few seconds.
+
+A second `start` reports the running pid instead of starting another copy. The service is tracked in a pidfile under the state directory; `status`, `stop`, `restart`, and `reload` all resolve through it.
+
+| Option          | Behavior                                                                                                                                                      |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--port <PORT>` | Overrides `PORT`, `config.json`, and the default for this invocation.                                                                                         |
+| `--no-monitor`  | Runs in the foreground with plain output. It only serves: it never touches `settings.json`. Homebrew and systemd run this, so a reboot never routes anything. |
+| `--monitor`     | Runs in the foreground with the monitor dashboard attached. Routing lasts as long as the dashboard does and switches off when you quit it.                    |
 
 The bind address comes from `CCP_BIND_ADDRESS` or `bindAddress`.
 
-Foreground mode keeps running until SIGTERM (Unix) or Ctrl-C requests graceful
-shutdown, and continues collecting monitor history for separate dashboards.
+Foreground mode keeps running until SIGTERM (Unix) or Ctrl-C requests graceful shutdown, and continues collecting monitor history for separate dashboards.
+
+If `settings.json` isn't valid JSON, `start` stops before it does anything and names the file and the error. Fix the file, then run it again.
+
+## `use`
+
+```sh
+cc-proxy use [provider|claude]
+```
+
+Changes where Claude Code goes, with the proxy kept running. The provider is `codex`, `kimi`, `cursor`, `grok`, `copilot`, `glm` or `opencode`. `claude` sends Claude Code back to your Claude subscription.
+
+With no argument, `use` asks the same question as `start`. If the provider isn't signed in, it asks `Sign in now? [y/N]` and runs that provider's sign-in. The default is no, so a script never opens a browser. For GLM and OpenCode Go, sign-in reads an API key.
+
+The switch applies on the next request in every open window. Nothing restarts.
 
 ## `status`, `stop`, `restart`, `reload`
 
@@ -131,20 +70,19 @@ cc-proxy restart [--port <PORT>]
 cc-proxy reload
 ```
 
-`status` reports how long the service has run, its pid and listening
-address, and whether plain `claude` goes through it, or exits 1 when the
-service is down. `stop` shuts a running service down gracefully (exit 0 when
-there is nothing to stop). `restart` stops and starts again, keeping the
-previous port unless `--port` overrides it. `reload` validates `config.json`
-and asks a running service to re-read it; file-backed settings apply on the
-next request, while bind address, port, alias provider, and environment need
-`restart`. `reload` exits 1 when no service is running (after validating the
-config) and validates only on platforms without SIGHUP.
+`status` reports how long the service has run, its pid and listening address, where Claude Code goes, and warnings about `settings.json` (a pinned model, or an API key that hides limit reset times). It also warns when the proxy runs an older version than the installed binary, which happens after `brew upgrade` until you restart. It exits 1 when the service is down.
 
-When something answers on the configured port without a pidfile (a
-foreground or dashboard-attached proxy started separately, for example),
-`status` says so explicitly, and `stop`/`restart` refuse to touch a process
-they did not start.
+`stop` sends Claude Code back to your Claude subscription first, even if the proxy is already dead, then shuts the service down gracefully (exit 0 when there is nothing to stop). Routing does not come back until you run `start` or `use`. If something answers on the port that cc-proxy didn't start, such as a Homebrew service, `stop` leaves it alone and says to use `brew services stop cc-proxy`.
+
+`restart` stops and starts again, keeping the previous port unless `--port` overrides it. If the port changes, it points Claude Code at the new one. `reload` validates `config.json` and asks a running service to re-read it; file-backed settings apply on the next request, while bind address, port, and environment need `restart`. `reload` exits 1 when no service is running (after validating the config) and validates only on platforms without SIGHUP.
+
+When something answers on the configured port without a pidfile (a foreground or dashboard-attached proxy started separately, for example), `status` says so explicitly, and `restart` refuses to touch a process it did not start.
+
+If routing is on but nothing answers on the port (the proxy crashed, or the machine rebooted), the next cc-proxy command notices, switches routing off and says so on stderr. Until then, new Claude Code windows can't connect.
+
+## Removed in 0.2.0
+
+`cc-proxy claude`, `on`, `off`, `shell install`, `shell uninstall` and `setup` are gone. `start` and `use` do their jobs without a shell hook. `cc-proxy claude` still runs, only to remove the old hook and print what to do next. Run `unset -f claude` or open a new terminal, then run `claude` directly. The config keys `claude.enabled`, `claude.model`, `claude.fastModel` and `aliasProvider` (and `CCP_ALIAS_PROVIDER`) are gone too. See [Models and routing](/using/models-and-routing/) for the replacement.
 
 ## `monitor`
 
@@ -166,9 +104,12 @@ Opens the monitor with deterministic simulated traffic. It does not bind a netwo
 
 ```sh
 cc-proxy models [--full]
+cc-proxy models map [name] [model] [--reset] [--provider <provider>]
 ```
 
-Prints supported IDs grouped by provider. The default output compacts Cursor's runtime catalog. `--full` prints every Cursor alias.
+`models` prints supported IDs grouped by provider. The default output compacts Cursor's runtime catalog. `--full` prints every Cursor alias.
+
+`models map` shows which model each Claude name (`fable`, `opus`, `sonnet`, `haiku`) uses on a provider, and who decided it. With a name and a model, it saves your choice. With `--reset`, it forgets your choice for that name, or for all four names when you give no name. The provider defaults to the one Claude Code goes to now; `--provider` picks another. A model must be one cc-proxy serves. The change applies on the next request.
 
 ## Provider authentication
 

@@ -55,16 +55,20 @@ Sign in with a **ChatGPT Plus or Pro account**, not an OpenAI API account:
 cc-proxy codex auth login
 ```
 
-Start the proxy (runs as a background service):
+Start the proxy and send Claude Code through it:
 
 ```sh
 cc-proxy start
 cc-proxy status
 ```
 
+`start` runs the proxy in the background and turns routing on. If you are
+signed in to more than one provider, it asks which one Claude Code should
+use. If you aren't signed in to any, it asks which one to sign in to.
+
 Attach the dashboard from any terminal with `cc-proxy monitor`. Detaching
-leaves the proxy running. `cc-proxy stop` stops the service;
-`cc-proxy restart` and `cc-proxy reload` restart it and reload its config.
+leaves the proxy running. `cc-proxy restart` and `cc-proxy reload` restart it
+and reload its config.
 
 Sign in to the other providers the same way (`kimi`, `grok`, `cursor`,
 `glm`, `opencode`, `copilot`), then check state and usage:
@@ -88,46 +92,38 @@ cc-proxy update --check
 cc-proxy update
 ```
 
-First time? `cc-proxy setup` signs you in, picks your models and tells you
-what to run.
+Then run `claude` as you always do. Every Claude Code window and terminal goes
+through the proxy, including ones that are already open (they follow within a
+few seconds) and ones started from an editor.
 
-Start Claude Code on the proxy:
+cc-proxy does this by writing a few lines to the `env` block of
+`~/.claude/settings.json`. There is no shell hook, no `cc-proxy claude`
+wrapper and nothing to source.
 
-```sh
-cc-proxy claude
-cc-proxy claude --model gpt-6-sol
-```
-
-`cc-proxy claude` starts the proxy if it isn't running, then runs `claude`
-with every argument you gave it, so `--resume`, `--worktree` and `-p` work as
-usual. It doesn't change any settings file. To pick the model every session
-starts on, run `cc-proxy config set claude.model opus`.
-
-To make plain `claude` use the proxy too:
+Switch whenever you want:
 
 ```sh
-cc-proxy on
+cc-proxy use kimi     # send Claude Code to another provider
+cc-proxy use claude   # back to your Claude subscription; the proxy keeps running
+cc-proxy stop         # routing off and the proxy stops
 ```
 
-`on` installs or refreshes the shell hook. In an existing zsh terminal, run
-`exec zsh` once, then `claude`. New terminals load it themselves. Your zsh or
-bash alias keeps its flags, including `--dangerously-skip-permissions`.
-There are no environment exports or Claude settings files to edit.
+Routing never comes back by itself. It starts again only when you run
+`cc-proxy start` or `cc-proxy use <provider>`.
 
-The hook adds one line to `~/.zshrc` for zsh, `~/.bashrc` for bash on Linux
-or the login profile for bash on macOS. fish gets
-`~/.config/fish/functions/claude.fish`. It sends each new `claude` session
-through the proxy while on. The proxy starts itself when needed.
+Claude Code asks for `opus`, `sonnet`, `haiku` and `fable`. cc-proxy turns each
+name into a model of the provider you picked, using what that provider offers
+today. See which one each name gets, or choose your own:
 
 ```sh
-cc-proxy off   # use your saved Claude connection
-cc-proxy on    # use the proxy again
+cc-proxy models map
+cc-proxy models map haiku gpt-6-luna
 ```
 
-The switch applies to every terminal that has loaded the hook. Sessions
-already open keep their connection until you quit them. `off` stops adding
-proxy settings; it doesn't remove values you saved by hand.
-`cc-proxy shell uninstall` removes the hook and turns cc-proxy off.
+A window that was open before `~/.claude/settings.json` existed can't see the
+change until you restart it. See
+[Configure Claude Code](docs/src/content/docs/using/configure-claude-code.md)
+for the exact lines, what happens to values you set yourself, and the limits.
 
 See [Getting started](docs/src/content/docs/getting-started.md)
 for the complete first session.

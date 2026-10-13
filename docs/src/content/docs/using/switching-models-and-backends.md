@@ -1,54 +1,47 @@
 ---
 title: Switching models and backends
-description: Choose launch-time patterns for switching between cc-proxy and direct Anthropic, then switch routed models within a proxy session.
+description: Switch Claude Code between providers and your Claude subscription with one command, and change models inside a session.
 ---
 
-Claude Code binds its base URL and client auth when the process starts. A **backend switch** needs a new Claude Code process. A **model switch** can stay in the same proxy-backed session because the proxy routes each request by model ID.
+cc-proxy edits the `env` block of Claude Code's `settings.json`, and Claude Code reads that file again whenever it changes. So one command switches every open window and terminal. You don't restart anything.
 
-| Goal | Pattern |
-| --- | --- |
-| Start one session on the proxy | `cc-proxy claude`, with any `claude` flags |
-| Always use the proxy | Put client variables in `~/.claude/settings.json` |
-| Try one model once | Prefix `claude` with environment variables or use an alias |
-| Toggle between proxy and direct Anthropic | `cc-proxy shell install` once, then `cc-proxy on` / `cc-proxy off` |
-| Stay on the proxy and change provider or model | Use `/model`, `--model`, or a new `ANTHROPIC_MODEL` |
+| Goal                                                        | Command                                                                          |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Send Claude Code through the proxy                          | `cc-proxy start`                                                                 |
+| Change provider                                             | `cc-proxy use kimi` (or `codex`, `cursor`, `grok`, `copilot`, `glm`, `opencode`) |
+| Go back to your Claude subscription, keep the proxy running | `cc-proxy use claude`                                                            |
+| Go back to your Claude subscription and stop the proxy      | `cc-proxy stop`                                                                  |
+| Try one model once                                          | `claude --model <id>`                                                            |
+| Change model inside a session                               | `/model`                                                                         |
+
+`use` takes a provider only if you are signed in to it. If you aren't, it asks `Sign in now? [y/N]` and signs you in. The default is no, so a script never opens a browser.
+
+```sh
+cc-proxy use kimi
+cc-proxy use claude
+cc-proxy use codex
+```
+
+The proxy keeps running through all of it. Routing never comes back on its own: after `stop` or `use claude`, only `start` or `use <provider>` turns it on again.
 
 ## One-shot aliases
 
-```sh
-alias csol='ANTHROPIC_BASE_URL=http://127.0.0.1:18765 ANTHROPIC_AUTH_TOKEN=unused ANTHROPIC_MODEL=gpt-6-sol[1m] ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-6-luna[1m] CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 claude'
-alias cgrok='ANTHROPIC_BASE_URL=http://127.0.0.1:18765 ANTHROPIC_AUTH_TOKEN=unused ANTHROPIC_MODEL=grok-4.5 ANTHROPIC_DEFAULT_HAIKU_MODEL=grok-4.5 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 claude'
-```
-
-These affect only the launched process.
-
-## Switch plain `claude` on and off
+To launch one session on a model without changing `settings.json`:
 
 ```sh
-cc-proxy shell install
+alias csol='ANTHROPIC_BASE_URL=http://127.0.0.1:18765 CLAUDE_CODE_OAUTH_TOKEN=unused ANTHROPIC_MODEL=gpt-6-sol[1m] ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-6-luna[1m] CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 claude'
+alias cgrok='ANTHROPIC_BASE_URL=http://127.0.0.1:18765 CLAUDE_CODE_OAUTH_TOKEN=unused ANTHROPIC_MODEL=grok-4.5 ANTHROPIC_DEFAULT_HAIKU_MODEL=grok-4.5 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 claude'
 ```
 
-It adds one line to the file your shell reads when a terminal opens:
-`~/.zshrc` for zsh, `~/.bashrc` for bash on Linux, `~/.bash_profile` for bash
-on macOS. fish gets `~/.config/fish/functions/claude.fish` instead. That line
-defines a `claude` command that runs `cc-proxy claude` while cc-proxy is on,
-and plain Claude Code while it's off. It sets no environment variables, so
-nothing else on your machine sees the proxy.
+These affect only the launched process. But Claude Code lets `settings.json` beat process variables. After `cc-proxy stop` the file holds `https://api.anthropic.com`, and that wins over the alias. Run `cc-proxy start` first, or pass the connection in a `--settings` flag, which beats the file:
 
 ```sh
-cc-proxy off   # plain claude, in every terminal
-cc-proxy on    # claude through the proxy again
+claude --settings '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:18765","CLAUDE_CODE_OAUTH_TOKEN":"unused"}}'
 ```
-
-`on` and `off` reach every terminal at once, because the `claude` command
-asks cc-proxy each time it runs. A terminal that was already open when you
-ran `shell install` needs `exec zsh` (or your shell's name) once. A Claude
-Code session that's already open keeps its connection until you quit it.
-`cc-proxy shell uninstall` removes the line and turns cc-proxy off.
 
 ## In-session model changes
 
-With the base URL already pointing to the proxy:
+With Claude Code already pointed at the proxy:
 
 ```text
 /model gpt-6-sol-fast[1m]
@@ -61,4 +54,4 @@ The provider changes with the model. Provider auth must already exist. Claude Co
 
 ## Scope
 
-cc-proxy does not provide a profile GUI, rewrite Claude Code settings, change base URLs in a running process, or configure Desktop and IDE launch environments. Use process environment, a wrapper, or a dedicated profile manager for those concerns.
+cc-proxy does not provide a profile GUI or change the base URL of a process that has no `settings.json` to read. It writes only the `env` block described in [Configure Claude Code](/using/configure-claude-code/). Hosts that skip user-level `env`, such as some desktop and SDK launches, need the variables set by hand.
