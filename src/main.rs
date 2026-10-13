@@ -7,6 +7,7 @@ use cc_proxy::{
     route,
     server::{self, ServerConfig},
     start_flow::{self, Pick},
+    tiers,
     tui::{self, MonitorExit, MonitorUiConfig},
     ui::{self, Mood},
 };
@@ -79,6 +80,8 @@ enum Commands {
     Models {
         #[arg(long)]
         full: bool,
+        #[command(subcommand)]
+        command: Option<ModelsCommand>,
     },
     /// View or change config.json values
     Config {
@@ -145,6 +148,23 @@ enum ProviderGroup {
     Auth {
         #[command(subcommand)]
         command: cc_proxy::provider::AuthCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModelsCommand {
+    /// Show or choose the model each Claude name (fable, opus, sonnet, haiku) uses
+    Map {
+        /// The Claude name to choose a model for
+        name: Option<String>,
+        /// The model it should use
+        model: Option<String>,
+        /// Forget your choice and let cc-proxy pick again
+        #[arg(long)]
+        reset: bool,
+        /// The provider to change. Defaults to the one Claude Code goes to now
+        #[arg(long)]
+        provider: Option<String>,
     },
 }
 
@@ -246,7 +266,25 @@ fn run() -> Result<()> {
             tui::run_attached_monitor(|| monitor.snapshot(), url.to_string())?;
             Ok(())
         }
-        Commands::Models { full } => {
+        Commands::Models {
+            command:
+                Some(ModelsCommand::Map {
+                    name,
+                    model,
+                    reset,
+                    provider,
+                }),
+            ..
+        } => cc_proxy::models_map::run(
+            name.as_deref(),
+            model.as_deref(),
+            reset,
+            provider.as_deref(),
+        ),
+        Commands::Models {
+            full,
+            command: None,
+        } => {
             print_models(&Registry::new(), full);
             Ok(())
         }
@@ -491,11 +529,13 @@ fn set_route(pick: Pick, url: &str) -> Result<()> {
 /// Where Claude Code goes now, and what to run to change that.
 fn route_lines(pick: Pick) -> Vec<String> {
     let mut lines = route::status_lines();
-    if matches!(pick, Pick::Provider(_)) {
+    if let Pick::Provider(provider) = pick {
         lines.insert(
             1,
             "Windows that are already open follow within a few seconds.".into(),
         );
+        let mappings = tiers::mapping(&Registry::new(), &config::route(), provider);
+        lines.splice(2..2, tiers::describe(&mappings));
     }
     lines
 }

@@ -242,6 +242,25 @@ fn set_dotted(root: &mut serde_json::Value, path: &str, value: serde_json::Value
     }
 }
 
+/// Remove one dotted key, and any object it leaves empty.
+fn remove_dotted(root: &mut serde_json::Value, path: &str) {
+    let Some((head, rest)) = path.split_once('.') else {
+        if let Some(map) = root.as_object_mut() {
+            map.remove(path);
+        }
+        return;
+    };
+    let Some(child) = root.get_mut(head) else {
+        return;
+    };
+    remove_dotted(child, rest);
+    if child.as_object().is_some_and(serde_json::Map::is_empty)
+        && let Some(map) = root.as_object_mut()
+    {
+        map.remove(head);
+    }
+}
+
 fn scalar_text(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(text) => Some(text.clone()),
@@ -348,6 +367,16 @@ pub(crate) fn write_value(path: &str, value: serde_json::Value) -> Result<std::p
     write_values([(path, value)])
 }
 
+/// Remove dotted keys from config.json, keeping every other key.
+pub(crate) fn remove_values<'a>(paths_to_remove: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    let mut root = read_file()?;
+    for path in paths_to_remove {
+        remove_dotted(&mut root, path);
+    }
+    config::write_config_json_at(&paths::config_dir(), &root)?;
+    Ok(())
+}
+
 /// Write several dotted keys in one step, so a proxy that reads the file per
 /// request never sees half of the change.
 pub(crate) fn write_values<'a>(
@@ -440,6 +469,24 @@ mod tests {
             get_dotted(&root, "log.verbose").and_then(scalar_text),
             Some("true".to_string())
         );
+    }
+
+    #[test]
+    fn removing_a_dotted_key_drops_the_objects_it_leaves_empty() {
+        let mut root = serde_json::json!({
+            "port": 1,
+            "route": {"on": true, "tiers": {"codex": {"opus": "a", "haiku": "b"}}}
+        });
+        remove_dotted(&mut root, "route.tiers.codex.opus");
+        assert_eq!(
+            root["route"]["tiers"]["codex"],
+            serde_json::json!({"haiku": "b"})
+        );
+        remove_dotted(&mut root, "route.tiers.codex");
+        assert_eq!(root["route"], serde_json::json!({"on": true}));
+        remove_dotted(&mut root, "route.tiers.codex");
+        remove_dotted(&mut root, "missing.key");
+        assert_eq!(root["port"], 1);
     }
 
     #[test]

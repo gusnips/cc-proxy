@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -119,6 +119,8 @@ struct GlmConfig {
 struct RouteConfig {
     pub on: Option<bool>,
     pub provider: Option<String>,
+    /// The user's own choices, provider then tier then model id.
+    pub tiers: Option<BTreeMap<String, BTreeMap<String, Option<String>>>>,
 }
 
 #[derive(Deserialize)]
@@ -1083,6 +1085,8 @@ pub struct Route {
     pub on: bool,
     /// The last provider picked. Kept when routing goes off, so `start` can offer it again.
     pub provider: Option<String>,
+    /// The models the user chose for a Claude name: provider, then tier.
+    pub tiers: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Route {
@@ -1090,17 +1094,37 @@ impl Route {
     pub fn target(&self) -> Option<&str> {
         self.provider.as_deref().filter(|_| self.on)
     }
+
+    /// The model the user chose for `tier` on `provider`.
+    pub fn tier(&self, provider: &str, tier: &str) -> Option<&str> {
+        self.tiers.get(provider)?.get(tier).map(String::as_str)
+    }
 }
 
 pub fn route() -> Route {
-    let Some(RouteConfig { on, provider }) =
-        read_file_config(&paths::config_dir()).and_then(|file| file.route)
+    let Some(RouteConfig {
+        on,
+        provider,
+        tiers,
+    }) = read_file_config(&paths::config_dir()).and_then(|file| file.route)
     else {
         return Route::default();
     };
+    let tiers = tiers
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(provider, chosen)| {
+            let chosen = chosen
+                .into_iter()
+                .filter_map(|(tier, model)| Some((tier, model.filter(|model| !model.is_empty())?)))
+                .collect();
+            (provider, chosen)
+        })
+        .collect();
     Route {
         on: on.unwrap_or(false),
         provider: provider.filter(|name| !name.is_empty()),
+        tiers,
     }
 }
 
@@ -1454,6 +1478,24 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(root.get("opencode").is_none());
         assert!(!clear_opencode_api_key().unwrap());
+    }
+
+    #[test]
+    fn route_reads_the_users_tier_choices_and_skips_empty_ones() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set("CCP_CONFIG_DIR", dir.path());
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"route":{"on":true,"provider":"codex","tiers":{"codex":{"opus":"gpt-6-sol","haiku":""}}}}"#,
+        )
+        .unwrap();
+
+        let route = route();
+        assert_eq!(route.target(), Some("codex"));
+        assert_eq!(route.tier("codex", "opus"), Some("gpt-6-sol"));
+        assert_eq!(route.tier("codex", "haiku"), None);
+        assert_eq!(route.tier("kimi", "opus"), None);
     }
 
     #[test]

@@ -1085,7 +1085,7 @@ async fn smoke_codex_model_routes_to_real_provider() {
 #[test]
 fn smoke_kimi_model_is_registered() {
     let registry = Registry::new();
-    let provider = registry.provider_for_model("kimi-for-coding", None);
+    let provider = registry.provider_for_model("kimi-for-coding");
     assert!(
         provider.is_some(),
         "kimi-for-coding must resolve to a registered provider"

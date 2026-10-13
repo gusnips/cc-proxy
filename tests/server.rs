@@ -1603,23 +1603,44 @@ async fn models_endpoint_lists_supported_models() {
 }
 
 #[tokio::test]
-async fn models_endpoint_includes_claude_prefixed_aliases_for_discovery() {
+async fn models_endpoint_leads_with_claude_names_while_routing_is_on() {
     // Claude Code's gateway model discovery ignores ids that don't start with
-    // "claude" or "anthropic", so the alias entries are what make
+    // "claude" or "anthropic", so these entries are what make
     // CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 useful at all.
     let _routed = routed_to("codex");
     let app = app(Arc::new(Registry::new()));
     let (status, value) = get_models(app, "/v1/models?limit=1000").await;
 
     assert_eq!(status, StatusCode::OK);
-    let ids: Vec<&str> = value["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["id"].as_str().unwrap())
-        .collect();
-    assert!(ids.iter().any(|id| id.starts_with("claude-")));
-    assert!(ids.contains(&"claude-opus-5"));
+    let data = value["data"].as_array().unwrap();
+    let ids: Vec<&str> = data.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        ids[..4],
+        [
+            "claude-fable",
+            "claude-opus",
+            "claude-sonnet",
+            "claude-haiku"
+        ]
+    );
+    let label = data[1]["display_name"].as_str().unwrap();
+    assert!(label.starts_with("Opus: "), "{label}");
+    assert!(label.ends_with("(codex)"), "{label}");
+}
+
+#[tokio::test]
+async fn models_endpoint_has_no_claude_names_while_routing_is_off() {
+    let routed = routed_to("codex");
+    routed.set(false, "codex");
+    let app = app(Arc::new(Registry::new()));
+    let (status, value) = get_models(app, "/v1/models?limit=1000").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let data = value["data"].as_array().unwrap();
+    assert!(
+        data.iter()
+            .all(|m| !m["id"].as_str().unwrap().starts_with("claude-"))
+    );
 }
 
 #[tokio::test]

@@ -8,18 +8,6 @@ pub const KIMI_LEGACY_MODEL: &str = "kimi-for-coding";
 static ALIAS_TARGETS: once_cell::sync::Lazy<HashMap<&'static str, &'static str>> =
     once_cell::sync::Lazy::new(|| {
         let mut m = HashMap::new();
-        m.insert("haiku", KIMI_DEFAULT_MODEL);
-        m.insert("claude-haiku-4-5", KIMI_DEFAULT_MODEL);
-        m.insert("claude-haiku-4-5-20251001", KIMI_DEFAULT_MODEL);
-        m.insert("sonnet", KIMI_DEFAULT_MODEL);
-        m.insert("claude-sonnet-4-6", KIMI_DEFAULT_MODEL);
-        m.insert("claude-sonnet-5", KIMI_DEFAULT_MODEL);
-        m.insert("opus", KIMI_DEFAULT_MODEL);
-        m.insert("claude-opus-4-7", KIMI_DEFAULT_MODEL);
-        m.insert("claude-opus-4-8", KIMI_DEFAULT_MODEL);
-        m.insert("claude-opus-5", KIMI_DEFAULT_MODEL);
-        m.insert("fable", KIMI_DEFAULT_MODEL);
-        m.insert("claude-fable-5", KIMI_DEFAULT_MODEL);
         m.insert("kimi-for-coding", KIMI_LEGACY_MODEL);
         m.insert("kimi-k2.6", KIMI_LEGACY_MODEL);
         m.insert("k2.6", KIMI_LEGACY_MODEL);
@@ -89,30 +77,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_haiku_to_default() {
-        assert_eq!(resolve_model("haiku"), KIMI_DEFAULT_MODEL);
-    }
-
-    #[test]
-    fn resolve_opus_4_8_to_default() {
-        assert_eq!(resolve_model("claude-opus-4-8"), KIMI_DEFAULT_MODEL);
-    }
-
-    #[test]
-    fn resolve_claude_5_aliases_to_default() {
-        for model in [
-            "claude-sonnet-5",
-            "claude-opus-5",
-            "fable",
-            "claude-fable-5",
-        ] {
-            assert_eq!(resolve_model(model), KIMI_DEFAULT_MODEL);
-        }
-    }
-
-    #[test]
     fn resolve_unknown_to_default() {
         assert_eq!(resolve_model("unknown-model"), KIMI_DEFAULT_MODEL);
+        assert_eq!(resolve_model("claude-opus-4-8"), KIMI_DEFAULT_MODEL);
     }
 
     #[test]

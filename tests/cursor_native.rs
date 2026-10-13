@@ -173,11 +173,11 @@ fn registry_routes_cursor_model_to_cursor_provider() {
     use cc_proxy::Registry;
 
     let registry = Registry::new();
-    let provider = registry.provider_for_model("cursor:gpt-5.5", None);
+    let provider = registry.provider_for_model("cursor:gpt-5.5");
     assert!(provider.is_some());
     assert_eq!(provider.unwrap().name(), "cursor");
 
-    let provider = registry.provider_for_model("cursor-agent", None);
+    let provider = registry.provider_for_model("cursor-agent");
     assert!(provider.is_some());
     assert_eq!(provider.unwrap().name(), "cursor");
 }
@@ -658,7 +658,7 @@ fn registry_provider_for_legacy_cursor_model() {
         "cursor-plan",
         "cursor-ask",
     ] {
-        let provider = registry.provider_for_model(model, None);
+        let provider = registry.provider_for_model(model);
         assert!(
             provider.is_some(),
             "expected provider for legacy model {model}"

@@ -51,7 +51,7 @@ use self::translate::accumulate::accumulate_response_with_traffic;
 use self::translate::live_stream::LiveStreamTranslator;
 use self::translate::model_allowlist::{
     advertised_models, assert_routable_model, full_lane_web_search_model,
-    resolve_model_request_with_config_override, uses_responses_lite,
+    resolve_model_request_with_config_override, tier_catalog, uses_responses_lite,
 };
 use self::translate::reducer::finish_metadata_from_upstream;
 use self::translate::request::{
@@ -561,6 +561,10 @@ impl Provider for CodexProvider {
 
     fn supported_models(&self) -> Vec<String> {
         advertised_models()
+    }
+
+    fn catalog(&self) -> Vec<String> {
+        tier_catalog()
     }
 
     fn cli(&self) -> &'static dyn CliHandlers {

@@ -25,6 +25,20 @@ pub enum AuthCommand {
 pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
     fn supported_models(&self) -> Vec<String>;
+
+    /// The models Claude's names can map to. Everything the provider supports
+    /// by default. A provider leaves out the ones that would only confuse the
+    /// match, such as Codex's `-fast` copies of every model.
+    fn catalog(&self) -> Vec<String> {
+        self.supported_models()
+    }
+
+    /// True when the catalog is a mix of other vendors' models, so no match
+    /// for a Claude name is certain and the user always confirms it.
+    fn aggregator(&self) -> bool {
+        false
+    }
+
     fn cli(&self) -> &'static dyn CliHandlers;
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response;
 
