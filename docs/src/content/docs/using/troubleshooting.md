@@ -29,6 +29,14 @@ If Claude Code says it can't connect right after a crash or a reboot, routing is
 
 `cc-proxy status` shows where Claude Code goes now and warns about a pinned model or an API key in your settings.
 
+## Claude Code forgets the task after switching
+
+Some Claude Code sessions use Message Threads: they send only the newest messages and expect Anthropic to remember the rest. Version 0.2.0 accepted those partial requests without storing their earlier history. A tool result could reach Codex without the original task, even if the first request after switching worked.
+
+The fix returns `thread_unsupported_request` before contacting a provider. Claude Code then retries with the full conversation, system prompt and tools, in the same running session. Removing the `thread` field alone would not restore the missing history.
+
+Update the proxy to a version containing this fix. Updating the binary does not replace an already running proxy; arrange a proxy-only restart when no requests are active. Do not restart Claude Code or cancel workflows to apply this fix. A workflow already paused until a usage limit resets may still wait for its client-side timer.
+
 ## Authentication error
 
 Check the provider selected by the model, then inspect its credential:
