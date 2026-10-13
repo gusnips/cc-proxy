@@ -45,7 +45,7 @@ If your `settings.json` pins a model (`ANTHROPIC_MODEL` or one of the `ANTHROPIC
 ## Limits
 
 - A window that was open before `settings.json` existed never sees changes. Restart it once.
-- A window that started on a plain Claude login keeps its feature flags after a switch. It keeps working. Restart it for the full set.
+- A window that started on a plain Claude login can keep request features after a switch. For Message Threads (requests that omit history already held by Anthropic), cc-proxy asks Claude Code to resend the full conversation. This recovery does not require restarting Claude Code. Other unsupported features may still need separate handling.
 - A project's `.claude/settings.json` beats the user file. If a project sets its own `ANTHROPIC_BASE_URL`, that project ignores cc-proxy.
 - `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `apiKeyHelper` take priority over the placeholder token. Claude Code then can't show limit reset times. `cc-proxy status` warns when any of them is set.
 - Claude Code and cc-proxy can write the file at the same moment. cc-proxy checks the file again right before it writes and tries once more. There is no lock.

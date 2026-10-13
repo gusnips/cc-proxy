@@ -3,6 +3,16 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.1 (2026-10-13)
+
+- Switching an existing Claude Code session to the proxy no longer silently
+  accepts a request with only its newest messages. Claude Code's Message
+  Threads expect Anthropic to retain earlier history, which cc-proxy does
+  not have. The proxy now rejects both thread creation and continuation
+  with `thread_unsupported_request`, so Claude Code resends the full
+  conversation, system prompt and tools without restarting the session.
+  This also prevents history loss on the tool-result turn after a switch.
+
 ## v0.2.0 (2026-10-13)
 
 This release replaces the shell hook with a setting that Claude Code reads

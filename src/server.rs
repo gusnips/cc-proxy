@@ -40,7 +40,6 @@ use axum::{
     routing::{get, post},
 };
 use http_body_util::{BodyExt, StreamBody};
-use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use std::fs::{self, File};
 use std::future::Future;
@@ -1591,7 +1590,7 @@ async fn dispatch_request(
         }
     };
 
-    let mut body: crate::anthropic::schema::MessagesRequest = match parse_json_body(&body_bytes) {
+    let mut body = match parse_messages_body(&body_bytes) {
         Ok(body) => body,
         Err(response) => {
             let status = response.status();
@@ -2236,10 +2235,9 @@ fn redacted_query(uri: &http::Uri) -> Value {
     Value::Object(out)
 }
 
-fn parse_json_body<T>(body: &[u8]) -> Result<T, Box<Response>>
-where
-    T: DeserializeOwned,
-{
+fn parse_messages_body(
+    body: &[u8],
+) -> Result<crate::anthropic::schema::MessagesRequest, Box<Response>> {
     if body.is_empty() {
         return Err(Box::new(json_error(
             StatusCode::BAD_REQUEST,
@@ -2248,13 +2246,35 @@ where
         )));
     }
 
-    serde_json::from_slice::<T>(body).map_err(|err| {
-        Box::new(json_error(
+    let body: crate::anthropic::schema::MessagesRequest =
+        serde_json::from_slice(body).map_err(|err| {
+            Box::new(json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!("Invalid JSON: {err}"),
+            ))
+        })?;
+    // Message Threads can omit history, system text and tools held by Anthropic.
+    // Reject creates too: accepting one tells the client we store its thread.
+    // This error code makes Claude Code resend the full request without thread.
+    if body
+        .extra
+        .get("thread")
+        .is_some_and(|thread| !thread.is_null())
+    {
+        return Err(Box::new((
             StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            format!("Invalid JSON: {err}"),
-        ))
-    })
+            Json(json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "cc-proxy does not store Message Threads. Retry without thread and include the full conversation, system prompt and tools.",
+                    "details": {"error_code": "thread_unsupported_request"}
+                }
+            })),
+        ).into_response()));
+    }
+    Ok(body)
 }
 
 async fn fallback_handler(method: axum::http::Method, uri: axum::http::Uri) -> Response {

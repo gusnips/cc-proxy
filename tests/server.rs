@@ -197,8 +197,10 @@ fn translating_registry(
 
 type CapturedIdentity = (Option<ConversationIdentity>, Option<String>);
 
+#[derive(Default)]
 struct IdentityCaptureProvider {
     captured: Arc<Mutex<Vec<CapturedIdentity>>>,
+    bodies: Mutex<Vec<MessagesRequest>>,
 }
 
 #[async_trait]
@@ -225,10 +227,11 @@ impl Provider for IdentityCaptureProvider {
 
     async fn handle_messages_with_conversation_identity(
         &self,
-        _body: MessagesRequest,
+        body: MessagesRequest,
         ctx: RequestContext,
         conversation_identity: Option<ConversationIdentity>,
     ) -> axum::response::Response {
+        self.bodies.lock().unwrap().push(body);
         self.captured
             .lock()
             .unwrap()
@@ -238,9 +241,10 @@ impl Provider for IdentityCaptureProvider {
 
     async fn handle_count_tokens(
         &self,
-        _body: MessagesRequest,
+        body: MessagesRequest,
         _ctx: RequestContext,
     ) -> axum::response::Response {
+        self.bodies.lock().unwrap().push(body);
         (StatusCode::OK, "counted").into_response()
     }
 }
@@ -287,6 +291,7 @@ async fn messages_ingress_forwards_only_strict_conversation_identity() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(IdentityCaptureProvider {
         captured: captured.clone(),
+        ..Default::default()
     }) as Arc<dyn Provider>;
     let app = app(Arc::new(Registry::from_providers([provider])));
     let normal_body = || {
@@ -392,6 +397,126 @@ async fn messages_ingress_forwards_only_strict_conversation_identity() {
             ),
             (None, Some("session-auto-review".to_string())),
         ]
+    );
+}
+
+#[tokio::test]
+async fn thread_requests_are_rejected_before_any_provider_call() {
+    let provider = Arc::new(IdentityCaptureProvider::default());
+    let app = app(Arc::new(Registry::from_providers([
+        provider.clone() as Arc<dyn Provider>
+    ])));
+    for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+        for stream in [false, true] {
+            for thread in [
+                json!({"type": "create"}),
+                json!({"type": "continue", "previous_message_id": "msg_elsewhere"}),
+                json!({"type": "future-thread-mode"}),
+            ] {
+                let body = json!({
+                    "model": "gpt-5.5",
+                    "max_tokens": 32,
+                    "stream": stream,
+                    "thread": thread,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "call_before_switch", "content": "done"}
+                    ]}]
+                });
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(Method::POST)
+                            .uri(path)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}, {body}");
+                assert!(!request_id(&response).is_empty());
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let error: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(error["type"], "error");
+                assert_eq!(error["error"]["type"], "invalid_request_error");
+                assert_eq!(
+                    error["error"]["details"]["error_code"],
+                    "thread_unsupported_request"
+                );
+                assert!(provider.bodies.lock().unwrap().is_empty());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn thread_stateless_retries_keep_history_system_and_tools() {
+    let provider = Arc::new(IdentityCaptureProvider::default());
+    let app = app(Arc::new(Registry::from_providers([
+        provider.clone() as Arc<dyn Provider>
+    ])));
+    let full = json!({
+        "model": "gpt-5.5",
+        "max_tokens": 32,
+        "system": [{"type": "text", "text": "Preserve the original task."}],
+        "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+        "diagnostics": {"previous_message_id": "msg_diagnostic_only"},
+        "messages": [
+            {"role": "user", "content": "Original task: remember marker THREAD_REPLAY_CHECK."},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call_before_switch", "name": "Read", "input": {"file_path": "marker.txt"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_before_switch", "content": "THREAD_REPLAY_CHECK"}]},
+            {"role": "assistant", "content": "I read the marker."},
+            {"role": "user", "content": "Continue the original task."}
+        ]
+    });
+    for agent in [None, Some("agent-child")] {
+        for stream in [false, true] {
+            let mut body = full.clone();
+            body["stream"] = json!(stream);
+            if agent.is_some() {
+                body["thread"] = Value::Null;
+            }
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("x-claude-code-session-id", "session-replay")
+                .header("anthropic-beta", "message-threads-2026-08-12");
+            if let Some(agent) = agent {
+                request = request.header("x-claude-code-agent-id", agent);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let sent = provider.bodies.lock().unwrap().last().unwrap().clone();
+            assert_eq!(
+                serde_json::to_value(sent.messages).unwrap(),
+                full["messages"]
+            );
+            assert_eq!(sent.extra["system"], full["system"]);
+            assert_eq!(sent.extra["tools"], full["tools"]);
+            assert_eq!(sent.extra["diagnostics"], full["diagnostics"]);
+            assert_eq!(sent.stream, stream);
+        }
+    }
+    assert_eq!(provider.bodies.lock().unwrap().len(), 4);
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(
+        captured[0].0,
+        Some(ConversationIdentity::Main("session-replay".into()))
+    );
+    assert_eq!(
+        captured[2].0,
+        Some(ConversationIdentity::Agent(
+            "session-replay".into(),
+            "agent-child".into()
+        ))
     );
 }
 
@@ -551,9 +676,7 @@ async fn messages_response(app: axum::Router, model: &str) -> axum::response::Re
 async fn successful_response_carries_a_request_id() {
     let registry = || {
         Arc::new(Registry::from_providers([
-            Arc::new(IdentityCaptureProvider {
-                captured: Arc::new(Mutex::new(Vec::new())),
-            }) as Arc<dyn Provider>,
+            Arc::new(IdentityCaptureProvider::default()) as Arc<dyn Provider>,
         ]))
     };
     let first = messages_response(app(registry()), "gpt-5.5").await;
