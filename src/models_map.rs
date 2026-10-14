@@ -26,6 +26,9 @@ pub fn run(
              --reset` to undo a choice."
         ),
     }
+    if (model.is_some() || reset) && config::route().target() == Some(provider) {
+        crate::route::refresh_model_labels();
+    }
     show(&registry, provider);
     Ok(())
 }

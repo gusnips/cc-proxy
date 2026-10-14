@@ -213,6 +213,10 @@ impl Provider for IdentityCaptureProvider {
         vec!["gpt-5.5".to_string(), "gpt-6-luna".to_string()]
     }
 
+    fn catalog(&self) -> Vec<String> {
+        cc_proxy::providers::codex::translate::model_allowlist::tier_catalog()
+    }
+
     fn cli(&self) -> &'static dyn CliHandlers {
         &FAKE_CLI
     }
@@ -398,6 +402,235 @@ async fn messages_ingress_forwards_only_strict_conversation_identity() {
             (None, Some("session-auto-review".to_string())),
         ]
     );
+}
+
+#[tokio::test]
+async fn native_model_labels_keep_exact_ids_and_leave_dispatch_and_background_checks_alone() {
+    let _routed = routed_to("codex");
+    let config_dir = std::path::PathBuf::from(std::env::var_os("CCP_CONFIG_DIR").unwrap());
+    let isolated = tempfile::tempdir().unwrap();
+    let _env = [
+        common::EnvGuard::set("CLAUDE_CONFIG_DIR", isolated.path().join("claude")),
+        common::EnvGuard::set("HOME", isolated.path()),
+        common::EnvGuard::set("CODEX_HOME", isolated.path()),
+        common::EnvGuard::set("XDG_STATE_HOME", isolated.path().join("state")),
+        common::EnvGuard::unset("CCP_CODEX_MODEL"),
+        common::EnvGuard::set("CCP_AUTO_REVIEW_MODEL", "gpt-6-luna"),
+    ];
+    std::fs::write(
+        config_dir.join("config.json"),
+        json!({"route": {"on": true, "provider": "codex", "tiers": {"codex": {
+            "fable": "gpt-5.5", "opus": "gpt-5.5", "sonnet": "gpt-5.5", "haiku": "gpt-5.5"
+        }}}})
+        .to_string(),
+    )
+    .unwrap();
+    cc_proxy::claude_settings::claim("http://127.0.0.1:19876").unwrap();
+    let settings_path = cc_proxy::claude_settings::path();
+    let provider = Arc::new(IdentityCaptureProvider::default());
+    let app = app(Arc::new(Registry::from_providers([
+        provider.clone() as Arc<dyn Provider>
+    ])));
+    for (requested, dispatched) in [
+        ("claude-fable-native[1m]", "gpt-5.5"),
+        ("claude-opus-native[1m]", "gpt-5.5"),
+        ("claude-sonnet-native[1m]", "gpt-5.5"),
+        ("claude-haiku-native[1m]", "gpt-5.5"),
+        ("gpt-5.5-fast[1M]", "gpt-5.5-fast"),
+    ] {
+        let body = json!({
+            "model": requested,
+            "max_tokens": 8192,
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "output_config": {"effort": "high"},
+            "messages": [{"role": "user", "content": "keep this request unchanged"}]
+        });
+        assert_eq!(
+            call_identity_ingress(
+                &app,
+                "/v1/messages",
+                &[("x-claude-code-session-id", "native-model-labels")],
+                body.clone(),
+            )
+            .await,
+            StatusCode::OK
+        );
+        let sent = provider.bodies.lock().unwrap().last().unwrap().clone();
+        assert_eq!(sent.model.as_deref(), Some(dispatched));
+        assert_eq!(sent.max_tokens, Some(8192));
+        assert_eq!(sent.extra["thinking"], body["thinking"]);
+        assert_eq!(sent.extra["output_config"], body["output_config"]);
+        assert_eq!(
+            serde_json::to_value(sent.messages).unwrap(),
+            body["messages"]
+        );
+        let settings: Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(settings["modelPicker"]["replaceBuiltInOptions"], true);
+        let row = settings["modelPicker"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["model"] == requested)
+            .unwrap();
+        assert_eq!(row["label"], "codex/gpt-5.5");
+        let description = row["description"].as_str().unwrap();
+        assert!(description.contains(requested));
+        let normalized = cc_proxy::registry::normalize_incoming_model(requested);
+        assert_eq!(
+            description.starts_with("Answers "),
+            cc_proxy::registry::anthropic_model_family(&normalized).is_some()
+        );
+    }
+
+    let before_reset = std::fs::read(&settings_path).unwrap();
+    let config_path = config_dir.join("config.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["route"]["tiers"]["codex"]
+        .as_object_mut()
+        .unwrap()
+        .remove("opus");
+    std::fs::write(config_path, config.to_string()).unwrap();
+    std::fs::write(
+        isolated.path().join("models_cache.json"),
+        json!({"models": [{"slug": "gpt-99-sol", "supported_in_api": true, "visibility": "list"}]})
+            .to_string(),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&settings_path).unwrap(), before_reset);
+    let observed = "claude-opus-native[1m]";
+    assert_eq!(
+        call_identity_ingress(
+            &app,
+            "/v1/messages",
+            &[("x-claude-code-session-id", "native-model-labels")],
+            json!({"model": observed, "max_tokens": 8192,
+                "messages": [{"role": "user", "content": "use the refreshed catalog"}]}),
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        provider
+            .bodies
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("gpt-99-sol")
+    );
+    let refreshed: Value = serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+    let row = refreshed["modelPicker"]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["model"] == observed)
+        .unwrap();
+    assert_eq!(row["model"], observed);
+    assert_eq!(row["label"], "codex/gpt-99-sol");
+    assert!(row["description"].as_str().unwrap().contains(observed));
+
+    let before = std::fs::read(&settings_path).unwrap();
+    for (path, requested, system, headers, dispatched) in [
+        (
+            "/v1/messages/count_tokens",
+            "claude-opus-count-only[1m]",
+            json!([]),
+            vec![("x-claude-code-session-id", "native-count-only")],
+            "gpt-99-sol",
+        ),
+        (
+            "/v1/messages",
+            "claude-opus-auto-review[1m]",
+            json!([{"type": "text", "text": "You are a security monitor for autonomous AI coding agents. Review this turn."}]),
+            vec![("x-claude-code-session-id", "native-auto-review")],
+            "gpt-6-luna",
+        ),
+        (
+            "/v1/messages",
+            "claude-opus-no-session[1m]",
+            json!([]),
+            vec![],
+            "gpt-99-sol",
+        ),
+    ] {
+        assert_eq!(
+            call_identity_ingress(
+                &app,
+                path,
+                &headers,
+                json!({
+                    "model": requested, "max_tokens": 32, "system": system,
+                    "messages": [{"role": "user", "content": "check"}]
+                })
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            provider
+                .bodies
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some(dispatched)
+        );
+        assert_eq!(
+            std::fs::read(&settings_path).unwrap(),
+            before,
+            "{requested}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn model_label_settings_errors_do_not_fail_a_valid_request() {
+    let _routed = routed_to("codex");
+    let config_dir = std::path::PathBuf::from(std::env::var_os("CCP_CONFIG_DIR").unwrap());
+    let isolated = tempfile::tempdir().unwrap();
+    let _env = [
+        common::EnvGuard::set("CLAUDE_CONFIG_DIR", isolated.path().join("claude")),
+        common::EnvGuard::set("HOME", isolated.path()),
+        common::EnvGuard::set("XDG_STATE_HOME", isolated.path().join("state")),
+        common::EnvGuard::unset("CCP_CODEX_MODEL"),
+    ];
+    std::fs::write(
+        config_dir.join("config.json"),
+        json!({"route": {"on": true, "provider": "codex", "tiers": {
+            "codex": {"opus": "gpt-5.5"}
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    cc_proxy::claude_settings::claim("http://127.0.0.1:19876").unwrap();
+    let settings_path = cc_proxy::claude_settings::path();
+    let broken = "{ not json";
+    std::fs::write(&settings_path, broken).unwrap();
+    let provider = Arc::new(IdentityCaptureProvider::default());
+    let app = app(Arc::new(Registry::from_providers([
+        provider.clone() as Arc<dyn Provider>
+    ])));
+    assert_eq!(
+        call_identity_ingress(
+            &app,
+            "/v1/messages",
+            &[("x-claude-code-session-id", "broken-model-label-settings")],
+            json!({"model": "claude-opus-native[1m]", "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hello"}]}),
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        provider.bodies.lock().unwrap()[0].model.as_deref(),
+        Some("gpt-5.5")
+    );
+    assert_eq!(std::fs::read_to_string(settings_path).unwrap(), broken);
 }
 
 #[tokio::test]
@@ -1731,8 +1964,12 @@ async fn models_endpoint_leads_with_claude_names_while_routing_is_on() {
     // "claude" or "anthropic", so these entries are what make
     // CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 useful at all.
     let _routed = routed_to("codex");
-    let app = app(Arc::new(Registry::new()));
-    let (status, value) = get_models(app, "/v1/models?limit=1000").await;
+    let _override = common::EnvGuard::unset("CCP_CODEX_MODEL");
+    let registry = Arc::new(Registry::from_providers([
+        Arc::new(IdentityCaptureProvider::default()) as Arc<dyn Provider>,
+    ]));
+    let mappings = cc_proxy::tiers::for_provider(&registry, "codex");
+    let (status, value) = get_models(app(registry), "/v1/models?limit=1000").await;
 
     assert_eq!(status, StatusCode::OK);
     let data = value["data"].as_array().unwrap();
@@ -1746,9 +1983,15 @@ async fn models_endpoint_leads_with_claude_names_while_routing_is_on() {
             "claude-haiku"
         ]
     );
-    let label = data[1]["display_name"].as_str().unwrap();
-    assert!(label.starts_with("Opus: "), "{label}");
-    assert!(label.ends_with("(codex)"), "{label}");
+    for (entry, tier) in data[..4].iter().zip(cc_proxy::tiers::TIERS) {
+        assert_eq!(
+            entry["display_name"],
+            format!("codex/{}", mappings[tier].model)
+        );
+        let description = entry["description"].as_str().unwrap();
+        assert!(description.starts_with("Answers "));
+        assert!(description.contains(entry["id"].as_str().unwrap()));
+    }
 }
 
 #[tokio::test]

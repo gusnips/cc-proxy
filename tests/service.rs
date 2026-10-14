@@ -249,6 +249,14 @@ fn start_routes_claude_code_through_settings_and_stop_switches_it_off() {
     let settings = sandbox.settings();
     assert_eq!(settings["theme"], "dark");
     assert_eq!(settings["env"]["FOO"], "1");
+    assert_eq!(settings["modelPicker"]["replaceBuiltInOptions"], true);
+    let options = settings["modelPicker"]["options"].as_array().unwrap();
+    assert_eq!(options.len(), 4);
+    assert!(
+        options
+            .iter()
+            .all(|row| row["label"].as_str().unwrap().starts_with("codex/"))
+    );
     sandbox.assert_routed_to_proxy();
     assert_eq!(sandbox.route(), json!({"on": true, "provider": "codex"}));
     sandbox
@@ -271,6 +279,7 @@ fn start_routes_claude_code_through_settings_and_stop_switches_it_off() {
     let settings = sandbox.settings();
     assert_eq!(settings["theme"], "dark");
     assert_eq!(settings["env"]["FOO"], "1");
+    assert!(settings.get("modelPicker").is_none());
     assert_eq!(sandbox.route()["on"], false);
 }
 
@@ -313,6 +322,83 @@ fn use_switches_provider_and_claude_without_restarting_the_proxy() {
     sandbox.cmd().args(["use", "codex"]).assert().success();
     sandbox.assert_routed_to_proxy();
     assert_eq!(sandbox.pid(), pid);
+}
+
+#[test]
+fn picker_labels_follow_active_provider_maps_and_restore_the_original_picker() {
+    let sandbox = Sandbox::new();
+    sandbox.sign_in("grok");
+    sandbox.sign_in("kimi");
+    let original = json!({"theme": "dark", "modelPicker": {
+        "replaceBuiltInOptions": false,
+        "other": 7,
+        "options": [{"model": "private-model", "label": "My model", "description": "Keep this row"}]
+    }});
+    sandbox.write_settings(&original.to_string());
+    let opus_label = |settings: &Value| {
+        settings["modelPicker"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["model"] == "opus")
+            .unwrap()["label"]
+            .clone()
+    };
+
+    sandbox.cmd().args(["use", "grok"]).assert().success();
+    sandbox.wait_for_status(true);
+    let pid = sandbox.pid();
+    let settings = sandbox.settings();
+    assert_eq!(opus_label(&settings), "grok/grok-4.7");
+    assert_eq!(settings["modelPicker"]["replaceBuiltInOptions"], true);
+    assert_eq!(
+        settings["modelPicker"]["options"][0],
+        original["modelPicker"]["options"][0]
+    );
+    assert_eq!(settings["modelPicker"]["other"], 7);
+
+    sandbox
+        .cmd()
+        .args(["models", "map", "opus", "grok-4.5"])
+        .assert()
+        .success();
+    assert_eq!(opus_label(&sandbox.settings()), "grok/grok-4.5");
+    let active = std::fs::read(sandbox.settings_path()).unwrap();
+    sandbox
+        .cmd()
+        .args(["models", "map", "opus", "kimi-k2.6", "--provider", "kimi"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(sandbox.settings_path()).unwrap(), active);
+
+    sandbox
+        .cmd()
+        .args(["models", "map", "opus", "--reset"])
+        .assert()
+        .success();
+    assert_eq!(opus_label(&sandbox.settings()), "grok/grok-4.7");
+    sandbox.cmd().args(["use", "kimi"]).assert().success();
+    assert_eq!(opus_label(&sandbox.settings()), "kimi/kimi-for-coding");
+    assert_eq!(sandbox.pid(), pid);
+    sandbox
+        .cmd()
+        .args(["models", "map", "opus", "--reset"])
+        .assert()
+        .success();
+    assert_eq!(opus_label(&sandbox.settings()), "kimi/k3");
+
+    sandbox.cmd().args(["use", "claude"]).assert().success();
+    sandbox.assert_routed_to_anthropic();
+    let restored = sandbox.settings();
+    assert_eq!(restored["modelPicker"], original["modelPicker"]);
+    assert_eq!(restored["theme"], original["theme"]);
+    let off = std::fs::read(sandbox.settings_path()).unwrap();
+    sandbox
+        .cmd()
+        .args(["models", "map", "opus", "grok-4.5", "--provider", "grok"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(sandbox.settings_path()).unwrap(), off);
 }
 
 #[test]

@@ -14,8 +14,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+use crate::registry::Registry;
 use crate::ui::{self, Mood};
-use crate::{claude_settings, config, config_keys, daemon};
+use crate::{claude_settings, config, config_keys, daemon, tiers};
 
 /// The providers `start` and `use` can send Claude Code to.
 pub const PROVIDERS: [&str; 7] = [
@@ -42,7 +43,40 @@ pub fn activate(provider: &str, base_url: &str) -> Result<()> {
         ("route.on", serde_json::Value::Bool(true)),
         ("route.provider", provider.into()),
     ])?;
+    refresh_model_labels();
     Ok(())
+}
+
+/// Update names only while both the route and the settings ownership are active.
+/// Observed IDs keep an existing Claude session's native model capabilities intact.
+pub fn sync_model_labels(
+    registry: &Registry,
+    route: &config::Route,
+    observed: Option<&str>,
+) -> Result<bool> {
+    if route.target().is_none() {
+        return Ok(false);
+    }
+    claude_settings::sync_model_labels(&tiers::TIERS, observed, |model| {
+        tiers::model_label(registry, route, model)
+    })
+}
+
+/// Commands refresh labels after saving their changes. A display failure must
+/// not undo a valid routing or model change.
+pub fn refresh_model_labels() -> bool {
+    match sync_model_labels(&Registry::new(), &config::route(), None) {
+        Ok(changed) => changed,
+        Err(error) => {
+            ui::eprint_note(
+                Mood::Unsure,
+                &[format!(
+                    "Routing still works, but Claude Code's model labels couldn't be updated: {error:#}"
+                )],
+            );
+            false
+        }
+    }
 }
 
 /// Send Claude Code back to Anthropic. Reports a settings file it couldn't
@@ -60,10 +94,11 @@ pub fn deactivate() -> Result<()> {
 /// Point Claude Code at the proxy's new address after a restart moved it.
 /// Does nothing while routing is off. Returns whether it wrote the settings.
 pub fn refresh(base_url: &str) -> Result<bool> {
-    match config::route().target() {
-        Some(_) => claude_settings::claim(base_url),
-        None => Ok(false),
+    if config::route().target().is_none() {
+        return Ok(false);
     }
+    let connection_changed = claude_settings::claim(base_url)?;
+    Ok(refresh_model_labels() || connection_changed)
 }
 
 /// Routing that outlived its proxy (a crash, a reboot, a kill) leaves every
