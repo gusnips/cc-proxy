@@ -291,10 +291,16 @@ fn run() -> Result<()> {
         Commands::Config { command } => match command {
             ConfigCommand::Get { key } => cc_proxy::config_keys::run_config_get(&key),
             ConfigCommand::Set { key, value } => {
-                cc_proxy::config_keys::run_config_set(&key, &value)
+                cc_proxy::config_keys::run_config_set(&key, &value)?;
+                route::refresh_model_labels();
+                Ok(())
             }
             ConfigCommand::List => cc_proxy::config_keys::run_config_list(),
-            ConfigCommand::Edit => cc_proxy::config_keys::run_config_edit(),
+            ConfigCommand::Edit => {
+                cc_proxy::config_keys::run_config_edit()?;
+                route::refresh_model_labels();
+                Ok(())
+            }
         },
         Commands::Update { check, version } => {
             cc_proxy::update::run_update(check, version.as_deref())
@@ -745,7 +751,7 @@ fn restart_daemon(port: Option<u16>) -> Result<()> {
     let mut lines = vec!["cc-proxy restarted".into(), address(&info)];
     // A new port means Claude Code's settings point at the old one.
     if route::refresh(&info.listen_url())? {
-        lines.push("Claude Code's settings now point at the new address.".into());
+        lines.push("Claude Code's settings were refreshed.".into());
     }
     ui::print_card(Mood::Awake, &lines);
     Ok(())
@@ -781,6 +787,7 @@ fn reload_daemon() -> Result<()> {
             std::process::exit(1);
         }
     }
+    route::refresh_model_labels();
     Ok(())
 }
 

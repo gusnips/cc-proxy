@@ -113,7 +113,9 @@ Routing never comes back by itself. It starts again only when you run
 
 Claude Code asks for `opus`, `sonnet`, `haiku` and `fable`. cc-proxy turns each
 name into a model of the provider you picked, using what that provider offers
-today. See which one each name gets, or choose your own:
+today. While routing is on, its header and `/model` picker show the provider
+and model, such as `codex/gpt-6.1-sol`. The native model ID stays unchanged.
+See which one each name gets, or choose your own:
 
 ```sh
 cc-proxy models map

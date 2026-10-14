@@ -298,6 +298,70 @@ pub fn resolve(registry: &Registry, route: &Route, model: &str) -> Result<String
     }
 }
 
+/// A display-only name for the provider and model that answer `requested`.
+/// The original request ID stays intact so Claude Code keeps its capabilities.
+pub fn model_label(
+    registry: &Registry,
+    route: &Route,
+    requested: &str,
+) -> Option<crate::claude_settings::ModelLabel> {
+    use crate::providers::{codex, copilot, cursor, grok, kimi, opencode};
+    use crate::registry::normalize_incoming_model;
+
+    route.target()?;
+    let normalized = normalize_incoming_model(requested);
+    let resolved = resolve(registry, route, &normalized).ok()?;
+    let handler = registry.provider_for_model(&resolved)?;
+    let provider = handler.name();
+    let mut description = match anthropic_model_family(&normalized) {
+        Some(tier) => {
+            let mut name = tier.to_string();
+            name[..1].make_ascii_uppercase();
+            format!("Answers {name} requests. Claude Code sends {requested}.")
+        }
+        None => format!("Claude Code sends {requested}."),
+    };
+    let upstream = match provider {
+        "codex" => {
+            let model = codex::translate::model_allowlist::resolve_model(&resolved);
+            codex::translate::model_allowlist::assert_routable_model(&model).ok()?;
+            model
+        }
+        "kimi" => {
+            let model = kimi::translate::model_allowlist::resolve_model(&resolved);
+            kimi::translate::model_allowlist::assert_routable_model(&model).ok()?;
+            model
+        }
+        "grok" => {
+            let model = grok::translate::model_allowlist::resolve_model(&resolved);
+            grok::translate::model_allowlist::assert_routable_model(&model).ok()?;
+            model
+        }
+        "opencode" => opencode::model::resolve(&resolved)?.id,
+        "cursor" => {
+            let model = cursor::model::resolve_cursor_model(&resolved).ok()?;
+            let mode = match model.mode {
+                cursor::model::CursorAgentMode::Agent => "agent",
+                cursor::model::CursorAgentMode::Plan => "plan",
+                cursor::model::CursorAgentMode::Ask => "ask",
+            };
+            description.push_str(&format!(" Cursor {mode} mode."));
+            model.model_id
+        }
+        "copilot" => resolved.strip_prefix(copilot::MODEL_PREFIX)?.to_string(),
+        "glm" => normalize_incoming_model(&resolved),
+        _ => return None,
+    };
+    if upstream.is_empty() {
+        return None;
+    }
+    Some(crate::claude_settings::ModelLabel {
+        model: requested.to_string(),
+        label: format!("{provider}/{upstream}"),
+        description,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

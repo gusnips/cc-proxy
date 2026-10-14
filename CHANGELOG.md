@@ -3,6 +3,17 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.2 (2026-10-14)
+
+- Claude Code's header, `/model` picker and status-line model name now show
+  the provider and model answering your requests, such as `codex/gpt-6.1-sol`.
+  Labels follow provider switches and model-map changes without a restart.
+  The native model ID, context policy and effort controls stay unchanged.
+  `/status` still shows the native ID.
+- Routing saves and restores your original `modelPicker` settings. Your
+  custom labels win, and edits you make while routing is on are kept.
+  A label update that fails does not fail the model request.
+
 ## v0.2.1 (2026-10-13)
 
 - Switching an existing Claude Code session to the proxy no longer silently

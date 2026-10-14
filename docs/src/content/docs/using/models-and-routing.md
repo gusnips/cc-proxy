@@ -47,7 +47,7 @@ Versions compare as numbers, so 6.10 is newer than 6.9. cc-proxy keeps no list o
 
 When two lines of models compete for a name, or the list is a mix of other vendors' models (OpenCode Go), cc-proxy isn't sure. `start` and `use` then show the guesses and ask once: `Use these? [Y/n]`. Your answer is saved. If there is nobody to answer (a script), cc-proxy uses its guesses for now and saves nothing.
 
-An explicit model ID always passes through unchanged. A name can point at a model of another provider.
+An explicit provider model ID skips this tier lookup. Codex's `codex.model` override still applies. A name can point at a model of another provider.
 
 ### See or change a name
 
@@ -101,10 +101,18 @@ When `ANTHROPIC_BASE_URL` already points to the proxy, these can change the requ
 
 A model change can switch upstream providers because routing is per request. It does not change `ANTHROPIC_BASE_URL` or move the process back to direct Anthropic.
 
-If you pin a model in `settings.json` (`ANTHROPIC_MODEL` or an `ANTHROPIC_DEFAULT_*_MODEL` key), Claude Code sends that exact ID and the Claude names never come up. Use full IDs there, or leave the keys out and let the names do the work.
+If you pin a model in `settings.json` (`ANTHROPIC_MODEL` or an `ANTHROPIC_DEFAULT_*_MODEL` key), Claude Code sends that exact ID. A pinned Claude name still follows the tier mapping; a provider ID selects its provider. Leave these keys out to keep Claude Code's own defaults.
 
 ## Gateway model discovery
 
-`cc-proxy start` turns on `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` in `settings.json` (unless you set it yourself). While routing is on, `/v1/models` starts with `claude-fable`, `claude-opus`, `claude-sonnet` and `claude-haiku`, each labelled with the model it uses today, for example `Opus: gpt-6.1-sol (codex)`. Claude Code's `/model` picker shows those four, because its gateway picker keeps only IDs that begin with `claude` or `anthropic`.
+`cc-proxy start` turns on `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` in `settings.json` (unless you set it yourself). While routing is on, `/v1/models` starts with `claude-fable`, `claude-opus`, `claude-sonnet` and `claude-haiku`. Their display names show the provider and model, for example `codex/gpt-6.1-sol`.
 
-Raw provider IDs follow in the list, for other clients. They stay usable through `--model`, `/model`, and environment variables. While routing is off, the four `claude-*` entries are left out.
+For Claude Code itself, cc-proxy writes native `modelPicker` labels. Its header, `/model` picker and status-line `model.display_name` then show the model answering your requests. Status lines pick up the label on their next refresh. A picker row's description says which Claude tier it uses. Labels follow provider switches, model choices and resets. An existing session gets its label when its next regular request reaches the proxy. No restart is needed.
+
+These are display names, not new routing IDs. `codex/gpt-6.1-sol` is a label; use `gpt-6.1-sol` in a request. The selected native ID stays unchanged, as do Claude Code's context policy and effort controls. Codex's `codex.model` override is reflected in the label. Cursor's automatic selection shows `cursor/default`, not a guessed model.
+
+Your custom picker rows stay. A custom label for the same ID wins. If you edit the picker while routing is on, cc-proxy stops updating it and keeps your edit when routing turns off. Otherwise, `cc-proxy use claude` and `cc-proxy stop` restore your original picker.
+
+Claude Code's `/status` view still shows the selected native ID. Managed settings or a `--settings` picker can take priority over the user file. Older clients that do not support `modelPicker` may keep their built-in names.
+
+Raw provider IDs follow in `/v1/models` for other clients. They stay usable through `--model`, `/model` and environment variables. While routing is off, the four `claude-*` entries are left out.

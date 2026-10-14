@@ -420,21 +420,17 @@ struct ModelsQuery {
 /// `claude-opus` and its siblings, each labelled with the model that answers
 /// it. Empty while routing is off.
 fn claude_model_entries(registry: &Registry, route: &crate::config::Route) -> Vec<Value> {
-    let Some(provider) = route.target() else {
-        return Vec::new();
-    };
     TIERS
         .iter()
         .filter_map(|tier| {
             let id = format!("claude-{tier}");
-            let model = tiers::resolve(registry, route, &id).ok()?;
-            let mut name = tier.to_string();
-            name[..1].make_ascii_uppercase();
+            let label = tiers::model_label(registry, route, &id)?;
             Some(json!({
                 "type": "model",
                 "object": "model",
                 "id": id,
-                "display_name": format!("{name}: {model} ({provider})"),
+                "display_name": label.label,
+                "description": label.description,
             }))
         })
         .collect()
@@ -1685,6 +1681,7 @@ async fn dispatch_request(
         }
     };
 
+    let requested_model = model.to_string();
     let mut normalized_model = normalize_incoming_model(model);
     // A Claude name becomes the model chosen for it. When none is, the name
     // serves nowhere and `refusal` is what to tell the client.
@@ -1766,6 +1763,26 @@ async fn dispatch_request(
     };
 
     body.bypass_provider_model_override = auto_review_route.is_some() && provider.name() == "codex";
+
+    // Label the client's exact spelling without changing its model profile.
+    // Background checks must not replace the session's model label.
+    if !count_tokens
+        && !is_claude_auto_review_request(&body)
+        && session_id.is_some()
+        && let Err(error) = crate::route::sync_model_labels(
+            &state.registry,
+            &crate::config::route(),
+            Some(&requested_model),
+        )
+    {
+        log.warn(
+            "model_labels_sync_failed",
+            Some(Map::from_iter([(
+                "error".to_string(),
+                json!(format!("{error:#}")),
+            )])),
+        );
+    }
 
     if let Some(route) = auto_review_route.as_ref() {
         log.info(
