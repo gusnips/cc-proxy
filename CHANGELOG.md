@@ -3,7 +3,7 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
-## Unreleased
+## v0.2.2 (2026-10-14)
 
 - Claude Code's header, `/model` picker and status-line model name now show
   the provider and model answering your requests, such as `codex/gpt-6.1-sol`.
