@@ -3,7 +3,7 @@ title: Configure Claude Code
 description: What cc-proxy writes to Claude Code's settings.json, how it treats values you set yourself, and how to set the same variables by hand.
 ---
 
-`cc-proxy start` and `cc-proxy use <provider>` send Claude Code to the proxy by editing one file: the `env` block of `~/.claude/settings.json`. If you set `CLAUDE_CONFIG_DIR`, cc-proxy edits `settings.json` in that folder instead.
+`cc-proxy start` and `cc-proxy use <provider>` send Claude Code to the proxy through `~/.claude/settings.json`. They set the connection in `env` and the model labels in `modelPicker`. If you set `CLAUDE_CONFIG_DIR`, cc-proxy edits `settings.json` in that folder instead.
 
 Claude Code reads this file again whenever it changes, in every open window. That is why a switch reaches terminals, editors and windows that are already running, with no shell hook and no restart.
 
@@ -17,6 +17,8 @@ Claude Code reads this file again whenever it changes, in every open window. Tha
 | `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK`  | `1`                       | Stops Claude Code from retrying a half-finished stream without streaming, which can run tool calls twice.                                                                                                                                                            |
 | `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | `1`                       | Lets Claude Code's `/model` picker list `claude-opus`, `claude-sonnet`, `claude-haiku` and `claude-fable` from the proxy.                                                                                                                                            |
 
+While routing is on, cc-proxy also writes a `modelPicker` block with provider/model labels. It replaces the built-in picker rows, keeps your custom rows and learns the exact native IDs from running sessions. It does not change `model` or any `ANTHROPIC_DEFAULT_*_MODEL` value.
+
 cc-proxy keeps the order of your keys and the text of every value it doesn't change. If `settings.json` is a symlink, it writes to the file the link points to. If the file isn't valid JSON, `start` and `use` stop and say where the problem is. Nothing is overwritten.
 
 ## Values you set yourself
@@ -24,10 +26,11 @@ cc-proxy keeps the order of your keys and the text of every value it doesn't cha
 - **`ANTHROPIC_BASE_URL` and `CLAUDE_CODE_OAUTH_TOKEN`.** cc-proxy takes these over while routing is on. It saves what you had under a top-level `cc-proxy` key in the same file, and puts it back when routing turns off.
 - **The three switches below them.** cc-proxy sets one only if you haven't. A value you wrote is never changed, in either direction.
 - **If you edit a key by hand while routing is on,** cc-proxy sees that your value differs from what it wrote and leaves it alone when routing turns off.
+- Your original `modelPicker` is saved too. Your custom labels take priority. Editing or deleting the managed picker pauses label updates until you turn routing off and on again. Your edit is kept.
 
 ## Turning it off
 
-`cc-proxy stop` and `cc-proxy use claude` don't delete the keys. Claude Code adds `env` values from this file but never removes one it stops seeing, so a deleted key would leave an open window pointed at the proxy. cc-proxy writes values that point back at Anthropic instead:
+`cc-proxy stop` and `cc-proxy use claude` restore your original picker, or remove it if you had none. They don't delete the `env` keys. Claude Code adds `env` values from this file but never removes one it stops seeing, so a deleted key would leave an open window pointed at the proxy. cc-proxy writes values that point back at Anthropic instead:
 
 - `ANTHROPIC_BASE_URL` becomes `https://api.anthropic.com`, or your saved value.
 - `CLAUDE_CODE_OAUTH_TOKEN` becomes an empty string, or your saved value.
@@ -40,7 +43,7 @@ If the proxy stops without a `stop` (a crash, a reboot, `kill`), the next `cc-pr
 
 Claude Code asks for `opus`, `sonnet`, `haiku` and `fable`, or a longer name such as `claude-opus-4-8`. cc-proxy turns each into a model of the provider you picked. See [Models and routing](/using/models-and-routing/) and `cc-proxy models map`.
 
-If your `settings.json` pins a model (`ANTHROPIC_MODEL` or one of the `ANTHROPIC_DEFAULT_*_MODEL` keys), Claude Code sends that exact name. The proxy serves it as given. `cc-proxy status` warns about pinned names.
+If your `settings.json` pins a model (`ANTHROPIC_MODEL` or one of the `ANTHROPIC_DEFAULT_*_MODEL` keys), Claude Code sends that exact name. A provider model goes to its provider; a Claude name still follows the tier mapping. `cc-proxy status` warns about pinned names.
 
 ## Limits
 
