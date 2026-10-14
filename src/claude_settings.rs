@@ -1,4 +1,4 @@
-//! The `env` block cc-proxy keeps in Claude Code's user settings.
+//! Routing and model labels cc-proxy keeps in Claude Code's user settings.
 //!
 //! Claude Code reads `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`)
 //! when it starts and again whenever the file changes, in every open window.
@@ -20,10 +20,11 @@ use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::{Map, Value, value::RawValue};
 
-use crate::{fsutil, paths};
+use crate::{fsutil, paths, registry};
 
 /// Top-level key that holds the backup.
 const STATE_KEY: &str = "cc-proxy";
+const MODEL_PICKER: &str = "modelPicker";
 
 const BASE_URL: &str = "ANTHROPIC_BASE_URL";
 const OAUTH_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
@@ -75,6 +76,14 @@ pub fn path() -> PathBuf {
     dir.join("settings.json")
 }
 
+/// A display name for a model. The model ID still selects Claude Code's capabilities.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelLabel {
+    pub model: String,
+    pub label: String,
+    pub description: String,
+}
+
 /// What cc-proxy wrote, and what it replaced.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct State {
@@ -84,6 +93,35 @@ struct State {
     /// The value we put there. A key that no longer holds it was edited since.
     #[serde(default)]
     written: Map<String, Value>,
+    #[serde(
+        default,
+        deserialize_with = "model_picker_state",
+        skip_serializing_if = "Option::is_none"
+    )]
+    model_picker: Option<ModelPickerState>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ModelPickerState {
+    /// Raw JSON keeps an absent key distinct from a key whose value was `null`.
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    original: Option<String>,
+    written: Value,
+    #[serde(default)]
+    observed: Vec<String>,
+    #[serde(default)]
+    paused: bool,
+}
+
+/// Damaged picker metadata must not discard the separate routing backup.
+fn model_picker_state<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ModelPickerState>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    let state: Option<ModelPickerState> = serde_json::from_value(value).ok();
+    Ok(state.filter(|picker| {
+        picker.written.is_object() && model_picker(picker.original.as_deref()).is_ok()
+    }))
 }
 
 impl State {
@@ -318,6 +356,7 @@ fn claim_in(doc: &mut Document, base_url: &str) -> Result<()> {
         state.claimed.insert(key.to_string(), claimed);
         state.written.insert(key.to_string(), value);
     }
+    state.model_picker = prior.and_then(|prior| prior.model_picker);
     doc.set_env(&env)?;
     doc.set_state(Some(&state))
 }
@@ -337,6 +376,17 @@ fn release_in(doc: &mut Document) -> Result<bool> {
                     _ => neutral(key),
                 };
                 env.set(key, &restored)?;
+            }
+            if let Some(picker) = state.model_picker
+                && !picker.paused
+                && doc.root.raw(MODEL_PICKER).is_some_and(|raw| {
+                    serde_json::from_str::<Value>(raw.get()).ok().as_ref() == Some(&picker.written)
+                })
+            {
+                match picker.original {
+                    Some(original) => doc.root.set_raw(MODEL_PICKER, original)?,
+                    None => doc.root.remove(MODEL_PICKER),
+                }
             }
         }
         None if looks_routed(&env) => {
@@ -423,6 +473,181 @@ pub fn release() -> Result<bool> {
     edit(&path(), release_text)
 }
 
+fn model_picker(raw: Option<&str>) -> Result<Map<String, Value>> {
+    let value: Value = serde_json::from_str(raw.unwrap_or("{}"))?;
+    let picker = match value {
+        Value::Null => Map::new(),
+        Value::Object(picker) => picker,
+        _ => bail!("`modelPicker` must be an object or null. Fix it in Claude Code's settings"),
+    };
+    if picker
+        .get("replaceBuiltInOptions")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        bail!(
+            "`modelPicker.replaceBuiltInOptions` must be true or false. Fix it in Claude Code's settings"
+        );
+    }
+    if let Some(options) = picker.get("options") {
+        let Some(options) = options.as_array() else {
+            bail!("`modelPicker.options` must be an array. Fix it in Claude Code's settings");
+        };
+        for option in options {
+            if !option.get("model").is_some_and(Value::is_string)
+                || !option.get("label").is_some_and(Value::is_string)
+                || option
+                    .get("description")
+                    .is_some_and(|value| !value.is_string())
+            {
+                bail!(
+                    "Each `modelPicker.options` row needs a model and label as text, and an optional description as text. Fix it in Claude Code's settings"
+                );
+            }
+        }
+    }
+    Ok(picker)
+}
+
+fn sync_model_labels_text(
+    text: &str,
+    base_models: &[&str],
+    observed: Option<&str>,
+    resolve: &impl Fn(&str) -> Option<ModelLabel>,
+) -> Result<String> {
+    let mut doc = Document::parse(text)?;
+    let Some(mut state) = doc.state() else {
+        return Ok(text.to_string());
+    };
+    let env = doc.env()?;
+    if state.written_text(BASE_URL).is_none()
+        || env.text(BASE_URL).as_deref() != state.written_text(BASE_URL)
+    {
+        return Ok(text.to_string());
+    }
+
+    let current = doc
+        .root
+        .raw(MODEL_PICKER)
+        .and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok());
+    if let Some(picker) = state.model_picker.as_mut() {
+        if picker.paused {
+            return Ok(text.to_string());
+        }
+        if current.as_ref() != Some(&picker.written) {
+            picker.paused = true;
+            doc.set_state(Some(&state))?;
+            return doc.render();
+        }
+    }
+
+    let original = match state.model_picker.as_ref() {
+        Some(picker) => picker.original.clone(),
+        None => doc.root.raw(MODEL_PICKER).map(|raw| raw.get().to_string()),
+    };
+    let mut picker = model_picker(original.as_deref())?;
+    let mut options = picker
+        .get("options")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut remembered = state
+        .model_picker
+        .as_ref()
+        .map(|picker| picker.observed.clone())
+        .unwrap_or_default();
+    let mut models = Vec::new();
+    for model in base_models
+        .iter()
+        .copied()
+        .chain(remembered.iter().map(String::as_str))
+        .chain(observed)
+    {
+        if !models.contains(&model) {
+            models.push(model);
+        }
+    }
+    let mut labels = Vec::new();
+    let mut remember_observed = false;
+    for model in models {
+        let Some(label) = resolve(model) else {
+            continue;
+        };
+        if label.model != model {
+            bail!("The label for `{model}` must keep that model ID. cc-proxy changed no settings");
+        }
+        remember_observed |= observed == Some(model);
+        labels.push(label);
+    }
+    if labels.is_empty() && state.model_picker.is_none() {
+        return Ok(text.to_string());
+    }
+    if let Some(observed) = observed
+        && remember_observed
+        && !base_models.contains(&observed)
+        && !remembered.iter().any(|model| model == observed)
+    {
+        remembered.push(observed.to_string());
+    }
+    let concrete_families: Vec<String> = labels
+        .iter()
+        .filter(|label| label.model.starts_with("claude-"))
+        .filter_map(|label| {
+            registry::anthropic_model_family(&registry::normalize_incoming_model(&label.model))
+                .map(str::to_string)
+        })
+        .collect();
+    for label in &labels {
+        // A concrete native ID replaces only our fallback alias, never a user's row.
+        if !concrete_families.contains(&label.model)
+            && !options.iter().any(|option| {
+                option.get("model").and_then(Value::as_str).map(str::trim)
+                    == Some(label.model.as_str())
+            })
+        {
+            options.push(serde_json::to_value(label)?);
+        }
+    }
+    // Appended rows lose to Claude Code's built-in labels for the same model ID.
+    // With no resolved labels, keep the built-ins available alongside the user's rows.
+    picker.insert(
+        "replaceBuiltInOptions".into(),
+        Value::Bool(!labels.is_empty()),
+    );
+    picker.insert("options".into(), Value::Array(options));
+    let written = Value::Object(picker);
+    let previous_observed = state
+        .model_picker
+        .as_ref()
+        .map(|picker| picker.observed.as_slice())
+        .unwrap_or_default();
+    if current.as_ref() == Some(&written) && previous_observed == remembered {
+        return Ok(text.to_string());
+    }
+    state.model_picker = Some(ModelPickerState {
+        original,
+        written: written.clone(),
+        observed: remembered,
+        paused: false,
+    });
+    if current.as_ref() != Some(&written) {
+        doc.root.set_raw(MODEL_PICKER, doc.nested(&written)?)?;
+    }
+    doc.set_state(Some(&state))?;
+    doc.render()
+}
+
+/// Update picker labels only while the routing settings still belong to cc-proxy.
+/// User-written options and labels take precedence, and manual edits pause updates.
+pub fn sync_model_labels(
+    base_models: &[&str],
+    observed: Option<&str>,
+    resolve: impl Fn(&str) -> Option<ModelLabel>,
+) -> Result<bool> {
+    edit(&path(), |text| {
+        sync_model_labels_text(text, base_models, observed, &resolve)
+    })
+}
+
 /// What the settings file says about routing.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Inspection {
@@ -490,6 +715,22 @@ mod tests {
     use serde_json::json;
 
     const URL: &str = "http://127.0.0.1:18765";
+    const BASE_MODELS: [&str; 2] = ["opus", "sonnet"];
+
+    fn sync_labels(text: &str, observed: Option<&str>, provider: &str) -> String {
+        sync_model_labels_text(text, &BASE_MODELS, observed, &|model| {
+            Some(ModelLabel {
+                model: model.to_string(),
+                label: format!("{provider}/actual-model"),
+                description: format!("{model} routes to {provider}/actual-model"),
+            })
+        })
+        .unwrap()
+    }
+
+    fn picker_of(text: &str) -> Value {
+        serde_json::from_str::<Value>(text).unwrap()[MODEL_PICKER].clone()
+    }
 
     fn env_of(text: &str) -> Value {
         serde_json::from_str::<Value>(text).unwrap()["env"].clone()
@@ -757,6 +998,11 @@ mod tests {
         #[cfg(unix)]
         assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
 
+        assert!(edit(&link, |text| Ok(sync_labels(text, None, "first"))).unwrap());
+        assert!(!edit(&link, |text| Ok(sync_labels(text, None, "first"))).unwrap());
+        #[cfg(unix)]
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+
         assert!(edit(&link, release_text).unwrap());
         assert_eq!(
             env_of(&std::fs::read_to_string(&real).unwrap())["ANTHROPIC_BASE_URL"],
@@ -779,6 +1025,649 @@ mod tests {
             .to_string();
         assert!(error.contains("left the file as it was"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ // comments\n}");
+        assert!(
+            edit(&path, |text| sync_model_labels_text(
+                text,
+                &BASE_MODELS,
+                None,
+                &|_| None
+            ))
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ // comments\n}");
+    }
+
+    #[test]
+    fn labels_refresh_remembered_model_ids_after_a_provider_switch() {
+        let claimed = claim_text(HAND_EDITED, URL).unwrap();
+        let first = sync_labels(&claimed, Some("claude-sonnet-native"), "first");
+        assert_eq!(
+            sync_labels(&first, Some("claude-sonnet-native"), "first"),
+            first
+        );
+        let switched = claim_text(&first, "http://127.0.0.1:19000").unwrap();
+        let calls = std::cell::RefCell::new(Vec::new());
+        let refreshed = sync_model_labels_text(
+            &switched,
+            &BASE_MODELS,
+            Some("claude-opus-native"),
+            &|model| {
+                calls.borrow_mut().push(model.to_string());
+                Some(ModelLabel {
+                    model: model.to_string(),
+                    label: "second/new-model".into(),
+                    description: "Uses second/new-model".into(),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            *calls.borrow(),
+            [
+                "opus",
+                "sonnet",
+                "claude-sonnet-native",
+                "claude-opus-native"
+            ]
+        );
+        let options = picker_of(&refreshed)["options"].as_array().unwrap().clone();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0]["model"], "claude-sonnet-native");
+        assert_eq!(options[1]["model"], "claude-opus-native");
+        assert!(
+            options
+                .iter()
+                .all(|option| option["label"] == "second/new-model")
+        );
+        let state = Document::parse(&refreshed).unwrap().state().unwrap();
+        assert_eq!(
+            state.model_picker.unwrap().observed,
+            ["claude-sonnet-native", "claude-opus-native"]
+        );
+        let stable = sync_labels(&refreshed, None, "second");
+        assert_eq!(sync_labels(&stable, None, "second"), stable);
+        let released = release_text(&refreshed).unwrap();
+        assert!(
+            Document::parse(&released)
+                .unwrap()
+                .root
+                .raw(MODEL_PICKER)
+                .is_none()
+        );
+        assert_eq!(env_of(&released)[BASE_URL], "https://gateway.example.com");
+    }
+
+    #[test]
+    fn concrete_ids_replace_fallback_aliases_but_keep_context_suffixes_and_versions() {
+        let base = ["fable", "opus", "sonnet", "haiku"];
+        let claimed = claim_text("{}", URL).unwrap();
+        let sync = |text: &str, observed: Option<&str>| {
+            sync_model_labels_text(text, &base, observed, &|model| {
+                Some(ModelLabel {
+                    model: model.into(),
+                    label: "provider/actual-model".into(),
+                    description: format!("Requested model: {model}."),
+                })
+            })
+            .unwrap()
+        };
+        let seeded = sync(&claimed, None);
+        assert_eq!(
+            picker_of(&seeded)["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|option| option["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            base
+        );
+        let first = sync(&seeded, Some("claude-opus-future"));
+        let second = sync(&first, Some("claude-opus-newer[1m]"));
+        let picker = picker_of(&second);
+        let options = picker["options"].as_array().unwrap();
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "fable",
+                "sonnet",
+                "haiku",
+                "claude-opus-future",
+                "claude-opus-newer[1m]"
+            ]
+        );
+        assert_eq!(
+            options[3]["description"],
+            "Requested model: claude-opus-future."
+        );
+        assert_eq!(
+            options[4]["description"],
+            "Requested model: claude-opus-newer[1m]."
+        );
+        assert_eq!(picker["replaceBuiltInOptions"], true);
+        assert_eq!(sync(&second, None), second);
+        let switched = claim_text(&second, "http://127.0.0.1:19000").unwrap();
+        assert_eq!(picker_of(&sync(&switched, None)), picker);
+        assert!(
+            Document::parse(&release_text(&switched).unwrap())
+                .unwrap()
+                .root
+                .raw(MODEL_PICKER)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_unresolved_native_id_keeps_its_fallback_until_it_can_be_labeled_again() {
+        let claimed = claim_text("{}", URL).unwrap();
+        let first = sync_labels(&claimed, Some("claude-opus-native"), "first");
+        let fallback = sync_model_labels_text(&first, &BASE_MODELS, None, &|model| {
+            (!model.starts_with("claude-")).then(|| ModelLabel {
+                model: model.into(),
+                label: "second/actual-model".into(),
+                description: format!("Requested model: {model}."),
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            picker_of(&fallback)["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|option| option["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            BASE_MODELS
+        );
+        assert_eq!(
+            Document::parse(&fallback)
+                .unwrap()
+                .state()
+                .unwrap()
+                .model_picker
+                .unwrap()
+                .observed,
+            ["claude-opus-native"]
+        );
+        let available = sync_labels(&fallback, None, "third");
+        assert_eq!(
+            picker_of(&available)["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|option| option["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["sonnet", "claude-opus-native"]
+        );
+    }
+
+    #[test]
+    fn unavailable_labels_keep_built_in_choices_and_can_recover_remembered_ids() {
+        let claimed = claim_text(HAND_EDITED, URL).unwrap();
+        let first = sync_labels(&claimed, Some("claude-opus-native"), "first");
+        let fallback = sync_model_labels_text(&first, &BASE_MODELS, None, &|_| None).unwrap();
+        assert_eq!(picker_of(&fallback)["options"], json!([]));
+        assert_eq!(picker_of(&fallback)["replaceBuiltInOptions"], false);
+        assert_eq!(env_of(&fallback), env_of(&first));
+        assert_eq!(
+            serde_json::from_str::<Value>(&fallback).unwrap()["model"],
+            "opus"
+        );
+        assert_eq!(
+            Document::parse(&fallback)
+                .unwrap()
+                .state()
+                .unwrap()
+                .model_picker
+                .unwrap()
+                .observed,
+            ["claude-opus-native"]
+        );
+        assert_eq!(
+            sync_model_labels_text(&fallback, &BASE_MODELS, None, &|_| None).unwrap(),
+            fallback
+        );
+        let recovered = sync_labels(&fallback, None, "second");
+        let picker = picker_of(&recovered);
+        assert_eq!(picker["replaceBuiltInOptions"], true);
+        assert_eq!(picker["options"][0]["model"], "sonnet");
+        assert_eq!(picker["options"][1]["model"], "claude-opus-native");
+        assert_eq!(picker["options"][1]["label"], "second/actual-model");
+        let released = release_text(&fallback).unwrap();
+        assert!(
+            Document::parse(&released)
+                .unwrap()
+                .root
+                .raw(MODEL_PICKER)
+                .is_none()
+        );
+        assert_eq!(env_of(&released)[BASE_URL], "https://gateway.example.com");
+    }
+
+    #[test]
+    fn unavailable_labels_restore_built_ins_alongside_original_custom_rows() {
+        let original = r#"{"modelPicker":{"replaceBuiltInOptions":true,"options":[
+            {"model":"custom","label":"My model","extra":7}
+        ]}}"#;
+        let claimed = claim_text(original, URL).unwrap();
+        let first = sync_labels(&claimed, None, "first");
+        let fallback = sync_model_labels_text(&first, &BASE_MODELS, None, &|_| None).unwrap();
+        assert_eq!(picker_of(&fallback)["replaceBuiltInOptions"], false);
+        assert_eq!(
+            picker_of(&fallback)["options"],
+            picker_of(original)["options"]
+        );
+        assert_eq!(env_of(&fallback), env_of(&first));
+        let recovered = sync_labels(&fallback, None, "second");
+        let picker = picker_of(&recovered);
+        assert_eq!(picker["replaceBuiltInOptions"], true);
+        assert_eq!(picker["options"][0], picker_of(original)["options"][0]);
+        assert_eq!(picker["options"].as_array().unwrap().len(), 3);
+        assert_eq!(picker["options"][1]["label"], "second/actual-model");
+        assert_eq!(
+            picker_of(&release_text(&fallback).unwrap()),
+            picker_of(original)
+        );
+    }
+
+    #[test]
+    fn native_observations_never_replace_original_custom_labels_or_alias_rows() {
+        let original = r#"{"modelPicker":{"replaceBuiltInOptions":false,"options":[
+            {"model":"  opus  ","label":"My alias"},
+            {"model":"  claude-opus-native  ","label":"My native model","extra":7}
+        ]}}"#;
+        let claimed = claim_text(original, URL).unwrap();
+        let seeded = sync_labels(&claimed, None, "first");
+        assert_eq!(picker_of(&seeded)["options"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            picker_of(&seeded)["options"][0],
+            picker_of(original)["options"][0]
+        );
+        let updated = sync_labels(&seeded, Some("claude-opus-native"), "first");
+        let picker = picker_of(&updated);
+        assert_eq!(picker["replaceBuiltInOptions"], true);
+        assert_eq!(picker["options"][0], picker_of(original)["options"][0]);
+        assert_eq!(picker["options"][1], picker_of(original)["options"][1]);
+        assert_eq!(picker["options"][2]["model"], "sonnet");
+        assert_eq!(picker["options"].as_array().unwrap().len(), 3);
+        let switched = claim_text(&updated, "http://127.0.0.1:19000").unwrap();
+        let refreshed = sync_labels(&switched, None, "second");
+        assert_eq!(picker_of(&refreshed)["options"][0]["label"], "My alias");
+        assert_eq!(
+            picker_of(&refreshed)["options"][1]["label"],
+            "My native model"
+        );
+        assert_eq!(
+            picker_of(&release_text(&refreshed).unwrap()),
+            picker_of(original)
+        );
+    }
+
+    #[test]
+    fn custom_picker_rows_and_labels_win_and_the_original_text_comes_back() {
+        let original = r#"{
+  "modelPicker": { "replaceBuiltInOptions": true, "other": 7, "options": [
+    { "model": "opus", "label": "My Opus", "extra": "kept" },
+    { "model": "my-model", "label": "Mine", "description": "My own model" }
+  ] },
+  "statusLine": { "type": "command", "command": "my-status" },
+  "model": "sonnet",
+  "env": { "ANTHROPIC_MODEL": "mine", "ANTHROPIC_DEFAULT_OPUS_MODEL": "my-opus" }
+}
+"#;
+        let claimed = claim_text(original, URL).unwrap();
+        let updated = sync_labels(&claimed, None, "first");
+        let picker = picker_of(&updated);
+        let original_picker = picker_of(original);
+        assert_eq!(picker["replaceBuiltInOptions"], true);
+        assert_eq!(picker["other"], 7);
+        assert_eq!(picker["options"][0], original_picker["options"][0]);
+        assert_eq!(picker["options"][1], original_picker["options"][1]);
+        assert_eq!(picker["options"][2]["model"], "sonnet");
+        assert_eq!(picker["options"].as_array().unwrap().len(), 3);
+        let refreshed = sync_labels(&updated, Some("opus"), "second");
+        assert_eq!(picker_of(&refreshed)["options"][0]["label"], "My Opus");
+        let root: Value = serde_json::from_str(&refreshed).unwrap();
+        assert_eq!(
+            root["statusLine"],
+            json!({"type":"command","command":"my-status"})
+        );
+        assert_eq!(root["model"], "sonnet");
+        assert_eq!(root["env"]["ANTHROPIC_MODEL"], "mine");
+        assert_eq!(root["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "my-opus");
+        assert_eq!(env_of(&claimed), env_of(&refreshed));
+        let released = release_text(&refreshed).unwrap();
+        assert_eq!(
+            Document::parse(&released)
+                .unwrap()
+                .root
+                .raw(MODEL_PICKER)
+                .unwrap()
+                .get(),
+            Document::parse(original)
+                .unwrap()
+                .root
+                .raw(MODEL_PICKER)
+                .unwrap()
+                .get()
+        );
+    }
+
+    #[test]
+    fn absent_null_and_existing_picker_modes_are_restored() {
+        for original in [
+            "{}",
+            r#"{"modelPicker":null}"#,
+            r#"{"modelPicker":{"replaceBuiltInOptions":false,"options":[]}}"#,
+            r#"{"modelPicker":{"options":[]}}"#,
+        ] {
+            let claimed = claim_text(original, URL).unwrap();
+            let updated = sync_labels(&claimed, None, "first");
+            let before = Document::parse(original).unwrap();
+            let owned = Document::parse(&updated)
+                .unwrap()
+                .state()
+                .unwrap()
+                .model_picker
+                .unwrap();
+            assert_eq!(
+                owned.original.as_deref(),
+                before.root.raw(MODEL_PICKER).map(RawValue::get)
+            );
+            assert_eq!(picker_of(&updated)["replaceBuiltInOptions"], true);
+            let released = release_text(&updated).unwrap();
+            assert_eq!(
+                Document::parse(&released)
+                    .unwrap()
+                    .root
+                    .raw(MODEL_PICKER)
+                    .map(RawValue::get),
+                before.root.raw(MODEL_PICKER).map(RawValue::get)
+            );
+        }
+    }
+
+    #[test]
+    fn manual_picker_changes_pause_sync_and_survive_release() {
+        let claimed = claim_text(r#"{"modelPicker":{"options":[]}}"#, URL).unwrap();
+        let updated = sync_labels(&claimed, None, "first");
+        for change in ["add", "edit", "remove", "delete", "null"] {
+            let mut root: Value = serde_json::from_str(&updated).unwrap();
+            match change {
+                "add" => root[MODEL_PICKER]["options"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({
+                        "model": "custom", "label": "My model"
+                    })),
+                "edit" => root[MODEL_PICKER]["options"][0]["label"] = json!("My label"),
+                "remove" => {
+                    root[MODEL_PICKER]["options"]
+                        .as_array_mut()
+                        .unwrap()
+                        .remove(0);
+                }
+                "delete" => {
+                    root.as_object_mut().unwrap().remove(MODEL_PICKER);
+                }
+                "null" => root[MODEL_PICKER] = Value::Null,
+                _ => unreachable!(),
+            }
+            let edited = serde_json::to_string_pretty(&root).unwrap();
+            let paused = sync_labels(&edited, Some("claude-opus-native"), "second");
+            let state = Document::parse(&paused).unwrap().state().unwrap();
+            assert!(state.model_picker.unwrap().paused, "{change}");
+            assert_eq!(picker_of(&paused), picker_of(&edited));
+            assert_eq!(sync_labels(&paused, None, "third"), paused);
+            let reclaimed = claim_text(&paused, "http://127.0.0.1:19000").unwrap();
+            assert_eq!(sync_labels(&reclaimed, None, "third"), reclaimed);
+            let released = release_text(&reclaimed).unwrap();
+            assert_eq!(picker_of(&released), picker_of(&edited));
+            assert_eq!(
+                Document::parse(&released)
+                    .unwrap()
+                    .root
+                    .raw(MODEL_PICKER)
+                    .is_some(),
+                Document::parse(&edited)
+                    .unwrap()
+                    .root
+                    .raw(MODEL_PICKER)
+                    .is_some()
+            );
+            let reactivated = claim_text(&released, URL).unwrap();
+            let new_labels = sync_labels(&reactivated, None, "fourth");
+            if change == "delete" || change == "null" {
+                assert_eq!(
+                    picker_of(&new_labels)["options"][0]["label"],
+                    "fourth/actual-model"
+                );
+            } else if change == "remove" {
+                assert_eq!(
+                    picker_of(&new_labels)["options"][0],
+                    picker_of(&edited)["options"][0]
+                );
+                assert_eq!(picker_of(&new_labels)["options"][1]["model"], "opus");
+            } else {
+                assert_eq!(picker_of(&new_labels), picker_of(&edited));
+            }
+        }
+    }
+
+    #[test]
+    fn a_paused_picker_stays_paused_if_the_user_puts_our_old_value_back() {
+        let claimed = claim_text("{}", URL).unwrap();
+        let updated = sync_labels(&claimed, None, "first");
+        let mut root: Value = serde_json::from_str(&updated).unwrap();
+        root[MODEL_PICKER]["options"][0]["label"] = json!("My label");
+        let paused = sync_labels(&root.to_string(), None, "second");
+        let mut root: Value = serde_json::from_str(&paused).unwrap();
+        root[MODEL_PICKER] = picker_of(&updated);
+        let reverted = root.to_string();
+        assert_eq!(sync_labels(&reverted, None, "second"), reverted);
+        let released = release_text(&reverted).unwrap();
+        assert_eq!(picker_of(&released), picker_of(&updated));
+        assert_eq!(env_of(&released)[BASE_URL], NEUTRAL_BASE_URL);
+        assert!(Document::parse(&released).unwrap().state().is_none());
+    }
+
+    #[test]
+    fn labels_do_not_activate_routing_or_adopt_an_unowned_url() {
+        let claimed = claim_text("{}", URL).unwrap();
+        let drifted = hand_edit(&claimed, BASE_URL, "http://127.0.0.1:9999");
+        let released = release_text(&claimed).unwrap();
+        for text in [
+            "",
+            "{}",
+            HAND_EDITED,
+            &drifted,
+            &released,
+            r#"{"cc-proxy":{"written":{}}}"#,
+        ] {
+            assert_eq!(
+                sync_model_labels_text(text, &BASE_MODELS, None, &|_| panic!("not routed"))
+                    .unwrap(),
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn labels_accept_a_legacy_env_only_backup() {
+        let legacy = json!({
+            "env": { BASE_URL: URL, OAUTH_TOKEN: PLACEHOLDER_TOKEN },
+            STATE_KEY: {
+                "claimed": { BASE_URL: null, OAUTH_TOKEN: null },
+                "written": { BASE_URL: URL, OAUTH_TOKEN: PLACEHOLDER_TOKEN }
+            }
+        })
+        .to_string();
+        let updated = sync_labels(&legacy, None, "first");
+        assert_eq!(picker_of(&updated)["options"].as_array().unwrap().len(), 2);
+        let released = release_text(&updated).unwrap();
+        assert_eq!(env_of(&released)[BASE_URL], NEUTRAL_BASE_URL);
+        assert!(
+            Document::parse(&released)
+                .unwrap()
+                .root
+                .raw(MODEL_PICKER)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_lost_backup_leaves_picker_labels_alone() {
+        let claimed = claim_text("{}", URL).unwrap();
+        let updated = sync_labels(&claimed, None, "first");
+        let mut root: Value = serde_json::from_str(&updated).unwrap();
+        root.as_object_mut().unwrap().remove(STATE_KEY);
+        let lost = root.to_string();
+        assert_eq!(sync_labels(&lost, None, "second"), lost);
+        let released = release_text(&lost).unwrap();
+        assert_eq!(picker_of(&released), picker_of(&lost));
+        let reclaimed = claim_text(&lost, URL).unwrap();
+        let refreshed = sync_labels(&reclaimed, None, "second");
+        assert_eq!(
+            refreshed, reclaimed,
+            "existing labels now belong to the user"
+        );
+        assert_eq!(
+            picker_of(&release_text(&refreshed).unwrap()),
+            picker_of(&lost)
+        );
+    }
+
+    #[test]
+    fn damaged_picker_metadata_keeps_the_routing_backup_and_picker_data() {
+        let claimed = claim_text(HAND_EDITED, URL).unwrap();
+        let updated = sync_labels(&claimed, None, "first");
+        for missing in ["original", "written"] {
+            let mut root: Value = serde_json::from_str(&updated).unwrap();
+            root[STATE_KEY]["model_picker"]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            let damaged = root.to_string();
+            let state = Document::parse(&damaged).unwrap().state().unwrap();
+            assert!(state.model_picker.is_none(), "{missing}");
+            assert_eq!(sync_labels(&damaged, None, "second"), damaged);
+            let released = release_text(&damaged).unwrap();
+            assert_eq!(picker_of(&released), picker_of(&damaged));
+            assert_eq!(env_of(&released)[BASE_URL], "https://gateway.example.com");
+        }
+        for metadata in [
+            json!("broken"),
+            json!([]),
+            json!({"original": false, "written": {}}),
+            json!({"original": "not json", "written": picker_of(&updated)}),
+            json!({"original": "[]", "written": picker_of(&updated)}),
+            json!({"original": null, "written": null}),
+        ] {
+            let mut root: Value = serde_json::from_str(&updated).unwrap();
+            root[STATE_KEY]["model_picker"] = metadata;
+            let damaged = root.to_string();
+            let released = release_text(&damaged).unwrap();
+            assert_eq!(picker_of(&released), picker_of(&damaged));
+            assert_eq!(env_of(&released)[BASE_URL], "https://gateway.example.com");
+        }
+    }
+
+    #[test]
+    fn invalid_picker_shapes_refuse_only_the_label_update() {
+        for picker in [
+            json!([]),
+            json!(false),
+            json!({"options": null}),
+            json!({"options": {}}),
+            json!({"replaceBuiltInOptions":"yes"}),
+            json!({"options":["opus"]}),
+            json!({"options":[{"model":"opus"}]}),
+            json!({"options":[{"model":1,"label":"Opus"}]}),
+            json!({"options":[{"model":"opus","label":"Opus","description":null}]}),
+        ] {
+            let claimed = claim_text(&json!({MODEL_PICKER:picker}).to_string(), URL).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            std::fs::write(&path, &claimed).unwrap();
+            let error = edit(&path, |text| {
+                sync_model_labels_text(text, &BASE_MODELS, None, &|model| {
+                    Some(ModelLabel {
+                        model: model.into(),
+                        label: "provider/model".into(),
+                        description: "Uses provider/model".into(),
+                    })
+                })
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("modelPicker"), "{error}");
+            assert!(error.contains("Fix it"), "{error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), claimed);
+            assert_eq!(env_of(&claimed)[BASE_URL], URL);
+            assert!(release_text(&claimed).is_ok());
+        }
+    }
+
+    #[test]
+    fn unchanged_labels_leave_the_files_text_and_timestamp_alone() {
+        let claimed = claim_text("{}", URL).unwrap();
+        let updated = sync_labels(&claimed, None, "first");
+        let compact = serde_json::from_str::<Value>(&updated).unwrap().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, &compact).unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(!edit(&path, |text| Ok(sync_labels(text, None, "first"))).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), compact);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn duplicate_ids_resolve_once_and_unresolved_observations_are_not_saved() {
+        let claimed = claim_text("{}", URL).unwrap();
+        let calls = std::cell::RefCell::new(Vec::new());
+        let updated = sync_model_labels_text(
+            &claimed,
+            &["opus", "opus", "sonnet"],
+            Some("custom"),
+            &|model| {
+                calls.borrow_mut().push(model.to_string());
+                (model != "custom").then(|| ModelLabel {
+                    model: model.into(),
+                    label: "provider/model".into(),
+                    description: "Uses provider/model".into(),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(*calls.borrow(), ["opus", "sonnet", "custom"]);
+        assert_eq!(picker_of(&updated)["options"].as_array().unwrap().len(), 2);
+        assert!(
+            Document::parse(&updated)
+                .unwrap()
+                .state()
+                .unwrap()
+                .model_picker
+                .unwrap()
+                .observed
+                .is_empty()
+        );
+        assert_eq!(
+            sync_model_labels_text(&claimed, &BASE_MODELS, None, &|_| None).unwrap(),
+            claimed
+        );
+        assert!(
+            sync_model_labels_text(&claimed, &BASE_MODELS, None, &|_| Some(ModelLabel {
+                model: "different-id".into(),
+                label: "provider/model".into(),
+                description: "Uses provider/model".into()
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -786,6 +1675,7 @@ mod tests {
         let state = State {
             claimed: json!({"A": null}).as_object().unwrap().clone(),
             written: json!({"A": "x"}).as_object().unwrap().clone(),
+            ..State::default()
         };
         assert_eq!(
             pretty(&state, "  ").unwrap(),
