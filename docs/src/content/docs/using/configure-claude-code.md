@@ -26,7 +26,7 @@ cc-proxy keeps the order of your keys and the text of every value it doesn't cha
 - **`ANTHROPIC_BASE_URL` and `CLAUDE_CODE_OAUTH_TOKEN`.** cc-proxy takes these over while routing is on. It saves what you had under a top-level `cc-proxy` key in the same file, and puts it back when routing turns off.
 - **The three switches below them.** cc-proxy sets one only if you haven't. A value you wrote is never changed, in either direction.
 - **If you edit a key by hand while routing is on,** cc-proxy sees that your value differs from what it wrote and leaves it alone when routing turns off.
-- Your original `modelPicker` is saved too. Your custom labels take priority. Editing or deleting the managed picker pauses label updates until you turn routing off and on again. Your edit is kept.
+- Your original `modelPicker` is saved too. Your custom labels take priority. Editing or deleting the managed picker stops label updates for that routing run. Your edit is kept.
 
 ## Turning it off
 
