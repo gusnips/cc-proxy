@@ -598,15 +598,23 @@ struct GateState {
 /// L'espacement devient donc le prix d'un refus constaté et non une taxe d'avance : il
 /// part du plancher configuré (zéro par défaut), double à chaque upgrade refusé jusqu'à
 /// un plafond, puis se relâche après une série de connexions réussies.
+///
+/// L'état est un Mutex std tenu le temps d'une lecture ou d'une écriture, jamais pendant
+/// le sommeil de l'attente : c'était le défaut. La porte gardait son mutex pendant les
+/// huit secondes qu'elle imposait, et le décompte des succès tentait ce même mutex avec
+/// `try_lock`. Sous charge, le compteur était tenu par un appelant en attente, chaque
+/// succès était perdu, et un seul 403 collait l'espacement à son plafond pour toute la vie
+/// du processus : huit secondes entre chaque ouverture, une requête sur quatre en attente
+/// depuis plus de six minutes, et Claude Code abandonnait avant la première ligne.
 struct WebSocketConnectGate {
-    state: AsyncMutex<GateState>,
+    state: Mutex<GateState>,
     floor: Duration,
 }
 
 impl WebSocketConnectGate {
     fn new(start_spacing: Duration) -> Self {
         Self {
-            state: AsyncMutex::new(GateState {
+            state: Mutex::new(GateState {
                 last_start: None,
                 spacing: start_spacing,
                 successes: 0,
@@ -616,58 +624,104 @@ impl WebSocketConnectGate {
     }
 
     async fn wait_to_start(&self, before_start: impl std::future::Future<Output = ()>) {
-        let mut state = self.state.lock().await;
-        if let Some(previous) = state.last_start
-            && !state.spacing.is_zero()
-        {
-            tokio::time::sleep_until(previous + state.spacing).await;
+        // L'instant de départ se réserve sous le mutex, puis l'attente dort sans le
+        // tenir : les refus et les succès observent l'état pendant ce sommeil.
+        loop {
+            let wait_until = {
+                let mut state = self.lock_state();
+                let now = tokio::time::Instant::now();
+                let earliest = match state.last_start {
+                    Some(previous) if !state.spacing.is_zero() => previous + state.spacing,
+                    _ => now,
+                };
+                if earliest <= now {
+                    state.last_start = Some(now);
+                    None
+                } else {
+                    Some(earliest)
+                }
+            };
+            match wait_until {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => break,
+            }
         }
         before_start.await;
-        state.last_start = Some(tokio::time::Instant::now());
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Une origine vient de refuser un upgrade : élargir immédiatement.
     fn note_origin_forbidden(&self) {
-        let mut state = match self.state.try_lock() {
-            Ok(state) => state,
-            // Un autre appelant tient l'état : il est en train d'ouvrir une connexion.
-            // Perdre un signal d'élargissement est sans conséquence — le refus suivant
-            // le portera — alors que bloquer ici retiendrait le chemin de connexion.
-            Err(_) => return,
+        let (from, to) = {
+            let mut state = self.lock_state();
+            let from = state.spacing;
+            state.successes = 0;
+            state.spacing = if state.spacing.is_zero() {
+                WEBSOCKET_CONNECT_BACKOFF_STEP
+            } else {
+                state.spacing.saturating_mul(2)
+            }
+            .min(WEBSOCKET_CONNECT_MAX_SPACING)
+            .max(self.floor);
+            (from, state.spacing)
         };
-        state.successes = 0;
-        state.spacing = if state.spacing.is_zero() {
-            WEBSOCKET_CONNECT_BACKOFF_STEP
-        } else {
-            state.spacing.saturating_mul(2)
+        if from != to {
+            log_connect_spacing_change("codex_websocket_connect_spacing_widened", from, to);
         }
-        .min(WEBSOCKET_CONNECT_MAX_SPACING)
-        .max(self.floor);
     }
 
     /// Une connexion a abouti : se rapprocher du plancher configuré.
     fn note_connect_success(&self) {
-        let Ok(mut state) = self.state.try_lock() else {
-            return;
+        let relaxed = {
+            let mut state = self.lock_state();
+            if state.spacing <= self.floor {
+                return;
+            }
+            state.successes += 1;
+            if state.successes < WEBSOCKET_CONNECT_RELAX_AFTER {
+                return;
+            }
+            state.successes = 0;
+            let from = state.spacing;
+            state.spacing = (state.spacing / 2).max(self.floor);
+            if state.spacing < WEBSOCKET_CONNECT_BACKOFF_STEP {
+                state.spacing = self.floor;
+            }
+            Some((from, state.spacing))
         };
-        if state.spacing <= self.floor {
-            return;
-        }
-        state.successes += 1;
-        if state.successes < WEBSOCKET_CONNECT_RELAX_AFTER {
-            return;
-        }
-        state.successes = 0;
-        state.spacing = (state.spacing / 2).max(self.floor);
-        if state.spacing < WEBSOCKET_CONNECT_BACKOFF_STEP {
-            state.spacing = self.floor;
+        if let Some((from, to)) = relaxed
+            && from != to
+        {
+            log_connect_spacing_change("codex_websocket_connect_spacing_relaxed", from, to);
         }
     }
 
     #[cfg(test)]
-    async fn spacing_for_tests(&self) -> Duration {
-        self.state.lock().await.spacing
+    fn spacing_for_tests(&self) -> Duration {
+        self.lock_state().spacing
     }
+}
+
+/// Un espacement qui change throttle tout le processus : il doit se voir dans proxy.log.
+fn log_connect_spacing_change(message: &str, from: Duration, to: Duration) {
+    create_logger("codex").warn(
+        message,
+        Some(serde_json::Map::from_iter([
+            (
+                "fromMs".to_string(),
+                serde_json::json!(u64::try_from(from.as_millis()).unwrap_or(u64::MAX)),
+            ),
+            (
+                "toMs".to_string(),
+                serde_json::json!(u64::try_from(to.as_millis()).unwrap_or(u64::MAX)),
+            ),
+        ])),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2965,10 +3019,7 @@ mod tests {
         for _ in 0..16 {
             gate.note_origin_forbidden();
         }
-        assert_eq!(
-            gate.spacing_for_tests().await,
-            WEBSOCKET_CONNECT_MAX_SPACING
-        );
+        assert_eq!(gate.spacing_for_tests(), WEBSOCKET_CONNECT_MAX_SPACING);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2976,11 +3027,35 @@ mod tests {
         // Sans retour à zéro, un seul 403 taxerait le processus pour toute sa vie.
         let gate = WebSocketConnectGate::new(Duration::ZERO);
         gate.note_origin_forbidden();
-        assert!(gate.spacing_for_tests().await > Duration::ZERO);
+        assert!(gate.spacing_for_tests() > Duration::ZERO);
         for _ in 0..(WEBSOCKET_CONNECT_RELAX_AFTER * 8) {
             gate.note_connect_success();
         }
-        assert_eq!(gate.spacing_for_tests().await, Duration::ZERO);
+        assert_eq!(gate.spacing_for_tests(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiting_request_does_not_swallow_successes() {
+        // Le défaut qui a figé un processus pendant des heures : la porte gardait son
+        // mutex pendant le sommeil qu'elle imposait, et le décompte des succès tentait ce
+        // mutex avec `try_lock`. Un seul appelant en attente suffisait à perdre chaque
+        // succès, donc l'espacement ne redescendait jamais : chaque requête attendait
+        // son tour huit secondes plus tard, pour toute la vie du processus.
+        let gate = Arc::new(WebSocketConnectGate::new(Duration::ZERO));
+        gate.note_origin_forbidden();
+        assert!(gate.spacing_for_tests() > Duration::ZERO);
+        gate.wait_to_start(async {}).await;
+
+        // Un appelant entre dans la porte et s'y endort pendant l'espacement.
+        let waiting_gate = gate.clone();
+        let waiting = tokio::spawn(async move { waiting_gate.wait_to_start(async {}).await });
+        tokio::task::yield_now().await;
+
+        for _ in 0..(WEBSOCKET_CONNECT_RELAX_AFTER * 8) {
+            gate.note_connect_success();
+        }
+        assert_eq!(gate.spacing_for_tests(), Duration::ZERO);
+        waiting.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
@@ -2991,7 +3066,7 @@ mod tests {
         for _ in 0..(WEBSOCKET_CONNECT_RELAX_AFTER * 8) {
             gate.note_connect_success();
         }
-        assert_eq!(gate.spacing_for_tests().await, Duration::from_millis(250));
+        assert_eq!(gate.spacing_for_tests(), Duration::from_millis(250));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3022,10 +3097,20 @@ mod tests {
             second_gate.wait_to_start(async {}).await;
             started_tx.send(tokio::time::Instant::now()).unwrap();
         });
-        let first_started = started_rx.recv().await.unwrap();
-        let second_started = started_rx.recv().await.unwrap();
+        // L'ordre d'arrivée des deux départs n'a pas d'importance : c'est l'écart entre
+        // eux qui est la garantie.
+        let (early, late) = {
+            let one = started_rx.recv().await.unwrap();
+            let other = started_rx.recv().await.unwrap();
+            if one <= other {
+                (one, other)
+            } else {
+                (other, one)
+            }
+        };
 
-        assert!(second_started.duration_since(first_started) >= Duration::from_secs(1));
+        assert!(late.duration_since(early) >= Duration::from_secs(1));
+        // Le second départ a lieu pendant la poignée de main du premier, pas après.
         assert!(!first.is_finished());
         second.await.unwrap();
         release_first.notify_one();

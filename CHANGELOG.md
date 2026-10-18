@@ -3,6 +3,23 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.4 (2026-10-18)
+
+- Codex requests stopped being throttled to one every eight seconds for the rest
+  of the proxy's life. The websocket connect gate counted its successes with
+  `try_lock` on the same mutex it holds while a request sleeps in the gate, so
+  under load every success was dropped and the spacing never came back down. One
+  refused upgrade was enough to pin it at the eight-second cap: measured on a
+  machine with 70 requests waiting, the median time to the first answer was 235
+  seconds and Claude Code gave up at six minutes with
+  `Request future ended before completion`. The gate now keeps its state in a
+  mutex it never holds across the wait, so successes count again and the spacing
+  relaxes back to zero once the origin accepts connections.
+- `proxy.log` now says when that spacing changes, with the previous and new value
+  in milliseconds, under `codex_websocket_connect_spacing_widened` and
+  `codex_websocket_connect_spacing_relaxed`. A refused upgrade used to widen the
+  spacing without a trace.
+
 ## v0.2.3 (2026-10-18)
 
 - Codex now retries failed HTTP sends that previously stopped Claude Code with
