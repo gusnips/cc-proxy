@@ -3,6 +3,21 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.3 (2026-10-18)
+
+- Codex now retries failed HTTP sends that previously stopped Claude Code with
+  a generic network error. It uses up to three retries with randomized
+  exponential backoff, within a 60-second recovery budget.
+- Buffered and streaming requests use the same recovery limit. A replacement
+  connection that stays silent cannot keep extending that limit. Slow headers
+  on the initial request still do not trigger a replay.
+- Retry logs include the request ID, next delay and attempt limit. Connection
+  logs retain the underlying cause without the request URL. Temporary HTTP
+  408, 409 and 425 responses now use the shared retry policy too.
+- Committed output, tool calls and spent usage limits keep their existing
+  no-replay safeguards. Message Threads 400s still tell Claude Code to resend
+  the full conversation; they are separate from network failures.
+
 ## v0.2.2 (2026-10-14)
 
 - Claude Code's header, `/model` picker and status-line model name now show
