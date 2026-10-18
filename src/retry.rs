@@ -17,7 +17,7 @@ pub struct BackoffOutcome {
 /// 529 is Anthropic's overloaded status, which Anthropic-shaped upstreams
 /// return for the same capacity shortfall a 503 reports.
 pub fn should_retry_status(status: u16) -> bool {
-    matches!(status, 429 | 500 | 502 | 503 | 504 | 529)
+    matches!(status, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 529)
 }
 
 pub fn compute_backoff_delay(attempt: u32, retry_after: Option<&str>) -> BackoffOutcome {

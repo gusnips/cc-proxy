@@ -639,12 +639,14 @@ impl std::ops::Deref for OwnerAwareCodexResponse {
 // ---------------------------------------------------------------------------
 
 const MAX_BUFFERED_TRANSPORT_RETRIES: u32 = 3;
+#[cfg(test)]
 const MAX_BUFFERED_TRANSPORT_ATTEMPTS: u32 = MAX_BUFFERED_TRANSPORT_RETRIES + 1;
 const HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS: u64 = 300_000;
 const IMAGE_HEADER_TIMEOUT_MS: u64 = 300_000;
 /// Marks the error raised when the wait for the Codex response headers runs
 /// out, so the retry classifiers can tell it apart from a transport failure.
 const HTTP_RESPONSE_HEADERS_DETAIL: &str = "http_response_headers";
+const HTTP_TRANSPORT_ERROR_DETAIL: &str = "http_transport_error";
 
 #[derive(Clone)]
 struct ProxyEnvironment {
@@ -1287,21 +1289,19 @@ impl CodexHttpClient {
         let mut retries = 0_u32;
         let mut retry_deadline = None;
         let (resp, response_headers, started_at) = loop {
-            if retry_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-                let mut error = super::recovery_timeout_error();
-                error.origin = CodexErrorOrigin::Http;
-                return Err(error);
-            }
-            match self
-                .start_http_event_attempt(
+            let result = super::await_recovery(
+                self.start_http_event_attempt(
                     &mut auth,
                     &body_json,
                     ctx,
                     use_responses_lite,
                     &mut auth_refresh_attempted,
-                )
-                .await
-            {
+                ),
+                retry_deadline,
+            )
+            .await
+            .map_err(|()| http_recovery_timeout_error())?;
+            match result {
                 Ok(attempt) => break attempt,
                 Err(error) if retryable_http_stream_error(&error) => {
                     if !super::wait_for_recovery_retry(
@@ -1309,6 +1309,7 @@ impl CodexHttpClient {
                         MAX_BUFFERED_TRANSPORT_RETRIES,
                         &mut retry_deadline,
                         error.retry_after.as_deref(),
+                        Some(ctx),
                     )
                     .await
                     {
@@ -1818,7 +1819,7 @@ impl CodexHttpClient {
                     let can_retry = tokio::select! {
                         biased;
                         _ = tx.closed() => return,
-                        ready = super::wait_for_recovery_retry(retries, MAX_BUFFERED_TRANSPORT_RETRIES, &mut retry_deadline, retry_error.retry_after.as_deref()) => ready,
+                        ready = super::wait_for_recovery_retry(retries, MAX_BUFFERED_TRANSPORT_RETRIES, &mut retry_deadline, retry_error.retry_after.as_deref(), Some(&ctx)) => ready,
                     };
                     if !can_retry {
                         let _ = tx.send(Err(retry_error)).await;
@@ -1838,13 +1839,16 @@ impl CodexHttpClient {
                     let next_attempt = tokio::select! {
                         biased;
                         _ = tx.closed() => return,
-                        result = client.start_http_event_attempt(
-                            &mut auth,
-                            &body_json,
-                            &ctx,
-                            use_responses_lite,
-                            &mut auth_refresh_attempted,
-                        ) => result
+                        result = super::await_recovery(
+                            client.start_http_event_attempt(
+                                &mut auth,
+                                &body_json,
+                                &ctx,
+                                use_responses_lite,
+                                &mut auth_refresh_attempted,
+                            ),
+                            retry_deadline,
+                        ) => result.unwrap_or_else(|()| Err(http_recovery_timeout_error()))
                     };
                     match next_attempt {
                         Ok((next_resp, next_response_headers, next_started_at)) => {
@@ -1899,110 +1903,122 @@ impl CodexHttpClient {
         let mut active_continuation = continuation.cloned();
         let mut auth_refresh_attempted = false;
         let mut transport_failures = 0u32;
+        let mut retry_deadline = None;
         loop {
-            let result = match transport {
-                CodexTransport::Http => {
-                    let body_json = serde_json::to_string(body).map_err(|e| CodexError {
-                        status: 500,
-                        message: "Failed to serialize request".to_string(),
-                        detail: Some(e.to_string()),
-                        retry_after: None,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::Http,
-                    })?;
-                    self.attempt_post_http(&auth, &body_json, ctx, body.client_metadata.is_some())
+            let attempt = async {
+                match transport {
+                    CodexTransport::Http => {
+                        let body_json = serde_json::to_string(body).map_err(|e| CodexError {
+                            status: 500,
+                            message: "Failed to serialize request".to_string(),
+                            detail: Some(e.to_string()),
+                            retry_after: None,
+                            usage_limit: None,
+                            origin: CodexErrorOrigin::Http,
+                        })?;
+                        self.attempt_post_http(
+                            &auth,
+                            &body_json,
+                            ctx,
+                            body.client_metadata.is_some(),
+                        )
                         .await
                         .map(|response| OwnerAwareCodexResponse::new(response, None))
-                }
-                CodexTransport::WebSocket => {
-                    let ws_headers =
-                        build_codex_headers(&auth, ctx, body.client_metadata.is_some())?;
-                    let ws_headers = super::websocket::codex_websocket_headers(&ws_headers);
-                    let ws_body = build_websocket_request(
-                        body,
-                        active_continuation
-                            .as_ref()
-                            .map(super::continuation::ContinuationReservation::candidate),
-                    );
+                    }
+                    CodexTransport::WebSocket => {
+                        let ws_headers =
+                            build_codex_headers(&auth, ctx, body.client_metadata.is_some())?;
+                        let ws_headers = super::websocket::codex_websocket_headers(&ws_headers);
+                        let ws_body = build_websocket_request(
+                            body,
+                            active_continuation
+                                .as_ref()
+                                .map(super::continuation::ContinuationReservation::candidate),
+                        );
 
-                    super::websocket::codex_websocket_request(
-                        &self.websocket_client,
-                        &self.websocket_proxy_config,
-                        &self.base_url,
-                        &ws_headers,
-                        &ws_body,
-                        ctx,
-                        ctx.traffic.as_deref(),
-                        super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
-                        super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
-                        active_continuation.as_ref(),
-                    )
-                    .await
-                }
-                CodexTransport::Auto => {
-                    let ws_headers =
-                        build_codex_headers(&auth, ctx, body.client_metadata.is_some())?;
-                    let ws_headers = super::websocket::codex_websocket_headers(&ws_headers);
-                    let ws_body = build_websocket_request(
-                        body,
-                        active_continuation
-                            .as_ref()
-                            .map(super::continuation::ContinuationReservation::candidate),
-                    );
+                        super::websocket::codex_websocket_request(
+                            &self.websocket_client,
+                            &self.websocket_proxy_config,
+                            &self.base_url,
+                            &ws_headers,
+                            &ws_body,
+                            ctx,
+                            ctx.traffic.as_deref(),
+                            super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
+                            super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
+                            active_continuation.as_ref(),
+                        )
+                        .await
+                    }
+                    CodexTransport::Auto => {
+                        let ws_headers =
+                            build_codex_headers(&auth, ctx, body.client_metadata.is_some())?;
+                        let ws_headers = super::websocket::codex_websocket_headers(&ws_headers);
+                        let ws_body = build_websocket_request(
+                            body,
+                            active_continuation
+                                .as_ref()
+                                .map(super::continuation::ContinuationReservation::candidate),
+                        );
 
-                    // Try WebSocket first
-                    let ws_result = super::websocket::codex_websocket_request(
-                        &self.websocket_client,
-                        &self.websocket_proxy_config,
-                        &self.base_url,
-                        &ws_headers,
-                        &ws_body,
-                        ctx,
-                        ctx.traffic.as_deref(),
-                        super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
-                        super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
-                        active_continuation.as_ref(),
-                    )
-                    .await;
+                        // Try WebSocket first
+                        let ws_result = super::websocket::codex_websocket_request(
+                            &self.websocket_client,
+                            &self.websocket_proxy_config,
+                            &self.base_url,
+                            &ws_headers,
+                            &ws_body,
+                            ctx,
+                            ctx.traffic.as_deref(),
+                            super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
+                            super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
+                            active_continuation.as_ref(),
+                        )
+                        .await;
 
-                    match ws_result {
-                        Ok(response) => Ok(response),
-                        Err(err)
-                            if should_retry_without_continuation(
-                                &err,
-                                active_continuation.as_ref(),
-                            ) =>
-                        {
-                            // Drop stale continuation state before considering a
-                            // replacement transport or connection.
+                        match ws_result {
+                            Ok(response) => Ok(response),
                             Err(err)
+                                if should_retry_without_continuation(
+                                    &err,
+                                    active_continuation.as_ref(),
+                                ) =>
+                            {
+                                // Drop stale continuation state before considering a
+                                // replacement transport or connection.
+                                Err(err)
+                            }
+                            Err(err)
+                                if self.auto_http_fallback_enabled
+                                    && should_fallback_to_http(&err) =>
+                            {
+                                // Fall back to HTTP only if WebSocket failed before sending
+                                let body_json =
+                                    serde_json::to_string(body).map_err(|e| CodexError {
+                                        status: 500,
+                                        message: "Failed to serialize request".to_string(),
+                                        detail: Some(e.to_string()),
+                                        retry_after: None,
+                                        usage_limit: None,
+                                        origin: CodexErrorOrigin::Http,
+                                    })?;
+                                self.attempt_post_http(
+                                    &auth,
+                                    &body_json,
+                                    ctx,
+                                    body.client_metadata.is_some(),
+                                )
+                                .await
+                                .map(|response| OwnerAwareCodexResponse::new(response, None))
+                            }
+                            Err(err) => Err(err),
                         }
-                        Err(err)
-                            if self.auto_http_fallback_enabled && should_fallback_to_http(&err) =>
-                        {
-                            // Fall back to HTTP only if WebSocket failed before sending
-                            let body_json =
-                                serde_json::to_string(body).map_err(|e| CodexError {
-                                    status: 500,
-                                    message: "Failed to serialize request".to_string(),
-                                    detail: Some(e.to_string()),
-                                    retry_after: None,
-                                    usage_limit: None,
-                                    origin: CodexErrorOrigin::Http,
-                                })?;
-                            self.attempt_post_http(
-                                &auth,
-                                &body_json,
-                                ctx,
-                                body.client_metadata.is_some(),
-                            )
-                            .await
-                            .map(|response| OwnerAwareCodexResponse::new(response, None))
-                        }
-                        Err(err) => Err(err),
                     }
                 }
             };
+            let result = super::await_recovery(attempt, retry_deadline)
+                .await
+                .map_err(|()| http_recovery_timeout_error())?;
 
             if should_refresh_after_unauthorized(&result, auth_refresh_attempted, transport) {
                 auth_refresh_attempted = true;
@@ -2038,212 +2054,55 @@ impl CodexHttpClient {
                 return Err(codex_usage_limit_error(limit, origin));
             }
 
-            if let Ok(response) = &result
-                && (200..300).contains(&response.status)
-                && let Some(failure) = super::events::first_retryable_failure(&response.body)
-            {
-                if transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
-                    let delay =
-                        compute_backoff_delay(transport_failures, failure.retry_after.as_deref());
-                    if delay.exceeds_budget {
-                        return Err(CodexError {
-                            status: failure.status,
-                            message: failure.message.clone(),
-                            detail: Some(failure.message),
-                            retry_after: failure.retry_after,
-                            usage_limit: None,
-                            origin: match response.transport {
-                                ActualTransport::Http => CodexErrorOrigin::BufferedHttp,
-                                ActualTransport::WebSocket => CodexErrorOrigin::BufferedWebSocket,
-                            },
-                        });
-                    }
-                    log_buffered_retry(
-                        ctx,
-                        transport,
-                        transport_failures + 1,
-                        delay.wait_ms,
-                        failure.status,
-                        "upstream_event",
-                        &failure.message,
-                    );
-                    transport_failures += 1;
+            let result = result.and_then(|response| {
+                if (200..300).contains(&response.status)
+                    && let Some(failure) = super::events::first_retryable_failure(&response.body)
+                {
                     active_continuation = full_context_continuation(active_continuation.as_ref());
-                    sleep(delay.wait_ms).await;
-                    continue;
+                    return Err(CodexError {
+                        status: failure.status,
+                        message: failure.message.clone(),
+                        detail: Some(failure.message),
+                        retry_after: failure.retry_after,
+                        usage_limit: None,
+                        origin: match response.transport {
+                            ActualTransport::Http => CodexErrorOrigin::BufferedHttp,
+                            ActualTransport::WebSocket => CodexErrorOrigin::BufferedWebSocket,
+                        },
+                    });
                 }
-
-                log_buffered_retry_exhausted(
-                    ctx,
-                    transport,
-                    failure.status,
-                    "upstream_event",
-                    &failure.message,
-                );
-                return Err(CodexError {
-                    status: failure.status,
-                    message: failure.message.clone(),
-                    detail: Some(failure.message),
-                    retry_after: failure.retry_after,
-                    usage_limit: None,
-                    origin: CodexErrorOrigin::Http,
-                });
-            }
+                if response.status == 429
+                    && let Some(wall) = quota_wall_error()
+                {
+                    return Err(wall);
+                }
+                if !(200..300).contains(&response.status) {
+                    return Err(codex_status_error(response.into_response()));
+                }
+                Ok(response)
+            });
 
             match result {
-                Ok(response) if response.status == 401 => {
-                    let detail = String::from_utf8_lossy(&response.body).to_string();
-                    return Err(CodexError {
-                        status: 401,
-                        message: "Unauthorized".to_string(),
-                        detail: Some(detail),
-                        retry_after: None,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::Http,
-                    });
-                }
-                Ok(response) if response.status == 403 => {
-                    let detail = String::from_utf8_lossy(&response.body).to_string();
-                    return Err(CodexError {
-                        status: 403,
-                        message: "Forbidden".to_string(),
-                        detail: Some(detail),
-                        retry_after: None,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::Http,
-                    });
-                }
-                Ok(response) if response.status == 429 => {
-                    // Quota wall? A 429 with an exhausted window cannot be retried into
-                    // success within the window — fail fast with the reset time instead of
-                    // walking the ladder (see quota_wall_error).
-                    if let Some(wall) = quota_wall_error() {
-                        return Err(wall);
-                    }
-                    let retry_after = response
-                        .headers
-                        .iter()
-                        .find(|(k, _)| k.to_lowercase() == "retry-after")
-                        .map(|(_, v)| v.clone());
-                    if transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
-                        let delay =
-                            compute_backoff_delay(transport_failures, retry_after.as_deref());
-                        if delay.exceeds_budget {
-                            let detail = String::from_utf8_lossy(&response.body).to_string();
-                            return Err(CodexError {
-                                status: 429,
-                                message: "Rate limited".to_string(),
-                                detail: Some(detail),
-                                retry_after,
-                                usage_limit: None,
-                                origin: CodexErrorOrigin::Http,
-                            });
-                        }
-                        log_buffered_retry(
-                            ctx,
-                            transport,
-                            transport_failures + 1,
-                            delay.wait_ms,
-                            response.status,
-                            "upstream",
-                            "rate limited",
-                        );
-                        transport_failures += 1;
-                        sleep(delay.wait_ms).await;
-                        continue;
-                    }
-                    let detail = String::from_utf8_lossy(&response.body).to_string();
-                    log_buffered_retry_exhausted(
-                        ctx,
-                        transport,
-                        response.status,
-                        "upstream",
-                        "rate limited",
-                    );
-                    return Err(CodexError {
-                        status: 429,
-                        message: "Rate limited".to_string(),
-                        detail: Some(detail),
-                        retry_after,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::Http,
-                    });
-                }
-                Ok(response) if should_retry_status(response.status) => {
-                    if transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
-                        let retry_after = response
-                            .headers
-                            .iter()
-                            .find(|(key, _)| key.eq_ignore_ascii_case("retry-after"))
-                            .map(|(_, value)| value.as_str());
-                        let delay = compute_backoff_delay(transport_failures, retry_after);
-                        if delay.exceeds_budget {
-                            return Err(codex_status_error(response.into_response()));
-                        }
-                        log_buffered_retry(
-                            ctx,
-                            transport,
-                            transport_failures + 1,
-                            delay.wait_ms,
-                            response.status,
-                            "upstream",
-                            "retryable upstream status",
-                        );
-                        transport_failures += 1;
-                        sleep(delay.wait_ms).await;
-                        continue;
-                    }
-                    log_buffered_retry_exhausted(
-                        ctx,
-                        transport,
-                        response.status,
-                        "upstream",
-                        "retryable upstream status",
-                    );
-                    return Err(codex_status_error(response.into_response()));
-                }
-                Ok(response) if !(200..300).contains(&response.status) => {
-                    return Err(codex_status_error(response.into_response()));
-                }
                 Ok(response) => return Ok(response),
                 Err(err)
                     if should_retry_without_continuation(&err, active_continuation.as_ref()) =>
                 {
                     active_continuation = full_context_continuation(active_continuation.as_ref());
-                    continue;
                 }
                 Err(err) => {
-                    // Determine if retryable
-                    let retryable = is_retryable_transport_error(&err);
-                    if retryable && transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
-                        let delay =
-                            compute_backoff_delay(transport_failures, err.retry_after.as_deref());
-                        if delay.exceeds_budget {
-                            return Err(err);
-                        }
-                        log_buffered_retry(
-                            ctx,
-                            transport,
-                            transport_failures + 1,
-                            delay.wait_ms,
-                            err.status,
-                            codex_error_origin_name(err.origin),
-                            &err.message,
-                        );
-                        transport_failures += 1;
-                        sleep(delay.wait_ms).await;
-                        continue;
+                    if !retryable_http_stream_error(&err)
+                        || !super::wait_for_recovery_retry(
+                            transport_failures,
+                            MAX_BUFFERED_TRANSPORT_RETRIES,
+                            &mut retry_deadline,
+                            err.retry_after.as_deref(),
+                            Some(ctx),
+                        )
+                        .await
+                    {
+                        return Err(err);
                     }
-                    if retryable {
-                        log_buffered_retry_exhausted(
-                            ctx,
-                            transport,
-                            err.status,
-                            codex_error_origin_name(err.origin),
-                            &err.message,
-                        );
-                    }
-                    return Err(err);
+                    transport_failures += 1;
                 }
             }
         }
@@ -2635,25 +2494,24 @@ impl CodexHttpClient {
                 usage_limit: None,
                 origin: CodexErrorOrigin::Http,
             })?
-            .map_err(|e| {
-                if is_retryable_reqwest_error(&e) {
-                    CodexError {
-                        status: 0,
-                        message: format!("Transport error: {e}"),
-                        detail: None,
-                        retry_after: None,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::Http,
-                    }
-                } else {
-                    CodexError {
-                        status: 0,
-                        message: format!("Network error: {e}"),
-                        detail: None,
-                        retry_after: None,
-                        usage_limit: None,
-                        origin: CodexErrorOrigin::Http,
-                    }
+            .map_err(|error| {
+                let retryable = is_retryable_reqwest_error(&error);
+                let error = error.without_url();
+                create_logger("codex").warn(
+                    "http_send_failed",
+                    Some(serde_json::Map::from_iter([
+                        ("reqId".into(), serde_json::json!(ctx.req_id)),
+                        ("retryable".into(), serde_json::json!(retryable)),
+                        ("error".into(), serde_json::json!(format!("{error:?}"))),
+                    ])),
+                );
+                CodexError {
+                    status: 0,
+                    message: format!("Codex connection failed: {error}"),
+                    detail: retryable.then(|| HTTP_TRANSPORT_ERROR_DETAIL.to_string()),
+                    retry_after: None,
+                    usage_limit: None,
+                    origin: CodexErrorOrigin::Http,
                 }
             })?;
 
@@ -3217,6 +3075,13 @@ fn codex_usage_limit_error(limit: CodexUsageLimit, origin: CodexErrorOrigin) -> 
     }
 }
 
+fn http_recovery_timeout_error() -> CodexError {
+    CodexError {
+        origin: CodexErrorOrigin::Http,
+        ..super::recovery_timeout_error()
+    }
+}
+
 fn retryable_http_stream_error(error: &CodexError) -> bool {
     if error.usage_limit.is_some() {
         return false;
@@ -3483,62 +3348,6 @@ fn codex_status_error_message(body: &[u8]) -> Option<String> {
         })
 }
 
-fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str {
-    match origin {
-        CodexErrorOrigin::Http => "http",
-        CodexErrorOrigin::WebSocket => "websocket",
-        CodexErrorOrigin::WebSocketHandshake => "websocket_handshake",
-        CodexErrorOrigin::Auth => "auth",
-        CodexErrorOrigin::BufferedHttp => "buffered_http",
-        CodexErrorOrigin::BufferedWebSocket => "buffered_websocket",
-    }
-}
-
-fn log_buffered_retry(
-    ctx: &RequestContext,
-    transport: crate::config::CodexTransport,
-    failed_attempt: u32,
-    delay_ms: u64,
-    status: u16,
-    origin: &str,
-    reason: &str,
-) {
-    let mut fields = serde_json::Map::new();
-    fields.insert("reqId".into(), serde_json::json!(ctx.req_id));
-    fields.insert("transport".into(), serde_json::json!(transport.as_str()));
-    fields.insert("failedAttempt".into(), serde_json::json!(failed_attempt));
-    fields.insert("nextAttempt".into(), serde_json::json!(failed_attempt + 1));
-    fields.insert(
-        "maxAttempts".into(),
-        serde_json::json!(MAX_BUFFERED_TRANSPORT_ATTEMPTS),
-    );
-    fields.insert("delayMs".into(), serde_json::json!(delay_ms));
-    fields.insert("status".into(), serde_json::json!(status));
-    fields.insert("origin".into(), serde_json::json!(origin));
-    fields.insert("reason".into(), serde_json::json!(reason));
-    create_logger("codex").warn("buffered_transport_retry", Some(fields));
-}
-
-fn log_buffered_retry_exhausted(
-    ctx: &RequestContext,
-    transport: crate::config::CodexTransport,
-    status: u16,
-    origin: &str,
-    reason: &str,
-) {
-    let mut fields = serde_json::Map::new();
-    fields.insert("reqId".into(), serde_json::json!(ctx.req_id));
-    fields.insert("transport".into(), serde_json::json!(transport.as_str()));
-    fields.insert(
-        "attempts".into(),
-        serde_json::json!(MAX_BUFFERED_TRANSPORT_ATTEMPTS),
-    );
-    fields.insert("status".into(), serde_json::json!(status));
-    fields.insert("origin".into(), serde_json::json!(origin));
-    fields.insert("reason".into(), serde_json::json!(reason));
-    create_logger("codex").warn("buffered_transport_retry_exhausted", Some(fields));
-}
-
 fn is_retryable_transport_error(err: &CodexError) -> bool {
     // Running out of patience for the response headers is not a transport
     // failure. The request reached Codex, which is holding the head while the
@@ -3547,6 +3356,9 @@ fn is_retryable_transport_error(err: &CodexError) -> bool {
     // longer with CCP_CODEX_HEADER_TIMEOUT_MS instead.
     if err.detail.as_deref() == Some(HTTP_RESPONSE_HEADERS_DETAIL) {
         return false;
+    }
+    if err.detail.as_deref() == Some(HTTP_TRANSPORT_ERROR_DETAIL) {
+        return true;
     }
     if err.origin == CodexErrorOrigin::WebSocketHandshake {
         if err.detail.as_deref() == Some(super::websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL) {
@@ -3577,15 +3389,9 @@ fn is_retryable_transport_error(err: &CodexError) -> bool {
 }
 
 fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
-    if err.is_timeout() || err.is_connect() {
-        return true;
-    }
-    let msg = err.to_string().to_lowercase();
-    msg.contains("connection reset")
-        || msg.contains("connection closed")
-        || msg.contains("econnreset")
-        || msg.contains("etimedout")
-        || msg.contains("epipe")
+    // Reqwest's Display hides send failures behind "error sending request".
+    // Its error kind retains that distinction without retrying builder errors.
+    err.is_timeout() || err.is_connect() || err.is_request() || err.is_body()
 }
 
 fn should_refresh_after_unauthorized(
@@ -4645,6 +4451,167 @@ mod tests {
             server.await.unwrap(),
             1,
             "a header timeout must not re-send the request"
+        );
+    }
+
+    #[test]
+    fn http_send_retry_rejects_request_builder_errors() {
+        let error = reqwest::Client::new()
+            .post("not a URL")
+            .build()
+            .unwrap_err();
+        assert!(error.is_builder());
+        assert!(!is_retryable_reqwest_error(&error));
+    }
+
+    #[tokio::test]
+    async fn http_send_retry_recognizes_a_hidden_request_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request(&mut stream).await;
+        });
+        let client = authenticated_http_test_client(format!("http://{addr}/responses"));
+        let error = client
+            .start_post_http(&http_test_auth(), "{}", &http_test_context(), false)
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+
+        assert_eq!(error.status, 0);
+        assert!(is_retryable_transport_error(&error), "{error:?}");
+        assert!(retryable_http_stream_error(&error), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn http_send_retry_recovers_buffered_and_streaming_requests() {
+        for buffered in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut first, _) = listener.accept().await.unwrap();
+                read_http_request(&mut first).await;
+                drop(first);
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_http_request(&mut stream).await;
+                let body = b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_recovered\",\"status\":\"completed\"}}\n\n";
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(head.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+            });
+            let client = Arc::new(authenticated_http_test_client(format!(
+                "http://{addr}/responses"
+            )));
+            if buffered {
+                let response = client
+                    .post_codex_with_transport(
+                        &buffered_test_request(),
+                        &http_test_context(),
+                        None,
+                        config::CodexTransport::Http,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status, 200);
+                assert!(String::from_utf8_lossy(&response.body).contains("resp_recovered"));
+            } else {
+                let mut events = client
+                    .stream_codex_http_events(&buffered_test_request(), &http_test_context())
+                    .await
+                    .unwrap();
+                let mut completions = 0;
+                while let Some(event) = events.recv().await {
+                    if event.unwrap()["type"] == "response.completed" {
+                        completions += 1;
+                    }
+                }
+                assert_eq!(completions, 1);
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn http_send_retry_bounds_a_silent_replacement_connection() {
+        for buffered in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut first, _) = listener.accept().await.unwrap();
+                read_http_request(&mut first).await;
+                drop(first);
+                let (mut replacement, _) = listener.accept().await.unwrap();
+                read_http_request(&mut replacement).await;
+                accepted_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+                drop(replacement);
+            });
+            let mut client = authenticated_http_test_client(format!("http://{addr}/responses"));
+            client.header_timeout_ms = 90_000;
+            let client = Arc::new(client);
+            let request = tokio::spawn(async move {
+                if buffered {
+                    client
+                        .post_codex_with_transport(
+                            &buffered_test_request(),
+                            &http_test_context(),
+                            None,
+                            config::CodexTransport::Http,
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    client
+                        .stream_codex_http_events(&buffered_test_request(), &http_test_context())
+                        .await
+                        .map(|_| ())
+                }
+            });
+            accepted_rx.await.unwrap();
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(61)).await;
+            let error = request.await.unwrap().unwrap_err();
+            tokio::time::resume();
+            server.abort();
+            assert_eq!(error.origin, CodexErrorOrigin::Http);
+            assert_eq!(error.status, 503);
+            assert!(error.message.contains("60 seconds"), "{error:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_send_retry_stops_at_the_attempt_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let observed = attempts.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_http_request(&mut stream).await;
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let client = Arc::new(authenticated_http_test_client(format!(
+            "http://{addr}/responses"
+        )));
+        let error = match client
+            .stream_codex_http_events(&buffered_test_request(), &http_test_context())
+            .await
+        {
+            Ok(_) => panic!("failed sends must exhaust with an error"),
+            Err(error) => error,
+        };
+        server.abort();
+        assert!(retryable_http_stream_error(&error), "{error:?}");
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_BUFFERED_TRANSPORT_ATTEMPTS
         );
     }
 
