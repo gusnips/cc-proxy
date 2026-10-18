@@ -202,8 +202,8 @@ async fn spawn_truncated_http_upstream(body: &'static [u8]) -> String {
     format!("http://{addr}")
 }
 
-async fn spawn_retrying_truncated_http_upstream(
-    first_body: Vec<u8>,
+async fn spawn_retrying_http_upstream(
+    first_body: Option<Vec<u8>>,
     success_body: Vec<u8>,
     attempts: Arc<AtomicUsize>,
 ) -> String {
@@ -219,7 +219,10 @@ async fn spawn_retrying_truncated_http_upstream(
             let _ = stream.read(&mut request).await;
             attempts.fetch_add(1, Ordering::SeqCst);
             let body = if attempt == 0 {
-                first_body.as_slice()
+                let Some(body) = first_body.as_deref() else {
+                    continue;
+                };
+                body
             } else {
                 success_body.as_slice()
             };
@@ -252,7 +255,7 @@ async fn collect_http_stream_after_truncated_attempt(
 
     let attempts = Arc::new(AtomicUsize::new(0));
     let upstream =
-        spawn_retrying_truncated_http_upstream(first_body, success_body, attempts.clone()).await;
+        spawn_retrying_http_upstream(Some(first_body), success_body, attempts.clone()).await;
     let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
     let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
     let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
@@ -297,7 +300,7 @@ async fn assert_codex_http_retries_structural_body_error(first_body: Vec<u8>) {
     .as_bytes()
     .to_vec();
     let upstream =
-        spawn_retrying_truncated_http_upstream(first_body, success_body, attempts.clone()).await;
+        spawn_retrying_http_upstream(Some(first_body), success_body, attempts.clone()).await;
 
     let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
     let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
@@ -2836,6 +2839,48 @@ async fn smoke_codex_http_stops_after_retry_limit() {
         text.contains("overloaded until retry limit"),
         "stream body: {text}"
     );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_http_recovers_after_failed_send() {
+    let _guard = env_lock();
+    for stream in [false, true] {
+        clear_all_continuations_for_tests();
+        let config = TempDir::new().unwrap();
+        write_auth(config.path(), "codex");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let upstream = spawn_retrying_http_upstream(
+            None,
+            include_bytes!("fixtures/golden/codex/text.sse").to_vec(),
+            attempts.clone(),
+        )
+        .await;
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+        let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+        let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+        let response = call_messages_body(json!({
+            "model": "gpt-5.5",
+            "max_tokens": 64,
+            "stream": stream,
+            "messages": [{"role":"user","content":"hello"}]
+        }))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "{text}");
+        assert!(!text.contains("event: error"), "{text}");
+        if stream {
+            assert_eq!(text.matches("event: message_start").count(), 1, "{text}");
+            assert_eq!(text.matches("event: message_stop").count(), 1, "{text}");
+        } else {
+            let message: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(message["content"][0]["text"], "It says hello.");
+        }
+    }
 }
 
 #[allow(clippy::await_holding_lock)]

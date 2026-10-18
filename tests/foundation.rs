@@ -242,7 +242,12 @@ fn retry_backoff_decisions() {
         .replace("+0000", "GMT");
     assert!(compute_backoff_delay(0, Some(&dated)).exceeds_budget);
 
-    assert!(cc_proxy::retry::should_retry_status(529));
+    for status in [408, 409, 425, 429, 500, 502, 503, 504, 529] {
+        assert!(cc_proxy::retry::should_retry_status(status), "{status}");
+    }
+    for status in [200, 400, 401, 402, 403, 404, 413, 501, 505] {
+        assert!(!cc_proxy::retry::should_retry_status(status), "{status}");
+    }
 }
 
 #[tokio::test]

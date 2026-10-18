@@ -33,7 +33,7 @@ If Claude Code says it can't connect right after a crash or a reboot, routing is
 
 Some Claude Code sessions use Message Threads: they send only the newest messages and expect Anthropic to remember the rest. Version 0.2.0 accepted those partial requests without storing their earlier history. A tool result could reach Codex without the original task, even if the first request after switching worked.
 
-The fix returns `thread_unsupported_request` before contacting a provider. Claude Code then retries with the full conversation, system prompt and tools, in the same running session. Removing the `thread` field alone would not restore the missing history.
+The fix returns `thread_unsupported_request` before contacting a provider. Claude Code then retries with the full conversation, system prompt and tools, in the same running session. This 400 can appear in the monitor even when the next model request succeeds. It does not explain a later network error. Removing the `thread` field alone would not restore the missing history.
 
 Update the proxy to a version containing this fix. Updating the binary does not replace an already running proxy; arrange a proxy-only restart when no requests are active. Do not restart Claude Code or cancel workflows to apply this fix. A workflow already paused until a usage limit resets may still wait for its client-side timer.
 
@@ -115,6 +115,14 @@ CCP_CURSOR_AGENT_BUNDLE=/path/to/cursor-agent/index.js \
 Upstream limits are shared with other clients on the same account. Codex limit responses and Kimi HTTP 429 responses surface as HTTP 429 with `retry-after`. Wait for the indicated interval or reduce concurrent traffic.
 
 When a Codex usage window runs out, Claude Code shows when it resets and can continue the task by itself after that. Sessions routed by `cc-proxy start` do this. If you set the variables yourself, use `CLAUDE_CODE_OAUTH_TOKEN=unused` instead of `ANTHROPIC_AUTH_TOKEN`. See [Configure Claude Code](/using/configure-claude-code/).
+
+## Temporary network errors
+
+Codex retries failed HTTP sends and temporary upstream errors up to three times. The random wait grows after each failure: up to 2 seconds, then 4, then 8. Recovery stops after 60 seconds, including time spent reconnecting. The initial request keeps its configured response-header timeout; slow headers alone do not trigger a replay.
+
+The proxy honors `Retry-After`. If that wait exceeds its retry budget, it returns the error instead of trying early. Invalid requests, sign-in failures and spent usage limits are not retried this way. A broken stream is not replayed after it has sent an answer or tool call.
+
+`proxy.log` records each retry's request ID, delay and attempt limit. Claude Code can show a countdown for its own retries, but proxy-internal retries do not appear as assistant messages. If recovery fails, retry the turn. If failures continue, check your connection and the logged cause.
 
 ## Find the complete error
 

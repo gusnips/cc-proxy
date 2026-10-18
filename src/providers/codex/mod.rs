@@ -438,6 +438,7 @@ impl CodexProvider {
                 MAX_EMPTY_COMPLETION_RETRIES,
                 &mut retry_deadline,
                 None,
+                Some(&ctx),
             )
             .await
             {
@@ -834,6 +835,7 @@ async fn live_stream_response(
                     MAX_RETRYABLE_LIVE_STREAM_RETRIES,
                     &mut retry_deadline,
                     retry_after,
+                    Some(&ctx),
                 )
                 .await
                 {
@@ -902,8 +904,14 @@ async fn live_stream_response(
                 } else {
                     error.retry_after.as_deref()
                 };
-                if !wait_for_recovery_retry(attempt, max_retries, &mut retry_deadline, retry_after)
-                    .await
+                if !wait_for_recovery_retry(
+                    attempt,
+                    max_retries,
+                    &mut retry_deadline,
+                    retry_after,
+                    Some(&ctx),
+                )
+                .await
                 {
                     cleanup.abort();
                     return exhausted_recovery_response(&error);
@@ -928,16 +936,40 @@ pub(super) async fn wait_for_recovery_retry(
     max_retries: u32,
     deadline: &mut Option<tokio::time::Instant>,
     retry_after: Option<&str>,
+    ctx: Option<&RequestContext>,
 ) -> bool {
-    if attempt >= max_retries {
-        return false;
-    }
     let deadline =
         *deadline.get_or_insert_with(|| tokio::time::Instant::now() + RECOVERY_RETRY_BUDGET);
     let delay = compute_backoff_delay(attempt, retry_after);
-    if delay.exceeds_budget
-        || tokio::time::Instant::now() + Duration::from_millis(delay.wait_ms) >= deadline
-    {
+    let stopped = if attempt >= max_retries {
+        Some("attempt_limit")
+    } else if delay.exceeds_budget {
+        Some("retry_after_exceeds_budget")
+    } else if tokio::time::Instant::now() + Duration::from_millis(delay.wait_ms) >= deadline {
+        Some("recovery_deadline")
+    } else {
+        None
+    };
+    if let Some(ctx) = ctx {
+        create_logger("codex").warn(
+            if stopped.is_some() {
+                "recovery_stopped"
+            } else {
+                "recovery_retry"
+            },
+            Some(serde_json::Map::from_iter([
+                ("reqId".into(), serde_json::json!(ctx.req_id)),
+                ("failedAttempt".into(), serde_json::json!(attempt + 1)),
+                ("maxAttempts".into(), serde_json::json!(max_retries + 1)),
+                (
+                    "delayMs".into(),
+                    serde_json::json!(stopped.is_none().then_some(delay.wait_ms)),
+                ),
+                ("reason".into(), serde_json::json!(stopped)),
+            ])),
+        );
+    }
+    if stopped.is_some() {
         return false;
     }
     await_recovery(sleep(delay.wait_ms), Some(deadline))
@@ -1534,7 +1566,7 @@ fn remaining_live_stream_response(
                                     abort_request_state(ctx.session_id.as_deref(), &request_continuation, compaction.attempt);
                                     return;
                                 }
-                                ready = wait_for_recovery_retry(reconnect.attempts, MAX_RETRYABLE_LIVE_STREAM_RETRIES, &mut reconnect.deadline, err.retry_after.as_deref()) => ready,
+                                ready = wait_for_recovery_retry(reconnect.attempts, MAX_RETRYABLE_LIVE_STREAM_RETRIES, &mut reconnect.deadline, err.retry_after.as_deref(), Some(&ctx)) => ready,
                             };
                             if !can_retry {
                                 break;
@@ -2418,17 +2450,17 @@ mod tests {
     async fn recovery_budget_starts_after_long_initial_thinking_and_does_not_renew() {
         let mut deadline = None;
         tokio::time::advance(Duration::from_secs(245)).await;
-        assert!(wait_for_recovery_retry(0, 3, &mut deadline, Some("0")).await);
+        assert!(wait_for_recovery_retry(0, 3, &mut deadline, Some("0"), None).await);
         let anchored = deadline.unwrap();
         assert_eq!(
             anchored,
             tokio::time::Instant::now() + RECOVERY_RETRY_BUDGET
         );
         tokio::time::advance(Duration::from_secs(59)).await;
-        assert!(wait_for_recovery_retry(1, 3, &mut deadline, Some("0")).await);
+        assert!(wait_for_recovery_retry(1, 3, &mut deadline, Some("0"), None).await);
         assert_eq!(deadline, Some(anchored));
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(!wait_for_recovery_retry(2, 3, &mut deadline, Some("0")).await);
+        assert!(!wait_for_recovery_retry(2, 3, &mut deadline, Some("0"), None).await);
         assert_eq!(deadline, Some(anchored));
     }
 
@@ -2449,16 +2481,22 @@ mod tests {
                 .await,
                 Err(())
             );
-            assert!(!wait_for_recovery_retry(0, 3, &mut Some(deadline), Some("0")).await);
+            assert!(!wait_for_recovery_retry(0, 3, &mut Some(deadline), Some("0"), None).await);
         }
         assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
         let now = tokio::time::Instant::now();
         assert!(
-            !wait_for_recovery_retry(0, 3, &mut Some(now + Duration::from_secs(5)), Some("6"))
-                .await
+            !wait_for_recovery_retry(
+                0,
+                3,
+                &mut Some(now + Duration::from_secs(5)),
+                Some("6"),
+                None
+            )
+            .await
         );
-        assert!(!wait_for_recovery_retry(0, 3, &mut None, Some("31")).await);
-        assert!(!wait_for_recovery_retry(3, 3, &mut None, Some("0")).await);
+        assert!(!wait_for_recovery_retry(0, 3, &mut None, Some("31"), None).await);
+        assert!(!wait_for_recovery_retry(3, 3, &mut None, Some("0"), None).await);
         assert_eq!(tokio::time::Instant::now(), now);
         assert_eq!(await_recovery(async { 42 }, None).await, Ok(42));
     }
@@ -2470,12 +2508,12 @@ mod tests {
             .format(&time::format_description::well_known::Rfc2822)
             .unwrap()
             .replace("+0000", "GMT");
-        assert!(!wait_for_recovery_retry(0, 3, &mut None, Some(&future)).await);
+        assert!(!wait_for_recovery_retry(0, 3, &mut None, Some(&future), None).await);
         let past = (time::OffsetDateTime::now_utc() - time::Duration::minutes(2))
             .format(&time::format_description::well_known::Rfc2822)
             .unwrap()
             .replace("+0000", "GMT");
-        assert!(wait_for_recovery_retry(0, 3, &mut None, Some(&past)).await);
+        assert!(wait_for_recovery_retry(0, 3, &mut None, Some(&past), None).await);
         assert_eq!(tokio::time::Instant::now(), now);
     }
 
