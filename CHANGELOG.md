@@ -3,6 +3,31 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.8 (2026-10-20)
+
+- `gemini` no longer fails with "...parameters.properties[batch].items:
+  missing field". Tool schemas now go to Gemini as standard JSON Schema
+  (`parametersJsonSchema`), so a tool with an array argument that doesn't name
+  its item type works. Only the few shapes Gemini rejects are rewritten.
+  OpenCode's Gemini models get the same fix, and `antigravity`, which keeps
+  Google's older `parameters` field, now gives such an array a string item.
+- OpenCode Zen's free models work from Claude Code. Zen answers free calls only
+  when they look like OpenCode's own, so cc-proxy sends Claude Code's `Read`
+  tool under OpenCode's name `read`, and sends no key: Zen refuses a free call
+  that carries a stale one.
+- Zen's Claude models now get Claude Code's `anthropic-beta` header, as the
+  `anthropic` provider does.
+- New `cc-proxy models choose [provider]` picks the model each Claude name uses,
+  one name at a time. Type part of a name to search, which helps on catalogs
+  with hundreds of models, type a number to pick, or press Enter to keep the
+  name as it is. It replaces `cc-proxy models set`.
+- Resellers (OpenCode Go, OpenCode Zen, and providers added with
+  `cc-proxy provider add`) no longer get guessed models. Their Claude names
+  start empty, and `cc-proxy start` and `cc-proxy use` ask for each one. Enter
+  skips a name.
+- A provider with more than 100 models no longer fills Claude Code's `/model`
+  picker. It shows the four Claude names instead.
+
 ## v0.2.7 (2026-10-20)
 
 - Claude Code routed to `anthropic` no longer fails with "context_management:
