@@ -3,6 +3,23 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.7 (2026-10-20)
+
+- Claude Code routed to `anthropic` no longer fails with "context_management:
+  Extra inputs are not permitted". cc-proxy now sends Claude Code's
+  `anthropic-beta` header on to Anthropic, so context editing, the advisor tool
+  and newer `thinking.display` values work. OAuth betas stay behind, since
+  cc-proxy signs in to Anthropic with your API key.
+- An API key saved while the proxy runs now works on the next request, with no
+  restart. This covers `anthropic`, `opencode`, `opencode-zen` and custom
+  providers, including the key `cc-proxy start <provider>` asks for.
+- A missing key now names the right provider and the command that adds one,
+  for example "Anthropic has no API key. Run `cc-proxy auth login anthropic` to
+  add one." Before, every provider said "OpenCode Go API key is not
+  configured".
+- `cc-proxy restart` and `cc-proxy reload` now say where Claude Code goes, the
+  same way `cc-proxy status` does.
+
 ## v0.2.6 (2026-10-20)
 
 - New `antigravity` provider for Google Antigravity (Cloud Code Assist) OAuth
