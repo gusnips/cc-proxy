@@ -79,6 +79,10 @@ impl Registry {
             "gemini".into(),
             crate::providers::gemini::advertised_models(),
         );
+        models.insert(
+            "antigravity".into(),
+            crate::providers::antigravity::advertised_models(),
+        );
 
         let mut handlers = BTreeMap::new();
         for (name, entries) in &models {
@@ -93,6 +97,9 @@ impl Registry {
                 "copilot" => Arc::new(crate::providers::copilot::CopilotProvider::new()),
                 "anthropic" => anthropic.clone(),
                 "gemini" => Arc::new(crate::providers::gemini::GeminiProvider::new()),
+                "antigravity" => {
+                    Arc::new(crate::providers::antigravity::AntigravityProvider::new())
+                }
                 _ => Arc::new(PlaceholderProvider::new(name, entries.clone())),
             };
             handlers.insert(name.clone(), handler);
@@ -256,6 +263,7 @@ impl Registry {
                 "grok",
                 "glm",
                 "gemini",
+                "antigravity",
                 "opencode",
                 "opencode-zen",
                 "copilot",
@@ -771,6 +779,8 @@ mod tests {
             ("gemini-4-argon", "gemini"),
             ("gemini/gemini-3.8-flash", "gemini"),
             ("gemini-99-unlisted", "gemini"),
+            ("antigravity/gemini-4-argon", "antigravity"),
+            ("antigravity/claude-opus-5-5", "antigravity"),
             ("opencode-zen/gemini-4-argon", "opencode-zen"),
             ("opencode-zen/claude-sonnet-5-5", "opencode-zen"),
             ("opencode-zen/big-pickle", "opencode-zen"),

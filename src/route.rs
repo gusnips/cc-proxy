@@ -19,7 +19,7 @@ use crate::ui::{self, Mood};
 use crate::{claude_settings, config, config_keys, daemon, tiers};
 
 /// The built-in providers `start` and `use` can send Claude Code to.
-pub const PROVIDERS: [&str; 10] = [
+pub const PROVIDERS: [&str; 11] = [
     "codex",
     "kimi",
     "cursor",
@@ -28,6 +28,7 @@ pub const PROVIDERS: [&str; 10] = [
     "glm",
     "anthropic",
     "gemini",
+    "antigravity",
     "opencode",
     "opencode-zen",
 ];
@@ -78,10 +79,23 @@ pub fn sync_model_labels(
     route: &config::Route,
     observed: Option<&str>,
 ) -> Result<bool> {
-    if route.target().is_none() {
+    let Some(target) = route.target() else {
         return Ok(false);
+    };
+    let mut base: Vec<String> = tiers::TIERS.iter().map(|t| (*t).to_string()).collect();
+    if matches!(target, "opencode" | "opencode-zen" | "antigravity")
+        || registry
+            .provider(target)
+            .is_some_and(|handler| handler.aggregator())
+    {
+        for model in registry.catalog_for(target) {
+            if !base.contains(&model) {
+                base.push(model);
+            }
+        }
     }
-    claude_settings::sync_model_labels(&tiers::TIERS, observed, |model| {
+    let base_refs: Vec<&str> = base.iter().map(String::as_str).collect();
+    claude_settings::sync_model_labels(&base_refs, observed, |model| {
         tiers::model_label(registry, route, model)
     })
 }

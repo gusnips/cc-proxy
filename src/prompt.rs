@@ -8,12 +8,56 @@ use anyhow::{Result, bail};
 /// How many options `choose` prints. The rest can still be typed by name.
 const MAX_SHOWN: usize = 12;
 
+/// Strip terminal escape sequences (such as SGR mouse events `\x1b[<35;27;27M`
+/// or bracketed-paste markers `\x1b[200~`) and control characters from a line
+/// read from the terminal.
+pub fn strip_terminal_noise(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            i += 1;
+            if i < bytes.len() && bytes[i] == b'[' {
+                i += 1;
+                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            } else if i < bytes.len() && bytes[i] == b']' {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[i] < 0x20 || bytes[i] == 0x7f {
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).trim().to_string()
+}
+
 /// One line from stdin, trimmed. `None` when the input has ended.
 fn read_line() -> std::io::Result<Option<String>> {
     std::io::stdout().flush()?;
     let mut buf = String::new();
     let read = std::io::stdin().lock().read_line(&mut buf)?;
-    Ok((read > 0).then(|| buf.trim().to_string()))
+    Ok((read > 0).then(|| strip_terminal_noise(&buf)))
 }
 
 pub fn read_visible_line() -> std::io::Result<String> {
@@ -27,17 +71,20 @@ pub fn read_visible_line() -> std::io::Result<String> {
 pub fn read_hidden_line(prompt: &str) -> std::io::Result<String> {
     use std::os::unix::io::AsRawFd;
 
-    print!("{prompt}");
-    std::io::stdout().flush()?;
     let fd = std::io::stdin().as_raw_fd();
     // SAFETY: tcgetattr/tcsetattr only touch the termios struct for our own
     // stdin fd, and the original flags are restored before returning.
     unsafe {
         let mut original: libc::termios = std::mem::zeroed();
         if libc::tcgetattr(fd, &mut original) != 0 {
+            print!("{prompt}");
             // Not a TTY (piped stdin in tests and scripts): plain read.
             return read_visible_line();
         }
+        // Turn off any lingering terminal mouse reporting before prompting so
+        // clicking the window to paste does not inject `\x1b[<...M` into stdin.
+        print!("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l{prompt}");
+        std::io::stdout().flush()?;
         let mut hidden = original;
         hidden.c_lflag &= !libc::ECHO;
         if libc::tcsetattr(fd, libc::TCSANOW, &hidden) != 0 {

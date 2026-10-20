@@ -33,7 +33,7 @@ pub fn provider_color(provider: &str) -> Color {
         "opencode" | "opencode-go" | "opencode-zen" => Color::Rgb(240, 165, 100),
         "copilot" => Color::Rgb(160, 150, 255),
         "anthropic" => Color::Rgb(230, 145, 110),
-        "gemini" => Color::Rgb(110, 170, 250),
+        "gemini" | "antigravity" => Color::Rgb(110, 170, 250),
         _ => DIM_WHITE,
     }
 }
@@ -49,6 +49,7 @@ pub fn provider_name(provider: &str) -> &str {
         "grok" => "Grok",
         "anthropic" => "Anthropic",
         "gemini" => "Gemini",
+        "antigravity" => "Antigravity",
         "opencode" | "opencode-go" => "OpenCode Go",
         "opencode-zen" => "OpenCode Zen",
         other => other,

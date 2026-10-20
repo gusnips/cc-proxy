@@ -1,3 +1,4 @@
+pub mod antigravity;
 pub mod codex;
 pub mod copilot;
 pub mod cursor;

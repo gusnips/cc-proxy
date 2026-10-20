@@ -7,14 +7,12 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
 
 use crate::anthropic::{
     error::json_error,
     schema::{CountTokensResponse, MessagesRequest},
 };
 use crate::config;
-use crate::paths;
 use crate::provider::{
     AuthState, CliHandlers, Generation, GenerationBody, Provider, ProviderError, ProviderErrorKind,
     RequestContext,
@@ -43,59 +41,6 @@ pub const GEMINI_MODELS: &[&str] = &[
     "gemini-2.5-flash",
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredGeminiOAuth {
-    pub access_token: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refresh_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expiry_date: Option<u64>,
-}
-
-enum GeminiCredential {
-    ApiKey(String),
-    OAuth(StoredGeminiOAuth),
-}
-
-fn oauth_auth_path() -> std::path::PathBuf {
-    paths::provider_auth_file("gemini")
-}
-
-fn gemini_cli_oauth_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(
-        std::path::PathBuf::from(home)
-            .join(".gemini")
-            .join("oauth_creds.json"),
-    )
-}
-
-fn load_oauth() -> Option<StoredGeminiOAuth> {
-    let path = oauth_auth_path();
-    if let Ok(raw) = std::fs::read_to_string(&path)
-        && let Ok(parsed) = serde_json::from_str::<StoredGeminiOAuth>(&raw)
-        && !parsed.access_token.trim().is_empty()
-    {
-        return Some(parsed);
-    }
-    if std::env::var_os("CCP_CONFIG_DIR").is_none()
-        && let Some(cli_path) = gemini_cli_oauth_path()
-        && let Ok(raw) = std::fs::read_to_string(cli_path)
-        && let Ok(parsed) = serde_json::from_str::<StoredGeminiOAuth>(&raw)
-        && !parsed.access_token.trim().is_empty()
-    {
-        return Some(parsed);
-    }
-    None
-}
-
-fn resolve_credential() -> Option<GeminiCredential> {
-    if let Some(key) = config::gemini_api_key() {
-        return Some(GeminiCredential::ApiKey(key));
-    }
-    load_oauth().map(GeminiCredential::OAuth)
-}
-
 pub fn advertised_models() -> Vec<String> {
     let mut out = Vec::with_capacity(GEMINI_MODELS.len() * 2);
     for model in GEMINI_MODELS {
@@ -108,16 +53,13 @@ pub fn advertised_models() -> Vec<String> {
 
 pub fn resolve_model(raw: &str) -> Option<String> {
     let normalized = normalize_incoming_model(raw);
-    if let Some(stripped) = normalized.strip_prefix(MODEL_PREFIX) {
-        if !stripped.is_empty() {
-            return Some(stripped.to_string());
-        }
+    let bare = normalized
+        .strip_prefix(MODEL_PREFIX)
+        .unwrap_or(normalized.as_str());
+    if bare.is_empty() || !bare.starts_with("gemini-") {
         return None;
     }
-    if normalized.starts_with("gemini-") {
-        return Some(normalized);
-    }
-    None
+    Some(bare.to_string())
 }
 
 pub struct GeminiProvider;
@@ -133,27 +75,22 @@ impl GeminiProvider {
         Self
     }
 
-    fn client(&self) -> Result<(Arc<OpenCodeClient>, bool), ProviderError> {
-        let Some(cred) = resolve_credential() else {
+    fn client(&self) -> Result<Arc<OpenCodeClient>, ProviderError> {
+        let Some(key) = config::gemini_api_key() else {
             return Err(ProviderError::new(
                 StatusCode::UNAUTHORIZED,
                 ProviderErrorKind::Authentication,
-                "Gemini is not configured. Run `cc-proxy auth login gemini` or set CCP_GEMINI_API_KEY / GEMINI_API_KEY.",
+                "Gemini API key is not configured. Run `cc-proxy auth login gemini` or set CCP_GEMINI_API_KEY / GEMINI_API_KEY.",
             ));
         };
-        let (secret, bearer_only) = match cred {
-            GeminiCredential::ApiKey(key) => (key, false),
-            GeminiCredential::OAuth(oauth) => (oauth.access_token, true),
-        };
-        let client =
-            OpenCodeClient::new(config::gemini_base_url(), Some(secret)).map_err(|err| {
-                ProviderError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ProviderErrorKind::Api,
-                    format!("Invalid Gemini configuration: {err}"),
-                )
-            })?;
-        Ok((Arc::new(client), bearer_only))
+        let client = OpenCodeClient::new(config::gemini_base_url(), Some(key)).map_err(|err| {
+            ProviderError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ProviderErrorKind::Api,
+                format!("Invalid Gemini configuration: {err}"),
+            )
+        })?;
+        Ok(Arc::new(client))
     }
 
     fn map_error(error: OpenCodeError) -> ProviderError {
@@ -178,8 +115,8 @@ impl GeminiProvider {
                 format!("Unsupported Gemini model: {requested}"),
             );
         };
-        let (client, bearer_only) = match self.client() {
-            Ok(pair) => pair,
+        let client = match self.client() {
+            Ok(client) => client,
             Err(err) => return err.response(),
         };
         if let Some(monitor) = ctx.monitor.as_ref() {
@@ -206,7 +143,7 @@ impl GeminiProvider {
                 "gemini",
                 "Gemini",
                 true,
-                bearer_only,
+                false,
             )
             .await
         {
@@ -248,7 +185,11 @@ impl Provider for GeminiProvider {
     }
 
     fn catalog(&self) -> Vec<String> {
-        GEMINI_MODELS.iter().map(|m| (*m).to_string()).collect()
+        vec![
+            "gemini-4-argon".to_string(),
+            "gemini-3.1-pro".to_string(),
+            "gemini-3.8-flash".to_string(),
+        ]
     }
 
     fn cli(&self) -> &dyn CliHandlers {
@@ -304,7 +245,7 @@ impl Provider for GeminiProvider {
                 format!("Unsupported Gemini model: {requested}"),
             )
         })?;
-        let (client, bearer_only) = self.client()?;
+        let client = self.client()?;
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved);
             monitor.upstream_started(&ctx.req_id);
@@ -326,7 +267,7 @@ impl Provider for GeminiProvider {
                 "gemini",
                 "Gemini",
                 true,
-                bearer_only,
+                false,
             )
             .await
             .map_err(Self::map_error)?;
@@ -352,82 +293,47 @@ struct GeminiCli;
 impl CliHandlers for GeminiCli {
     fn auth_state(&self) -> AuthState {
         if config::gemini_api_key().is_some() {
-            return AuthState::KeySaved;
+            AuthState::KeySaved
+        } else {
+            AuthState::Missing
         }
-        if let Some(oauth) = load_oauth() {
-            return AuthState::SignedIn {
-                account: Some("oauth".to_string()),
-                expires_ms: oauth.expiry_date,
-            };
-        }
-        AuthState::Missing
     }
 
     fn login(&self) -> Result<()> {
-        println!(
-            "Paste your Gemini API key (or press Enter to import ~/.gemini/oauth_creds.json):"
-        );
+        let url = "https://aistudio.google.com/apikey";
+        println!("Open {url} to get your Google AI Studio API key.");
+        let _ = crate::browser::open(url);
+        println!("Paste your Google AI Studio Gemini API key (input is hidden) and press Enter:");
         let key = crate::prompt::read_hidden_line("API key: ")?;
-        if !key.trim().is_empty() {
-            let path = config::save_gemini_api_key(key.trim())?;
-            println!("Gemini API key saved to {}", path.display());
-            return Ok(());
+        if key.is_empty() {
+            bail!("no API key provided");
         }
-        if let Some(cli_path) = gemini_cli_oauth_path().filter(|p| p.exists()) {
-            let raw = std::fs::read_to_string(&cli_path)?;
-            let parsed: StoredGeminiOAuth = serde_json::from_str(&raw)
-                .map_err(|e| anyhow::anyhow!("invalid {}: {e}", cli_path.display()))?;
-            let dest = oauth_auth_path();
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&dest, serde_json::to_vec_pretty(&parsed)?)?;
-            println!(
-                "Imported Gemini CLI OAuth credentials to {}",
-                dest.display()
-            );
-            return Ok(());
-        }
-        bail!("no Gemini API key provided and ~/.gemini/oauth_creds.json was not found")
+        let path = config::save_gemini_api_key(&key)?;
+        println!("Gemini API key saved to {}", path.display());
+        Ok(())
     }
 
     fn device(&self) -> Result<()> {
         bail!(
-            "gemini: run `cc-proxy auth login gemini` to paste an API key or import ~/.gemini/oauth_creds.json"
+            "gemini: API-key provider: set CCP_GEMINI_API_KEY / GEMINI_API_KEY or run `cc-proxy auth login gemini` (for Google OAuth, use `cc-proxy auth login antigravity`)"
         )
     }
 
     fn status(&self) -> Result<()> {
-        if let Some(source) = config::gemini_api_key_source() {
-            println!("API key configured: true");
-            println!("Source: {source}");
-            println!("Base URL: {}", config::gemini_base_url());
-            return Ok(());
-        }
-        if let Some(oauth) = load_oauth() {
-            println!("Authenticated: true (OAuth)");
-            if let Some(exp) = oauth.expiry_date {
-                println!("Expires: {exp}");
-            }
-            println!("Base URL: {}", config::gemini_base_url());
-            return Ok(());
-        }
-        bail!("Not authenticated")
+        let Some(source) = config::gemini_api_key_source() else {
+            bail!("Not authenticated");
+        };
+        println!("API key configured: true");
+        println!("Source: {source}");
+        println!("Base URL: {}", config::gemini_base_url());
+        Ok(())
     }
 
     fn logout(&self) -> Result<()> {
-        let key_cleared = config::clear_gemini_api_key()?;
-        let oauth_path = oauth_auth_path();
-        let oauth_cleared = if oauth_path.exists() {
-            let _ = std::fs::remove_file(&oauth_path);
-            true
+        if config::clear_gemini_api_key()? {
+            println!("Gemini stored key cleared.");
         } else {
-            false
-        };
-        if key_cleared || oauth_cleared {
-            println!("Gemini stored credentials cleared.");
-        } else {
-            println!("No stored Gemini credentials found.");
+            println!("No stored Gemini key in config.json.");
         }
         Ok(())
     }

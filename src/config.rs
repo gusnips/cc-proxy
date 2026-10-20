@@ -932,14 +932,17 @@ pub fn clear_anthropic_api_key() -> anyhow::Result<bool> {
 pub fn gemini_api_key_source() -> Option<&'static str> {
     let env: HashMap<_, _> = std::env::vars().collect();
     for var in ["CCP_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"] {
-        if env.get(var).is_some_and(|v| !v.trim().is_empty()) {
+        if env
+            .get(var)
+            .is_some_and(|v| !crate::prompt::strip_terminal_noise(v).is_empty())
+        {
             return Some(var);
         }
     }
     let file = read_file_config(&paths::config_dir()).and_then(|f| f.gemini);
     if file
         .and_then(|c| c.api_key)
-        .is_some_and(|v| !v.trim().is_empty())
+        .is_some_and(|v| !crate::prompt::strip_terminal_noise(&v).is_empty())
     {
         return Some("config.json");
     }
@@ -949,14 +952,19 @@ pub fn gemini_api_key_source() -> Option<&'static str> {
 pub fn gemini_api_key() -> Option<String> {
     let env: HashMap<_, _> = std::env::vars().collect();
     for var in ["CCP_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"] {
-        if let Some(val) = env.get(var).filter(|v| !v.trim().is_empty()) {
-            return Some(val.clone());
+        if let Some(val) = env
+            .get(var)
+            .map(|v| crate::prompt::strip_terminal_noise(v))
+            .filter(|v| !v.is_empty())
+        {
+            return Some(val);
         }
     }
     read_file_config(&paths::config_dir())
         .and_then(|f| f.gemini)
         .and_then(|c| c.api_key)
-        .filter(|v| !v.trim().is_empty())
+        .map(|v| crate::prompt::strip_terminal_noise(&v))
+        .filter(|v| !v.is_empty())
 }
 
 pub fn gemini_base_url() -> String {

@@ -47,6 +47,7 @@ pub fn prepare_request(body: &MessagesRequest) -> anyhow::Result<Value> {
             "user"
         };
         let mut parts = Vec::new();
+        let mut saw_call_in_turn = false;
         for block in normalize_content(&message.content, json!({})) {
             match block {
                 ContentBlock::Text { text } => {
@@ -54,11 +55,7 @@ pub fn prepare_request(body: &MessagesRequest) -> anyhow::Result<Value> {
                         parts.push(json!({ "text": text }));
                     }
                 }
-                ContentBlock::Thinking { thinking, .. } => {
-                    if !thinking.is_empty() {
-                        parts.push(json!({ "text": thinking, "thought": true }));
-                    }
-                }
+                ContentBlock::Thinking { .. } => {}
                 ContentBlock::Image { source } => {
                     if source.source_type == "base64" && !source.data.is_empty() {
                         parts.push(json!({
@@ -69,14 +66,20 @@ pub fn prepare_request(body: &MessagesRequest) -> anyhow::Result<Value> {
                         }));
                     }
                 }
-                ContentBlock::ToolUse { name, input, .. } => {
+                ContentBlock::ToolUse { id, name, input } => {
                     let args = if input.is_object() { input } else { json!({}) };
-                    parts.push(json!({
+                    let mut part = json!({
                         "functionCall": {
+                            "id": id,
                             "name": name,
                             "args": args
                         }
-                    }));
+                    });
+                    if !saw_call_in_turn {
+                        saw_call_in_turn = true;
+                        part["thoughtSignature"] = json!("skip_thought_signature_validator");
+                    }
+                    parts.push(part);
                 }
                 ContentBlock::ToolResult {
                     tool_use_id,
@@ -90,6 +93,7 @@ pub fn prepare_request(body: &MessagesRequest) -> anyhow::Result<Value> {
                     let text = flatten_tool_result(&content);
                     parts.push(json!({
                         "functionResponse": {
+                            "id": tool_use_id,
                             "name": name,
                             "response": {
                                 "result": text,
@@ -183,23 +187,131 @@ fn flatten_tool_result(content: &Value) -> String {
     }
 }
 
-/// Strips JSON Schema keywords that Google's `v1beta` `functionDeclarations`
-/// parser rejects (`$schema`, `additionalProperties`).
+/// Sanitizes a JSON Schema to the exact subset Google's `v1beta` and
+/// Antigravity `functionDeclarations` accept (`type`, `nullable`,
+/// `description`, `format`, `enum`, `properties`, `items`, `required`, `anyOf`).
 fn clean_json_schema(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut out = Map::new();
-            for (k, v) in map {
-                if matches!(k.as_str(), "$schema" | "additionalProperties") {
-                    continue;
+    let Some(map) = value.as_object() else {
+        return json!({ "type": "object" });
+    };
+    let mut out = Map::new();
+    let mut nullable = map
+        .get("nullable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if let Some(ty) = map.get("type") {
+        match ty {
+            Value::String(s) => {
+                if s == "null" {
+                    nullable = true;
+                } else {
+                    out.insert("type".to_string(), Value::String(s.clone()));
                 }
-                out.insert(k.clone(), clean_json_schema(v));
             }
-            Value::Object(out)
+            Value::Array(arr) => {
+                let mut picked = None;
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        if s == "null" {
+                            nullable = true;
+                        } else if picked.is_none() {
+                            picked = Some(s.to_string());
+                        }
+                    }
+                }
+                if let Some(s) = picked {
+                    out.insert("type".to_string(), Value::String(s));
+                }
+            }
+            _ => {}
         }
-        Value::Array(items) => Value::Array(items.iter().map(clean_json_schema).collect()),
-        other => other.clone(),
     }
+    if nullable {
+        out.insert("nullable".to_string(), Value::Bool(true));
+    }
+    if let Some(desc) = map.get("description").and_then(Value::as_str)
+        && !desc.is_empty()
+    {
+        out.insert("description".to_string(), Value::String(desc.to_string()));
+    }
+    if let Some(fmt) = map.get("format").and_then(Value::as_str)
+        && matches!(fmt, "enum" | "date-time")
+    {
+        out.insert("format".to_string(), Value::String(fmt.to_string()));
+    }
+    if let Some(en) = map.get("enum").and_then(Value::as_array) {
+        let strings: Vec<Value> = en
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| Value::String(s.to_string())))
+            .collect();
+        if !strings.is_empty() {
+            out.insert("enum".to_string(), Value::Array(strings));
+        }
+    } else if let Some(c) = map.get("const").and_then(Value::as_str) {
+        out.insert("enum".to_string(), json!([c]));
+    }
+    if let Some(props) = map.get("properties").and_then(Value::as_object) {
+        let mut clean_props = Map::new();
+        for (prop_name, prop_schema) in props {
+            clean_props.insert(prop_name.clone(), clean_json_schema(prop_schema));
+        }
+        if let Some(req) = map.get("required").and_then(Value::as_array) {
+            let valid_req: Vec<Value> = req
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|k| clean_props.contains_key(*k))
+                .map(|k| Value::String(k.to_string()))
+                .collect();
+            if !valid_req.is_empty() {
+                out.insert("required".to_string(), Value::Array(valid_req));
+            }
+        }
+        out.insert("properties".to_string(), Value::Object(clean_props));
+        if !out.contains_key("type") {
+            out.insert("type".to_string(), Value::String("object".to_string()));
+        }
+    }
+    if let Some(items) = map.get("items") {
+        let clean_items = match items {
+            Value::Array(arr) => arr
+                .first()
+                .map(clean_json_schema)
+                .unwrap_or_else(|| json!({ "type": "string" })),
+            other => clean_json_schema(other),
+        };
+        out.insert("items".to_string(), clean_items);
+        if !out.contains_key("type") {
+            out.insert("type".to_string(), Value::String("array".to_string()));
+        }
+    }
+    if let Some(any_of) = map
+        .get("anyOf")
+        .or_else(|| map.get("oneOf"))
+        .and_then(Value::as_array)
+    {
+        let mut branches = Vec::new();
+        for branch in any_of {
+            if branch.get("type").and_then(Value::as_str) == Some("null") {
+                out.insert("nullable".to_string(), Value::Bool(true));
+                continue;
+            }
+            branches.push(clean_json_schema(branch));
+        }
+        if branches.len() == 1 {
+            if let Some(single) = branches.pop().and_then(|v| v.as_object().cloned()) {
+                for (k, v) in single {
+                    out.entry(k).or_insert(v);
+                }
+            }
+        } else if !branches.is_empty() {
+            out.insert("anyOf".to_string(), Value::Array(branches));
+        }
+    }
+    if !out.contains_key("type") && !out.contains_key("anyOf") {
+        out.insert("type".to_string(), Value::String("string".to_string()));
+    }
+    Value::Object(out)
 }
 
 pub fn accumulate_response(
@@ -235,7 +347,8 @@ pub fn accumulate_response(
     let mut output_tokens = 0_u64;
 
     for chunk in &chunks {
-        if let Some(usage) = chunk.get("usageMetadata") {
+        let root = chunk.get("response").unwrap_or(chunk);
+        if let Some(usage) = root.get("usageMetadata") {
             if let Some(inp) = usage.get("promptTokenCount").and_then(Value::as_u64) {
                 input_tokens = inp;
             }
@@ -243,7 +356,7 @@ pub fn accumulate_response(
                 output_tokens = out;
             }
         }
-        let Some(candidate) = chunk
+        let Some(candidate) = root
             .get("candidates")
             .and_then(Value::as_array)
             .and_then(|c| c.first())
@@ -526,7 +639,8 @@ where
     }
 
     fn translate_frame(&mut self, frame: &Value, out: &mut Vec<u8>) {
-        if let Some(usage) = frame.get("usageMetadata") {
+        let root = frame.get("response").unwrap_or(frame);
+        if let Some(usage) = root.get("usageMetadata") {
             if let Some(inp) = usage.get("promptTokenCount").and_then(Value::as_u64) {
                 self.input_tokens = inp;
             }
@@ -535,7 +649,7 @@ where
             }
         }
         self.ensure_started(out);
-        let Some(candidate) = frame
+        let Some(candidate) = root
             .get("candidates")
             .and_then(Value::as_array)
             .and_then(|c| c.first())

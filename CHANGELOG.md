@@ -3,6 +3,26 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.6 (2026-10-20)
+
+- New `antigravity` provider for Google Antigravity (Cloud Code Assist) OAuth
+  (`cc-proxy auth login antigravity`), supporting `gemini-4-argon`,
+  `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.1-pro`, `claude-opus-5-5`,
+  and `claude-sonnet-5-5` with automatic project discovery and per-model client
+  fingerprints.
+- `gemini` API-key requests now send only `x-goog-api-key` (omitting
+  `Authorization: Bearer`), sanitize tool JSON schemas to Google's supported
+  keyword allowlist, and strip terminal SGR mouse escape sequences from pasted
+  API keys so keys with terminal noise no longer fail with HTTP 502.
+- `opencode-zen` now defaults Claude's four model tiers (`fable`, `opus`,
+  `sonnet`, `haiku`) to its Claude models instead of GPT, and populates all
+  catalog models into Claude Code's `/model` picker for aggregator providers.
+- `cc-proxy models` now supports `list [provider]`, interactive `set [provider]`,
+  `refresh [provider]`, and interactive single-tier picking via
+  `cc-proxy models map <tier>`.
+- `cc-proxy auth login` for `opencode`, `opencode-zen`, `gemini`, and
+  `anthropic` now opens the provider's API key page in the browser.
+
 ## v0.2.5 (2026-10-20)
 
 - CLI commands now follow a consistent `cc-proxy <domain> [action] [choice]`
