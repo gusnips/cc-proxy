@@ -864,7 +864,9 @@ fn restart_daemon(port: Option<u16>) -> Result<()> {
     let info = ui::waiting("restarting cc-proxy", || daemon::restart_service(port))?;
     let mut lines = vec!["cc-proxy restarted".into(), address(&info)];
     // A new port means Claude Code's settings point at the old one.
-    if route::refresh(&info.listen_url())? {
+    let refreshed = route::refresh(&info.listen_url())?;
+    lines.extend(route::status_lines());
+    if refreshed {
         lines.push("Claude Code's settings were refreshed.".into());
     }
     ui::print_card(Mood::Awake, &lines);
@@ -873,23 +875,25 @@ fn restart_daemon(port: Option<u16>) -> Result<()> {
 
 fn reload_daemon() -> Result<()> {
     match daemon::reload_service()? {
-        daemon::ReloadOutcome::Reloaded => ui::print_card(
-            Mood::Glad,
-            &[
-                "config reloaded".into(),
-                "Settings from the file apply on the next request.".into(),
+        daemon::ReloadOutcome::Reloaded => {
+            let mut lines = vec!["config reloaded".into()];
+            lines.extend(route::status_lines());
+            lines.push("Settings from the file apply on the next request.".into());
+            lines.push(
                 "Bind address, port and environment variables need `cc-proxy restart`.".into(),
-            ],
-        ),
-        daemon::ReloadOutcome::ValidatedOnly => ui::print_card(
-            Mood::Unsure,
-            &[
-                "config is valid".into(),
+            );
+            ui::print_card(Mood::Glad, &lines);
+        }
+        daemon::ReloadOutcome::ValidatedOnly => {
+            let mut lines = vec!["config is valid".into()];
+            lines.extend(route::status_lines());
+            lines.push(
                 "This platform can't reload a running proxy. Run `cc-proxy restart` to \
                  apply the changes."
                     .into(),
-            ],
-        ),
+            );
+            ui::print_card(Mood::Unsure, &lines);
+        }
         daemon::ReloadOutcome::NotRunning => {
             ui::print_card(
                 Mood::Asleep,
