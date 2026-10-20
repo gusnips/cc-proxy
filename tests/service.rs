@@ -215,7 +215,7 @@ fn start_status_and_stop_round_trip() {
 }
 
 #[test]
-fn restart_keeps_serving() {
+fn restart_and_reload_keep_serving_and_name_the_provider() {
     let sandbox = Sandbox::new();
     sandbox.sign_in("codex");
     sandbox.cmd().args(sandbox.start_args()).assert().success();
@@ -226,10 +226,18 @@ fn restart_keeps_serving() {
         .args(["restart", "--port", &sandbox.port.to_string()])
         .assert()
         .success()
-        .stdout(contains("restarted"));
+        .stdout(contains("restarted"))
+        .stdout(contains("Claude Code goes to Codex"));
 
     sandbox.wait_for_status(true);
     sandbox.assert_routed_to_proxy();
+
+    sandbox
+        .cmd()
+        .arg("reload")
+        .assert()
+        .success()
+        .stdout(contains("Claude Code goes to Codex"));
 }
 
 #[test]

@@ -43,7 +43,9 @@ pub fn forge_opencode_session_id(session_id: Option<&str>) -> String {
 pub struct OpenCodeClient {
     client: Arc<reqwest::Client>,
     base_url: reqwest::Url,
-    api_key: Option<String>,
+    /// Asked on every request, so a provider that reads config.json here
+    /// picks up a key saved while the proxy runs.
+    api_key: Box<dyn Fn() -> Option<String> + Send + Sync>,
 }
 
 pub struct OpenCodeResponse {
@@ -148,6 +150,14 @@ impl OpenCodeResponse {
 
 impl OpenCodeClient {
     pub fn new(base_url: String, api_key: Option<String>) -> anyhow::Result<Self> {
+        Self::with_key_source(base_url, move || api_key.clone())
+    }
+
+    /// A client that reads its key from `api_key` on every request.
+    pub fn with_key_source(
+        base_url: String,
+        api_key: impl Fn() -> Option<String> + Send + Sync + 'static,
+    ) -> anyhow::Result<Self> {
         let base_url = reqwest::Url::parse(base_url.trim_end_matches('/'))?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -157,7 +167,7 @@ impl OpenCodeClient {
         Ok(Self {
             client: Arc::new(client),
             base_url,
-            api_key,
+            api_key: Box::new(api_key),
         })
     }
 
@@ -178,10 +188,13 @@ impl OpenCodeClient {
             "opencode",
             "OpenCode Go",
             true,
+            None,
         )
         .await
     }
 
+    /// `anthropic_beta` is the client's `anthropic-beta` header. Only a
+    /// Messages request sends it on.
     #[allow(clippy::too_many_arguments)]
     pub async fn post_for_provider<T: Serialize + ?Sized>(
         &self,
@@ -193,12 +206,17 @@ impl OpenCodeClient {
         provider_slug: &str,
         provider_label: &str,
         require_key: bool,
+        anthropic_beta: Option<&str>,
     ) -> Result<OpenCodeResponse, OpenCodeError> {
         let api_key = if require_key {
-            Some(self.api_key()?)
+            Some(self.required_key(provider_slug, provider_label)?)
         } else {
-            self.api_key.as_deref().filter(|key| !key.is_empty())
+            self.current_key()
         };
+        let api_key = api_key.as_deref();
+        let betas = anthropic_beta
+            .filter(|_| endpoint == EndpointKind::Messages)
+            .and_then(upstream_betas);
         let url = self.endpoint_url(endpoint);
         let accept = if stream {
             "text/event-stream"
@@ -232,6 +250,7 @@ impl OpenCodeClient {
                     "transport": "http",
                     "headers": {
                         "accept": accept,
+                        "anthropic-beta": betas,
                         auth_header: if api_key.is_some() { "[redacted]" } else { "[none]" },
                         "content-type": "application/json",
                         "x-opencode-session": session_header_value
@@ -265,6 +284,9 @@ impl OpenCodeClient {
             }
             EndpointKind::Messages => {
                 request = request.header("anthropic-version", "2023-06-01");
+                if let Some(betas) = betas.as_deref() {
+                    request = request.header("anthropic-beta", betas);
+                }
                 if let Some(api_key) = api_key {
                     request = request.header("x-api-key", api_key);
                 }
@@ -301,7 +323,7 @@ impl OpenCodeClient {
     }
 
     pub async fn get_usage(&self) -> Result<OpenCodeUsageResponse, OpenCodeError> {
-        let api_key = self.api_key()?;
+        let api_key = self.required_key("opencode", "OpenCode Go")?;
         let response = self
             .client
             .get(self.usage_url())
@@ -326,7 +348,7 @@ impl OpenCodeClient {
                 .to_string(),
             })?;
         if !response.status().is_success() {
-            return Err(rejected_response(response, Some(api_key)).await);
+            return Err(rejected_response(response, Some(&api_key)).await);
         }
         let bytes = OpenCodeResponse { response }
             .into_bytes_with_limit(
@@ -352,16 +374,23 @@ impl OpenCodeClient {
         Ok(parsed)
     }
 
-    fn api_key(&self) -> Result<&str, OpenCodeError> {
-        self.api_key
-            .as_deref()
-            .filter(|key| !key.is_empty())
-            .ok_or_else(|| OpenCodeError {
-                status: StatusCode::UNAUTHORIZED,
-                retry_after: None,
-                body: None,
-                message: "OpenCode Go API key is not configured; set CCP_OPENCODE_API_KEY, OPENCODE_API_KEY, or opencode.apiKey in config.json".to_string(),
-            })
+    fn current_key(&self) -> Option<String> {
+        (self.api_key)().filter(|key| !key.is_empty())
+    }
+
+    fn required_key(
+        &self,
+        provider_slug: &str,
+        provider_label: &str,
+    ) -> Result<String, OpenCodeError> {
+        self.current_key().ok_or_else(|| OpenCodeError {
+            status: StatusCode::UNAUTHORIZED,
+            retry_after: None,
+            body: None,
+            message: format!(
+                "{provider_label} has no API key. Run `cc-proxy auth login {provider_slug}` to add one."
+            ),
+        })
     }
 
     fn endpoint_url(&self, endpoint: EndpointKind) -> reqwest::Url {
@@ -440,10 +469,11 @@ impl OpenCodeClient {
         bearer_only: bool,
     ) -> Result<OpenCodeResponse, OpenCodeError> {
         let api_key = if require_key {
-            Some(self.api_key()?)
+            Some(self.required_key(provider_slug, provider_label)?)
         } else {
-            self.api_key.as_deref().filter(|key| !key.is_empty())
+            self.current_key()
         };
+        let api_key = api_key.as_deref();
         let url = self.google_url(model_id, stream);
         let accept = if stream {
             "text/event-stream"
@@ -535,6 +565,17 @@ impl OpenCodeClient {
     }
 }
 
+/// The betas to send Anthropic: Claude Code's own, minus `oauth-*`. Claude
+/// Code signs in to cc-proxy, and cc-proxy sends Anthropic its own API key.
+fn upstream_betas(header: &str) -> Option<String> {
+    let betas: Vec<&str> = header
+        .split(',')
+        .map(str::trim)
+        .filter(|beta| !beta.is_empty() && !beta.starts_with("oauth-"))
+        .collect();
+    (!betas.is_empty()).then(|| betas.join(","))
+}
+
 async fn rejected_response(response: reqwest::Response, secret: Option<&str>) -> OpenCodeError {
     let status = response.status();
     let retry_after = response
@@ -614,6 +655,7 @@ mod tests {
         authorization: String,
         x_api_key: String,
         anthropic_version: String,
+        anthropic_beta: String,
         x_opencode_session: String,
         body: serde_json::Value,
     }
@@ -640,6 +682,11 @@ mod tests {
                 .to_string(),
             anthropic_version: headers
                 .get("anthropic-version")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string(),
+            anthropic_beta: headers
+                .get("anthropic-beta")
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default()
                 .to_string(),
@@ -808,7 +855,105 @@ mod tests {
         let client = OpenCodeClient::new("https://example.com/v1".to_string(), None).unwrap();
         let error = client.get_usage().await.unwrap_err();
         assert_eq!(error.status, StatusCode::UNAUTHORIZED);
-        assert!(error.message.contains("OPENCODE_API_KEY"));
+        assert_eq!(
+            error.message,
+            "OpenCode Go has no API key. Run `cc-proxy auth login opencode` to add one."
+        );
+    }
+
+    async fn serve_capture(seen: Seen) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route("/v1/messages", post(capture_request))
+            .route("/v1/chat/completions", post(capture_request))
+            .with_state(seen);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (address, server)
+    }
+
+    #[tokio::test]
+    async fn messages_send_claude_codes_betas_without_the_oauth_one() {
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let (address, server) = serve_capture(seen.clone()).await;
+        let client =
+            OpenCodeClient::new(format!("http://{address}"), Some("test-key".to_string())).unwrap();
+        let body = serde_json::json!({"model": "claude-opus-5-5", "messages": []});
+        let claude_code = "oauth-2025-04-20, context-management-2025-06-27,advisor-tool-2026-03-01";
+        for (endpoint, betas) in [
+            (EndpointKind::Messages, Some(claude_code)),
+            (EndpointKind::Messages, Some("oauth-2025-04-20")),
+            (EndpointKind::ChatCompletions, Some(claude_code)),
+        ] {
+            client
+                .post_for_provider(
+                    endpoint,
+                    &body,
+                    false,
+                    None,
+                    None,
+                    "anthropic",
+                    "Anthropic",
+                    true,
+                    betas,
+                )
+                .await
+                .unwrap()
+                .into_bytes()
+                .await
+                .unwrap();
+        }
+        server.abort();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen[0].anthropic_beta,
+            "context-management-2025-06-27,advisor-tool-2026-03-01"
+        );
+        // With the OAuth beta gone nothing is left, so no header goes out.
+        assert!(seen[1].anthropic_beta.is_empty());
+        // Betas only switch on fields of an Anthropic Messages body.
+        assert!(seen[2].anthropic_beta.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_key_saved_while_the_proxy_runs_is_used_on_the_next_request() {
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let (address, server) = serve_capture(seen.clone()).await;
+        let saved: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let source = saved.clone();
+        let client = OpenCodeClient::with_key_source(format!("http://{address}"), move || {
+            source.lock().unwrap().clone()
+        })
+        .unwrap();
+        let body = serde_json::json!({"model": "claude-opus-5-5", "messages": []});
+        let send = || {
+            client.post_for_provider(
+                EndpointKind::Messages,
+                &body,
+                false,
+                None,
+                None,
+                "anthropic",
+                "Anthropic",
+                true,
+                None,
+            )
+        };
+
+        let Err(error) = send().await else {
+            panic!("a request went out without a key");
+        };
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            error.message,
+            "Anthropic has no API key. Run `cc-proxy auth login anthropic` to add one."
+        );
+
+        *saved.lock().unwrap() = Some("saved-later".to_string());
+        send().await.unwrap().into_bytes().await.unwrap();
+        server.abort();
+        assert_eq!(seen.lock().unwrap()[0].x_api_key, "saved-later");
     }
 
     #[tokio::test]

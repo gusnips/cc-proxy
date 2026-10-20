@@ -42,9 +42,9 @@ pub struct OpenCodeProvider {
 
 impl OpenCodeProvider {
     pub fn new() -> Self {
-        let client = OpenCodeClient::new(
+        let client = OpenCodeClient::with_key_source(
             crate::config::opencode_base_url(),
-            crate::config::opencode_api_key(),
+            crate::config::opencode_api_key,
         )
         .map(Arc::new)
         .map(ClientState::Ready)
@@ -53,9 +53,9 @@ impl OpenCodeProvider {
     }
 
     pub fn new_zen() -> Self {
-        let client = OpenCodeClient::new(
+        let client = OpenCodeClient::with_key_source(
             crate::config::opencode_zen_base_url(),
-            crate::config::opencode_zen_api_key(),
+            crate::config::opencode_zen_api_key,
         )
         .map(Arc::new)
         .map(ClientState::Ready)
@@ -142,6 +142,7 @@ impl OpenCodeProvider {
                         self.slug(),
                         self.label(),
                         require_key,
+                        None,
                     )
                     .await
                 {
@@ -180,6 +181,7 @@ impl OpenCodeProvider {
                         self.slug(),
                         self.label(),
                         require_key,
+                        None,
                     )
                     .await
                 {
@@ -213,6 +215,7 @@ impl OpenCodeProvider {
                         self.slug(),
                         self.label(),
                         require_key,
+                        None,
                     )
                     .await
                 {
@@ -385,6 +388,7 @@ impl Provider for OpenCodeProvider {
                         self.slug(),
                         self.label(),
                         require_key,
+                        None,
                     )
                     .await
                     .map_err(opencode_provider_error)?;
@@ -411,6 +415,7 @@ impl Provider for OpenCodeProvider {
                         self.slug(),
                         self.label(),
                         require_key,
+                        None,
                     )
                     .await
                     .map_err(opencode_provider_error)?;
@@ -436,6 +441,7 @@ impl Provider for OpenCodeProvider {
                         self.slug(),
                         self.label(),
                         require_key,
+                        None,
                     )
                     .await
                     .map_err(opencode_provider_error)?;
@@ -885,11 +891,9 @@ mod tests {
             .await
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("OPENCODE_API_KEY")
+        assert_eq!(
+            value["error"]["message"],
+            "OpenCode Go has no API key. Run `cc-proxy auth login opencode` to add one."
         );
     }
 

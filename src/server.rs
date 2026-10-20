@@ -236,9 +236,9 @@ pub fn app_with_features(
     monitor: Option<MonitorHandle>,
     features: AppFeatures,
 ) -> Router {
-    let opencode_usage = crate::providers::opencode::client::OpenCodeClient::new(
+    let opencode_usage = crate::providers::opencode::client::OpenCodeClient::with_key_source(
         crate::config::opencode_base_url(),
-        crate::config::opencode_api_key(),
+        crate::config::opencode_api_key,
     )
     .map(crate::providers::opencode::usage::OpenCodeUsageService::new)
     .map(Arc::new)
@@ -1625,6 +1625,10 @@ async fn dispatch_request(
             return with_request_id(response, &req_id);
         }
     };
+    body.anthropic_beta = headers
+        .get("anthropic-beta")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
 
     if let Some(project) = project::name_from_request(
         body.extra.get("system"),
@@ -2523,10 +2527,12 @@ mod auto_review_tests {
         let body: MessagesRequest = serde_json::from_value(json!({
             "model":"gpt-6-sol",
             "messages":[{"role":"user","content":"hello"}],
-            "bypass_provider_model_override":true
+            "bypass_provider_model_override":true,
+            "anthropic_beta":"oauth-2025-04-20"
         }))
         .unwrap();
         assert!(!body.bypass_provider_model_override);
+        assert!(body.anthropic_beta.is_none());
         assert!(!is_claude_auto_review_request(&body));
     }
 
