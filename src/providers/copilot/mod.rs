@@ -31,6 +31,7 @@ pub const MODEL_PREFIX: &str = "copilot/";
 const COPILOT: ChatUpstream = ChatUpstream {
     name: "GitHub Copilot",
     slug: "copilot",
+    tool_names: &[],
 };
 
 pub fn advertised_models() -> Vec<String> {

@@ -210,6 +210,7 @@ impl CustomProvider {
         let chat_upstream = ChatUpstream {
             name: self.label,
             slug: self.name,
+            tool_names: &[],
         };
 
         let value = match endpoint {
@@ -485,6 +486,7 @@ impl Provider for CustomProvider {
         let chat_upstream = ChatUpstream {
             name: self.label,
             slug: self.name,
+            tool_names: &[],
         };
 
         let stream_body = match endpoint {
