@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod client;
+pub mod google;
 pub mod messages;
 pub mod model;
 pub mod responses;
@@ -36,6 +37,7 @@ enum ClientState {
 
 pub struct OpenCodeProvider {
     client: ClientState,
+    zen: bool,
 }
 
 impl OpenCodeProvider {
@@ -47,13 +49,53 @@ impl OpenCodeProvider {
         .map(Arc::new)
         .map(ClientState::Ready)
         .unwrap_or_else(|error| ClientState::Invalid(error.to_string()));
-        Self { client }
+        Self { client, zen: false }
+    }
+
+    pub fn new_zen() -> Self {
+        let client = OpenCodeClient::new(
+            crate::config::opencode_zen_base_url(),
+            crate::config::opencode_zen_api_key(),
+        )
+        .map(Arc::new)
+        .map(ClientState::Ready)
+        .unwrap_or_else(|error| ClientState::Invalid(error.to_string()));
+        Self { client, zen: true }
     }
 
     #[cfg(test)]
     fn with_client(client: OpenCodeClient) -> Self {
         Self {
             client: ClientState::Ready(Arc::new(client)),
+            zen: false,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        if self.zen {
+            "OpenCode Zen"
+        } else {
+            "OpenCode Go"
+        }
+    }
+
+    fn slug(&self) -> &'static str {
+        if self.zen { "opencode-zen" } else { "opencode" }
+    }
+
+    fn resolve_spec(&self, requested: &str) -> Option<model::ResolvedModel> {
+        if self.zen {
+            model::resolve_zen(requested)
+        } else {
+            model::resolve(requested)
+        }
+    }
+
+    fn require_key(&self, model_id: &str) -> bool {
+        if self.zen {
+            !model::is_zen_free_model(model_id)
+        } else {
+            true
         }
     }
 
@@ -70,7 +112,7 @@ impl OpenCodeProvider {
         ctx: RequestContext,
     ) -> Response {
         let requested = body.model.as_deref().unwrap_or_default();
-        let Some(spec) = model::resolve(requested) else {
+        let Some(spec) = self.resolve_spec(requested) else {
             return unsupported_model(requested);
         };
         if let Some(monitor) = ctx.monitor.as_ref() {
@@ -81,6 +123,7 @@ impl OpenCodeProvider {
             Err(error) => return invalid_configuration_response(error),
         };
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+        let require_key = self.require_key(&spec.id);
 
         let value = match spec.endpoint {
             EndpointKind::ChatCompletions => {
@@ -90,12 +133,15 @@ impl OpenCodeProvider {
                 };
                 mark_upstream_started(&ctx);
                 let upstream = match client
-                    .post(
+                    .post_for_provider(
                         spec.endpoint,
                         &translated,
                         true,
                         ctx.traffic.clone(),
                         ctx.session_id.as_deref(),
+                        self.slug(),
+                        self.label(),
+                        require_key,
                     )
                     .await
                 {
@@ -125,12 +171,15 @@ impl OpenCodeProvider {
                 };
                 mark_upstream_started(&ctx);
                 let upstream = match client
-                    .post(
+                    .post_for_provider(
                         spec.endpoint,
                         &translated,
                         false,
                         ctx.traffic.clone(),
                         ctx.session_id.as_deref(),
+                        self.slug(),
+                        self.label(),
+                        require_key,
                     )
                     .await
                 {
@@ -155,12 +204,15 @@ impl OpenCodeProvider {
                     };
                 mark_upstream_started(&ctx);
                 let upstream = match client
-                    .post(
+                    .post_for_provider(
                         spec.endpoint,
                         &translated,
                         true,
                         ctx.traffic.clone(),
                         ctx.session_id.as_deref(),
+                        self.slug(),
+                        self.label(),
+                        require_key,
                     )
                     .await
                 {
@@ -173,6 +225,39 @@ impl OpenCodeProvider {
                 };
                 capture_buffered_upstream(&ctx, &bytes, "sse");
                 match responses::accumulate_response(&bytes, &message_id, requested) {
+                    Ok(value) => value,
+                    Err(error) => return invalid_upstream_response(error),
+                }
+            }
+            EndpointKind::Google => {
+                let translated = match google::prepare_request(&body) {
+                    Ok(translated) => translated,
+                    Err(error) => return invalid_request_response(error),
+                };
+                mark_upstream_started(&ctx);
+                let upstream = match client
+                    .post_google(
+                        &spec.id,
+                        &translated,
+                        false,
+                        ctx.traffic.clone(),
+                        ctx.session_id.as_deref(),
+                        self.slug(),
+                        self.label(),
+                        require_key,
+                        false,
+                    )
+                    .await
+                {
+                    Ok(upstream) => upstream,
+                    Err(error) => return map_error(error),
+                };
+                let bytes = match upstream.into_bytes().await {
+                    Ok(bytes) => bytes,
+                    Err(error) => return map_error(error),
+                };
+                capture_buffered_upstream(&ctx, &bytes, "json");
+                match google::accumulate_response(&bytes, &message_id, requested) {
                     Ok(value) => value,
                     Err(error) => return invalid_upstream_response(error),
                 }
@@ -197,14 +282,22 @@ pub fn advertised_models() -> Vec<String> {
     model::advertised_models()
 }
 
+pub fn advertised_zen_models() -> Vec<String> {
+    model::advertised_zen_models()
+}
+
 #[async_trait]
 impl Provider for OpenCodeProvider {
     fn name(&self) -> &'static str {
-        "opencode"
+        self.slug()
     }
 
     fn supported_models(&self) -> Vec<String> {
-        advertised_models()
+        if self.zen {
+            advertised_zen_models()
+        } else {
+            advertised_models()
+        }
     }
 
     fn aggregator(&self) -> bool {
@@ -212,7 +305,11 @@ impl Provider for OpenCodeProvider {
     }
 
     fn cli(&self) -> &dyn CliHandlers {
-        &OPENCODE_CLI
+        if self.zen {
+            &OPENCODE_ZEN_CLI
+        } else {
+            &OPENCODE_CLI
+        }
     }
 
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
@@ -227,7 +324,7 @@ impl Provider for OpenCodeProvider {
 
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
         let requested = body.model.as_deref().unwrap_or_default();
-        let Some(spec) = model::resolve(requested) else {
+        let Some(spec) = self.resolve_spec(requested) else {
             return unsupported_model(requested);
         };
         if let Some(monitor) = ctx.monitor.as_ref() {
@@ -253,18 +350,18 @@ impl Provider for OpenCodeProvider {
     ) -> Result<Generation, ProviderError> {
         body.stream = true;
         let requested = body.model.as_deref().unwrap_or_default();
-        let spec = model::resolve(requested).ok_or_else(|| {
+        let spec = self.resolve_spec(requested).ok_or_else(|| {
             ProviderError::new(
                 StatusCode::BAD_REQUEST,
                 ProviderErrorKind::InvalidRequest,
-                format!("Unsupported OpenCode Go model: {requested}"),
+                format!("Unsupported {} model: {requested}", self.label()),
             )
         })?;
         let client = self.client().map_err(|error| {
             ProviderError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ProviderErrorKind::Api,
-                format!("Invalid OpenCode Go configuration: {error}"),
+                format!("Invalid {} configuration: {error}", self.label()),
             )
         })?;
 
@@ -273,17 +370,21 @@ impl Provider for OpenCodeProvider {
             monitor.upstream_started(&ctx.req_id);
         }
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+        let require_key = self.require_key(&spec.id);
         let body = match spec.endpoint {
             EndpointKind::ChatCompletions => {
                 let translated = chat::prepare_request(&body, &spec.id)
                     .map_err(invalid_request_provider_error)?;
                 let upstream = client
-                    .post(
+                    .post_for_provider(
                         spec.endpoint,
                         &translated,
                         true,
                         ctx.traffic.clone(),
                         ctx.session_id.as_deref(),
+                        self.slug(),
+                        self.label(),
+                        require_key,
                     )
                     .await
                     .map_err(opencode_provider_error)?;
@@ -301,18 +402,21 @@ impl Provider for OpenCodeProvider {
                 let translated = messages::prepare_request(&body, &spec.id)
                     .map_err(invalid_request_provider_error)?;
                 let upstream = client
-                    .post(
+                    .post_for_provider(
                         spec.endpoint,
                         &translated,
                         true,
                         ctx.traffic.clone(),
                         ctx.session_id.as_deref(),
+                        self.slug(),
+                        self.label(),
+                        require_key,
                     )
                     .await
                     .map_err(opencode_provider_error)?;
                 messages::stream_body(
                     upstream.into_stream(),
-                    "OpenCode Go",
+                    self.label(),
                     ctx.monitor.clone(),
                     ctx.req_id.clone(),
                     ctx.traffic.clone(),
@@ -323,17 +427,47 @@ impl Provider for OpenCodeProvider {
                     responses::prepare_request(&body, &spec.id, ctx.session_id.clone())
                         .map_err(invalid_request_provider_error)?;
                 let upstream = client
-                    .post(
+                    .post_for_provider(
                         spec.endpoint,
                         &translated,
                         true,
                         ctx.traffic.clone(),
                         ctx.session_id.as_deref(),
+                        self.slug(),
+                        self.label(),
+                        require_key,
                     )
                     .await
                     .map_err(opencode_provider_error)?;
                 responses::stream_body(
                     upstream,
+                    message_id,
+                    requested.to_string(),
+                    ctx.monitor.clone(),
+                    ctx.req_id.clone(),
+                    ctx.traffic.clone(),
+                )
+            }
+            EndpointKind::Google => {
+                let translated =
+                    google::prepare_request(&body).map_err(invalid_request_provider_error)?;
+                let upstream = client
+                    .post_google(
+                        &spec.id,
+                        &translated,
+                        true,
+                        ctx.traffic.clone(),
+                        ctx.session_id.as_deref(),
+                        self.slug(),
+                        self.label(),
+                        require_key,
+                        false,
+                    )
+                    .await
+                    .map_err(opencode_provider_error)?;
+                google::stream_body(
+                    upstream.into_stream(),
+                    self.label(),
                     message_id,
                     requested.to_string(),
                     ctx.monitor.clone(),
@@ -523,6 +657,121 @@ impl CliHandlers for OpenCodeCli {
 }
 
 static OPENCODE_CLI: OpenCodeCli = OpenCodeCli;
+
+struct OpenCodeZenCli;
+
+impl CliHandlers for OpenCodeZenCli {
+    fn auth_state(&self) -> crate::provider::AuthState {
+        if crate::config::opencode_zen_api_key().is_some() {
+            crate::provider::AuthState::KeySaved
+        } else {
+            crate::provider::AuthState::Missing
+        }
+    }
+
+    fn login(&self) -> anyhow::Result<()> {
+        println!("Paste your OpenCode Zen API key (input is hidden) and press Enter:");
+        let key = crate::prompt::read_hidden_line("API key: ")?;
+        if key.is_empty() {
+            anyhow::bail!("no API key provided");
+        }
+        let path = crate::config::save_opencode_zen_api_key(&key)?;
+        println!("OpenCode Zen API key saved to {}", path.display());
+        Ok(())
+    }
+
+    fn device(&self) -> anyhow::Result<()> {
+        use std::time::{Duration, Instant};
+        let console = std::env::var("CCP_OPENCODE_CONSOLE_URL")
+            .unwrap_or_else(|_| "https://opencode.ai/console".to_string());
+        let console = console.trim_end_matches('/');
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .user_agent("opencode/latest/2.0.32/cli")
+            .build()?;
+        let device: serde_json::Value = client
+            .post(format!("{console}/auth/device/code"))
+            .header("Accept", "application/json")
+            .json(&serde_json::json!({
+                "client_id": "opencode-cli",
+                "supports_org_scope": true
+            }))
+            .send()?
+            .error_for_status()?
+            .json()?;
+        let device_code = device["device_code"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing device_code from OpenCode Console"))?;
+        let user_code = device["user_code"].as_str().unwrap_or_default();
+        let uri = device["verification_uri_complete"]
+            .as_str()
+            .unwrap_or("https://opencode.ai/console");
+        let interval = device["interval"].as_u64().unwrap_or(5).max(1);
+        let expires_in = device["expires_in"].as_u64().unwrap_or(600);
+
+        println!("Open this URL to sign in to OpenCode Console:");
+        println!("  {uri}");
+        if !user_code.is_empty() {
+            println!("Enter code: {user_code}");
+        }
+        let _ = crate::browser::open(uri);
+
+        let deadline = Instant::now() + Duration::from_secs(expires_in);
+        let mut wait = Duration::from_secs(interval);
+        while Instant::now() < deadline {
+            std::thread::sleep(wait);
+            let resp = client
+                .post(format!("{console}/auth/device/token"))
+                .header("Accept", "application/json")
+                .json(&serde_json::json!({
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    "device_code": device_code,
+                    "client_id": "opencode-cli"
+                }))
+                .send()?;
+            let body: serde_json::Value = resp.json().unwrap_or_default();
+            if let Some(token) = body["access_token"].as_str().filter(|s| !s.is_empty()) {
+                let path = crate::config::save_opencode_zen_api_key(token)?;
+                println!(
+                    "Signed in to OpenCode Zen. Token saved to {}",
+                    path.display()
+                );
+                return Ok(());
+            }
+            match body["error"].as_str() {
+                Some("authorization_pending") => continue,
+                Some("slow_down") => {
+                    wait += Duration::from_secs(5);
+                }
+                Some(err) => anyhow::bail!("OpenCode device sign-in failed: {err}"),
+                None => anyhow::bail!("Unexpected response from OpenCode Console"),
+            }
+        }
+        anyhow::bail!("OpenCode device sign-in timed out")
+    }
+
+    fn status(&self) -> anyhow::Result<()> {
+        let Some(source) = crate::config::opencode_zen_api_key_source() else {
+            anyhow::bail!("Not authenticated");
+        };
+        println!("API key configured: true");
+        println!("Source: {source}");
+        println!("Base URL: {}", crate::config::opencode_zen_base_url());
+        Ok(())
+    }
+
+    fn logout(&self) -> anyhow::Result<()> {
+        if crate::config::clear_opencode_zen_api_key()? {
+            println!("OpenCode Zen stored key cleared.");
+        } else {
+            println!("No stored OpenCode Zen key in config.json.");
+        }
+        Ok(())
+    }
+}
+
+static OPENCODE_ZEN_CLI: OpenCodeZenCli = OpenCodeZenCli;
 
 #[cfg(test)]
 mod tests {

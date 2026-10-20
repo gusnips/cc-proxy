@@ -343,6 +343,7 @@ impl CustomProvider {
                     }
                 }
             }
+            EndpointKind::Google => unreachable!("custom providers use openai/responses/anthropic"),
         };
 
         if let Some(traffic) = ctx.traffic.as_ref() {
@@ -568,6 +569,7 @@ impl Provider for CustomProvider {
                     ctx.traffic.clone(),
                 )
             }
+            EndpointKind::Google => unreachable!("custom providers use openai/responses/anthropic"),
         };
 
         Ok(Generation {

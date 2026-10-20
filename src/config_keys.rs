@@ -94,6 +94,20 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "OpenCode Go API base URL",
     },
     ConfigKey {
+        path: "opencodeZen.apiKey",
+        kind: ConfigKind::Secret,
+        env: &["CCP_OPENCODE_ZEN_API_KEY", "OPENCODE_ZEN_API_KEY"],
+        default: None,
+        blurb: "OpenCode Zen API key",
+    },
+    ConfigKey {
+        path: "opencodeZen.baseUrl",
+        kind: ConfigKind::Str,
+        env: &["CCP_OPENCODE_ZEN_BASE_URL"],
+        default: Some("https://opencode.ai/zen/v1"),
+        blurb: "OpenCode Zen API base URL",
+    },
+    ConfigKey {
         path: "anthropic.apiKey",
         kind: ConfigKind::Secret,
         env: &["CCP_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],

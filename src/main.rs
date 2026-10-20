@@ -975,6 +975,7 @@ fn print_models(registry: &Registry, full: bool) {
         "kimi",
         "grok",
         "opencode",
+        "opencode-zen",
         "copilot",
         "cursor",
         "glm",

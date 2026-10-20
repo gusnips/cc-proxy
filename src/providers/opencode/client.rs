@@ -14,6 +14,31 @@ const MAX_BUFFERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_USAGE_RESPONSE_BYTES: usize = 64 * 1024;
 const USAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const USER_AGENT: &str = concat!("cc-proxy/", env!("CARGO_PKG_VERSION"));
+const OPENCODE_CLI_USER_AGENT: &str = "opencode/latest/2.0.32/cli";
+
+/// Deterministically turns any conversation session ID into OpenCode's
+/// `ses_<12 hex><14 base62>` identifier shape (`packages/schema/src/session-id.ts`).
+pub fn forge_opencode_session_id(session_id: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    if let Some(existing) = session_id.filter(|s| s.starts_with("ses_") && s.len() == 30) {
+        return existing.to_string();
+    }
+    let seed = session_id
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let digest = Sha256::digest(seed.as_bytes());
+    let mut hex_part = String::with_capacity(12);
+    for b in &digest[..6] {
+        hex_part.push_str(&format!("{b:02x}"));
+    }
+    const BASE62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let mut tail = String::with_capacity(14);
+    for b in &digest[6..20] {
+        tail.push(BASE62[(*b as usize) % 62] as char);
+    }
+    format!("ses_{hex_part}{tail}")
+}
 
 pub struct OpenCodeClient {
     client: Arc<reqwest::Client>,
@@ -181,10 +206,14 @@ impl OpenCodeClient {
             "application/json"
         };
 
-        let session_header_value = session_id
-            .filter(|value| http::HeaderValue::from_str(value).is_ok())
-            .map(str::to_string)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let session_header_value = if provider_slug == "opencode-zen" {
+            forge_opencode_session_id(session_id)
+        } else {
+            session_id
+                .filter(|value| http::HeaderValue::from_str(value).is_ok())
+                .map(str::to_string)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        };
 
         if let Some(capture) = traffic.as_ref() {
             let value = serde_json::to_value(body).unwrap_or(serde_json::Value::Null);
@@ -192,6 +221,7 @@ impl OpenCodeClient {
             let auth_header = match endpoint {
                 EndpointKind::ChatCompletions | EndpointKind::Responses => "authorization",
                 EndpointKind::Messages => "x-api-key",
+                EndpointKind::Google => "x-goog-api-key",
             };
             capture.write_json(
                 "021-upstream-request-metadata",
@@ -217,6 +247,15 @@ impl OpenCodeClient {
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("x-opencode-session", &session_header_value)
             .json(body);
+        if provider_slug == "opencode-zen" {
+            request = request
+                .header(http::header::USER_AGENT, OPENCODE_CLI_USER_AGENT)
+                .header("x-opencode-session-id", &session_header_value)
+                .header("x-session-affinity", &session_header_value)
+                .header("x-session-id", &session_header_value)
+                .header("x-opencode-project", "global")
+                .header("x-opencode-client", "cli");
+        }
         match endpoint {
             EndpointKind::ChatCompletions | EndpointKind::Responses => {
                 if let Some(api_key) = api_key {
@@ -228,6 +267,13 @@ impl OpenCodeClient {
                 request = request.header("anthropic-version", "2023-06-01");
                 if let Some(api_key) = api_key {
                     request = request.header("x-api-key", api_key);
+                }
+            }
+            EndpointKind::Google => {
+                if let Some(api_key) = api_key {
+                    request = request
+                        .header("x-goog-api-key", api_key)
+                        .header(http::header::AUTHORIZATION, format!("Bearer {api_key}"));
                 }
             }
         }
@@ -349,9 +395,133 @@ impl OpenCodeClient {
                     format!("{base_path}/responses")
                 }
             }
+            EndpointKind::Google => format!("{base_path}/models"),
         };
         url.set_path(&new_path);
         url
+    }
+
+    pub fn google_url(&self, model_id: &str, stream: bool) -> reqwest::Url {
+        let mut url = self.base_url.clone();
+        let base_path = url.path().trim_end_matches('/');
+        let action = if stream {
+            "streamGenerateContent"
+        } else {
+            "generateContent"
+        };
+        let path = if base_path.ends_with("/zen/v1") || base_path.ends_with("/v1beta") {
+            format!("{base_path}/models/{model_id}:{action}")
+        } else if base_path.ends_with("/zen/go/v1") {
+            let prefix = base_path.trim_end_matches("/zen/go/v1");
+            format!("{prefix}/inference/go/google/v1beta/models/{model_id}:{action}")
+        } else if base_path.is_empty() {
+            format!("/v1beta/models/{model_id}:{action}")
+        } else {
+            format!("{base_path}/models/{model_id}:{action}")
+        };
+        url.set_path(&path);
+        if stream {
+            url.set_query(Some("alt=sse"));
+        }
+        url
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn post_google<T: Serialize + ?Sized>(
+        &self,
+        model_id: &str,
+        body: &T,
+        stream: bool,
+        traffic: Option<Arc<TrafficCapture>>,
+        session_id: Option<&str>,
+        provider_slug: &str,
+        provider_label: &str,
+        require_key: bool,
+        bearer_only: bool,
+    ) -> Result<OpenCodeResponse, OpenCodeError> {
+        let api_key = if require_key {
+            Some(self.api_key()?)
+        } else {
+            self.api_key.as_deref().filter(|key| !key.is_empty())
+        };
+        let url = self.google_url(model_id, stream);
+        let accept = if stream {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
+        let session_header_value = if provider_slug == "opencode-zen" {
+            forge_opencode_session_id(session_id)
+        } else {
+            session_id
+                .filter(|value| http::HeaderValue::from_str(value).is_ok())
+                .map(str::to_string)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        };
+
+        if let Some(capture) = traffic.as_ref() {
+            let value = serde_json::to_value(body).unwrap_or(serde_json::Value::Null);
+            capture.write_json("020-upstream-request", &value);
+            capture.write_json(
+                "021-upstream-request-metadata",
+                &serde_json::json!({
+                    "method": "POST",
+                    "url": url.as_str(),
+                    "provider": provider_slug,
+                    "transport": "http",
+                    "headers": {
+                        "accept": accept,
+                        "authorization": if api_key.is_some() { "[redacted]" } else { "[none]" },
+                        "content-type": "application/json",
+                        "x-opencode-session": session_header_value
+                    }
+                }),
+            );
+        }
+
+        let mut request = self
+            .client
+            .post(url)
+            .header(http::header::ACCEPT, accept)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header("x-opencode-session", &session_header_value)
+            .json(body);
+        if provider_slug == "opencode-zen" {
+            request = request
+                .header(http::header::USER_AGENT, OPENCODE_CLI_USER_AGENT)
+                .header("x-opencode-session-id", &session_header_value)
+                .header("x-session-affinity", &session_header_value)
+                .header("x-session-id", &session_header_value)
+                .header("x-opencode-project", "global")
+                .header("x-opencode-client", "cli");
+        }
+        if let Some(api_key) = api_key {
+            request = request.header(http::header::AUTHORIZATION, format!("Bearer {api_key}"));
+            if !bearer_only {
+                request = request.header("x-goog-api-key", api_key);
+            }
+        }
+        let response = request.send().await.map_err(|_| OpenCodeError {
+            status: StatusCode::BAD_GATEWAY,
+            retry_after: None,
+            body: None,
+            message: format!("{provider_label} upstream request failed"),
+        })?;
+
+        if let Some(capture) = traffic.as_ref() {
+            capture.write_json(
+                "030-upstream-response-headers",
+                &serde_json::json!({
+                    "status": response.status().as_u16(),
+                    "headers": safe_headers(response.headers())
+                }),
+            );
+        }
+
+        if !response.status().is_success() {
+            return Err(rejected_response(response, api_key).await);
+        }
+        Ok(OpenCodeResponse { response })
     }
 
     fn usage_url(&self) -> reqwest::Url {

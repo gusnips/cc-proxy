@@ -65,6 +65,8 @@ struct FileConfig {
     pub cursor: Option<CursorConfig>,
     pub grok: Option<GrokConfig>,
     pub opencode: Option<OpenCodeConfig>,
+    #[serde(rename = "opencodeZen")]
+    pub opencode_zen: Option<OpenCodeConfig>,
     pub glm: Option<GlmConfig>,
     pub anthropic: Option<AnthropicConfig>,
     pub providers: Option<BTreeMap<String, CustomProviderConfig>>,
@@ -773,6 +775,83 @@ pub fn opencode_api_key_source() -> Option<&'static str> {
 pub fn opencode_base_url() -> String {
     let env: HashMap<_, _> = std::env::vars().collect();
     resolve_opencode_config(&env, &paths::config_dir()).base_url
+}
+
+pub fn opencode_zen_api_key_source() -> Option<&'static str> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if env
+        .get("CCP_OPENCODE_ZEN_API_KEY")
+        .is_some_and(|v| !v.is_empty())
+    {
+        return Some("CCP_OPENCODE_ZEN_API_KEY");
+    }
+    if env
+        .get("OPENCODE_ZEN_API_KEY")
+        .is_some_and(|v| !v.is_empty())
+    {
+        return Some("OPENCODE_ZEN_API_KEY");
+    }
+    let file = read_file_config(&paths::config_dir()).and_then(|f| f.opencode_zen);
+    if file
+        .and_then(|c| c.api_key)
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        return Some("config.json");
+    }
+    None
+}
+
+pub fn opencode_zen_api_key() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(v) = env
+        .get("CCP_OPENCODE_ZEN_API_KEY")
+        .filter(|v| !v.trim().is_empty())
+    {
+        return Some(v.clone());
+    }
+    if let Some(v) = env
+        .get("OPENCODE_ZEN_API_KEY")
+        .filter(|v| !v.trim().is_empty())
+    {
+        return Some(v.clone());
+    }
+    read_file_config(&paths::config_dir())
+        .and_then(|f| f.opencode_zen)
+        .and_then(|c| c.api_key)
+        .filter(|v| !v.trim().is_empty())
+}
+
+pub fn opencode_zen_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(v) = env
+        .get("CCP_OPENCODE_ZEN_BASE_URL")
+        .filter(|v| !v.trim().is_empty())
+    {
+        return v.clone();
+    }
+    read_file_config(&paths::config_dir())
+        .and_then(|f| f.opencode_zen)
+        .and_then(|c| c.base_url)
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "https://opencode.ai/zen/v1".to_string())
+}
+
+pub fn save_opencode_zen_api_key(key: &str) -> anyhow::Result<PathBuf> {
+    crate::config_keys::write_value(
+        "opencodeZen.apiKey",
+        serde_json::Value::String(key.to_string()),
+    )
+}
+
+pub fn clear_opencode_zen_api_key() -> anyhow::Result<bool> {
+    let had = read_file_config(&paths::config_dir())
+        .and_then(|f| f.opencode_zen)
+        .and_then(|c| c.api_key)
+        .is_some();
+    if had {
+        crate::config_keys::remove_values(["opencodeZen.apiKey"])?;
+    }
+    Ok(had)
 }
 
 pub fn anthropic_api_key_source() -> Option<&'static str> {

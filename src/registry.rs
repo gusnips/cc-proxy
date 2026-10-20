@@ -62,6 +62,10 @@ impl Registry {
             crate::providers::opencode::advertised_models(),
         );
         models.insert(
+            "opencode-zen".into(),
+            crate::providers::opencode::advertised_zen_models(),
+        );
+        models.insert(
             "glm".into(),
             GLM_MODELS.iter().map(|m| (*m).to_string()).collect(),
         );
@@ -80,6 +84,7 @@ impl Registry {
                 "cursor" => Arc::new(crate::providers::cursor::CursorProvider::new()),
                 "grok" => Arc::new(crate::providers::grok::GrokProvider::new()),
                 "opencode" => Arc::new(crate::providers::opencode::OpenCodeProvider::new()),
+                "opencode-zen" => Arc::new(crate::providers::opencode::OpenCodeProvider::new_zen()),
                 "glm" => Arc::new(crate::providers::glm::GlmProvider::new()),
                 "copilot" => Arc::new(crate::providers::copilot::CopilotProvider::new()),
                 "anthropic" => anthropic.clone(),
@@ -121,7 +126,12 @@ impl Registry {
     }
 
     pub fn provider(&self, name: &str) -> Option<Arc<dyn Provider>> {
-        self.handlers.get(name).cloned()
+        let lookup = if name == "opencode-go" {
+            "opencode"
+        } else {
+            name
+        };
+        self.handlers.get(lookup).cloned()
     }
 
     pub fn supported_models_for(&self, provider: &str) -> Vec<String> {
@@ -197,6 +207,9 @@ impl Registry {
         // refresh on their side never breaks routing on ours.
         if normalized.starts_with(crate::providers::opencode::model::MODEL_PREFIX) {
             return self.handlers.get("opencode").cloned();
+        }
+        if normalized.starts_with(crate::providers::opencode::model::ZEN_MODEL_PREFIX) {
+            return self.handlers.get("opencode-zen").cloned();
         }
         if let Some(rest) = normalized.strip_prefix("anthropic/")
             && !rest.is_empty()
