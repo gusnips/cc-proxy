@@ -126,6 +126,14 @@ fn pool<'a, 'b>(parsed: &'b [Parsed<'a>], tier: &str) -> Vec<&'b Parsed<'a>> {
             .filter(|model| model.tiers.contains(candidate))
             .collect();
         if !plays_it.is_empty() {
+            let claude_only: Vec<_> = plays_it
+                .iter()
+                .copied()
+                .filter(|model| model.stem.split_whitespace().any(|w| w == "claude"))
+                .collect();
+            if !claude_only.is_empty() {
+                return claude_only;
+            }
             return plays_it;
         }
     }
@@ -342,6 +350,7 @@ pub fn model_label(
             model
         }
         "opencode" => opencode::model::resolve(&resolved)?.id,
+        "opencode-zen" => opencode::model::resolve_zen(&resolved)?.id,
         "cursor" => {
             let model = cursor::model::resolve_cursor_model(&resolved).ok()?;
             let mode = match model.mode {

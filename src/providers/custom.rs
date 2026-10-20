@@ -54,6 +54,7 @@ pub const BUILTIN_PROVIDER_NAMES: &[&str] = &[
     "opencode-go",
     "opencode-zen",
     "gemini",
+    "antigravity",
 ];
 
 enum ClientState {
@@ -613,6 +614,11 @@ impl CliHandlers for CustomCli {
     }
 
     fn login(&self) -> Result<()> {
+        if self.builtin_anthropic {
+            let url = "https://console.anthropic.com/settings/keys";
+            println!("Open {url} to get your Anthropic API key.");
+            let _ = crate::browser::open(url);
+        }
         println!(
             "Paste your {} API key (input is hidden) and press Enter:",
             self.label

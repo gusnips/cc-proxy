@@ -3,6 +3,7 @@
 
 use anyhow::{Result, bail};
 
+use crate::auth::AuthStorage;
 use crate::registry::Registry;
 use crate::route::routable_providers;
 use crate::tiers::{self, Basis, TIERS};
@@ -19,18 +20,84 @@ pub fn run(
     let tier = tier.map(tier_arg).transpose()?;
     match (tier, model, reset) {
         (Some(tier), Some(model), false) => set(&registry, provider, tier, model)?,
+        (Some(tier), None, false) => {
+            let chosen = pick_model_interactively(&registry, provider, tier)?;
+            set(&registry, provider, tier, &chosen)?;
+        }
         (tier, None, true) => reset_choice(provider, tier)?,
         (None, None, false) => {}
         _ => bail!(
-            "Use `cc-proxy models map <name> <model>` to choose, or `cc-proxy models map [name] \
+            "Use `cc-proxy models map <name> [model]` to choose, or `cc-proxy models map [name] \
              --reset` to undo a choice."
         ),
     }
-    if (model.is_some() || reset) && config::route().target() == Some(provider) {
+    if (tier.is_some() || model.is_some() || reset) && config::route().target() == Some(provider) {
         crate::route::refresh_model_labels();
     }
     show(&registry, provider);
     Ok(())
+}
+
+pub fn run_interactive_set(provider: Option<&str>) -> Result<()> {
+    let registry = Registry::new();
+    let provider = provider_arg(&registry, provider)?;
+    for tier in TIERS {
+        let chosen = pick_model_interactively(&registry, provider, tier)?;
+        set(&registry, provider, tier, &chosen)?;
+    }
+    if config::route().target() == Some(provider) {
+        crate::route::refresh_model_labels();
+    }
+    show(&registry, provider);
+    Ok(())
+}
+
+pub fn run_refresh(provider: Option<&str>) -> Result<()> {
+    let registry = Registry::new();
+    let provider = provider_arg(&registry, provider)?;
+    match provider {
+        "copilot" => {
+            let Some(auth) = crate::providers::copilot::auth::file_store().load()? else {
+                bail!("Copilot is not signed in. Run `cc-proxy auth login copilot` first.");
+            };
+            let ids = crate::providers::copilot::models::refresh(&auth)?;
+            println!("Refreshed {} Copilot models.", ids.len());
+        }
+        other => {
+            let models = registry.supported_models_for(other);
+            println!(
+                "{} has {} models available: {}",
+                ui::provider_name(other),
+                models.len(),
+                models.join(", ")
+            );
+        }
+    }
+    if config::route().target() == Some(provider) {
+        crate::route::refresh_model_labels();
+    }
+    Ok(())
+}
+
+fn pick_model_interactively(registry: &Registry, provider: &str, tier: &str) -> Result<String> {
+    let mut models = tiers::ranked(registry, provider, tier);
+    for m in registry.catalog_for(provider) {
+        if !models.contains(&m) {
+            models.push(m);
+        }
+    }
+    if models.is_empty() {
+        bail!(
+            "{} has no models listed. Run `cc-proxy models` to see what cc-proxy knows.",
+            ui::provider_name(provider)
+        );
+    }
+    let question = format!(
+        "Which {} model should `{tier}` use?",
+        ui::provider_name(provider)
+    );
+    let idx = crate::prompt::choose(&question, &models, 0)?;
+    Ok(models[idx].clone())
 }
 
 fn provider_arg(registry: &Registry, asked: Option<&str>) -> Result<&'static str> {

@@ -182,6 +182,25 @@ enum ProviderCommand {
 
 #[derive(Debug, Subcommand)]
 enum ModelsCommand {
+    /// List supported models (optionally filtered to one provider)
+    List {
+        /// Provider to list models for
+        provider: Option<String>,
+        #[arg(long)]
+        full: bool,
+    },
+    /// Interactively choose which model each Claude name (fable, opus, sonnet, haiku) uses
+    #[command(alias = "change")]
+    Set {
+        /// Provider to configure. Defaults to the one Claude Code goes to now
+        provider: Option<String>,
+    },
+    /// Refresh the model catalog for a provider and sync Claude Code's model picker
+    #[command(alias = "update")]
+    Refresh {
+        /// Provider to refresh. Defaults to the one Claude Code goes to now
+        provider: Option<String>,
+    },
     /// Show or choose the model each Claude name (fable, opus, sonnet, haiku) uses
     Map {
         /// The Claude name to choose a model for
@@ -295,6 +314,25 @@ fn run() -> Result<()> {
         }
         Commands::Models {
             command:
+                Some(ModelsCommand::List {
+                    provider,
+                    full: cmd_full,
+                }),
+            full,
+        } => {
+            print_models(&Registry::new(), full || cmd_full, provider.as_deref());
+            Ok(())
+        }
+        Commands::Models {
+            command: Some(ModelsCommand::Set { provider }),
+            ..
+        } => cc_proxy::models_map::run_interactive_set(provider.as_deref()),
+        Commands::Models {
+            command: Some(ModelsCommand::Refresh { provider }),
+            ..
+        } => cc_proxy::models_map::run_refresh(provider.as_deref()),
+        Commands::Models {
+            command:
                 Some(ModelsCommand::Map {
                     name,
                     model,
@@ -312,7 +350,7 @@ fn run() -> Result<()> {
             full,
             command: None,
         } => {
-            print_models(&Registry::new(), full);
+            print_models(&Registry::new(), full, None);
             Ok(())
         }
         Commands::Config { command } => match command {
@@ -975,7 +1013,7 @@ fn run_auth_cli(command: Option<cc_proxy::provider::AuthCommand>) -> Result<()> 
     }
 }
 
-fn print_models(registry: &Registry, full: bool) {
+fn print_models(registry: &Registry, full: bool, filter_provider: Option<&str>) {
     let grouped = registry.grouped_models();
     let styled = ui::styled(&std::io::stdout());
     let builtins = [
@@ -989,6 +1027,7 @@ fn print_models(registry: &Registry, full: bool) {
         "glm",
         "anthropic",
         "gemini",
+        "antigravity",
     ];
     for provider in builtins.into_iter().map(str::to_string).chain(
         grouped
@@ -996,6 +1035,11 @@ fn print_models(registry: &Registry, full: bool) {
             .filter(|k| !builtins.contains(&k.as_str()))
             .cloned(),
     ) {
+        if let Some(wanted) = filter_provider
+            && !provider.eq_ignore_ascii_case(wanted.trim())
+        {
+            continue;
+        }
         let Some(models) = grouped.get(&provider) else {
             continue;
         };
@@ -1043,7 +1087,7 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     if cfg.exists() {
         println!("Config: {}", cfg.display());
     }
-    print_models(registry, false);
+    print_models(registry, false, None);
     println!();
     println!("This only serves. Run `cc-proxy start` to send Claude Code through a provider.");
 }

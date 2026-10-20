@@ -301,7 +301,7 @@ impl Provider for OpenCodeProvider {
     }
 
     fn aggregator(&self) -> bool {
-        true
+        !self.zen
     }
 
     fn cli(&self) -> &dyn CliHandlers {
@@ -610,6 +610,9 @@ impl CliHandlers for OpenCodeCli {
     }
 
     fn login(&self) -> anyhow::Result<()> {
+        let url = "https://opencode.ai/zen";
+        println!("Open {url} to get your OpenCode Go API key.");
+        let _ = crate::browser::open(url);
         println!("Paste your OpenCode Go API key (input is hidden) and press Enter:");
         let key = crate::prompt::read_hidden_line("API key: ")?;
         if key.is_empty() {
@@ -670,6 +673,9 @@ impl CliHandlers for OpenCodeZenCli {
     }
 
     fn login(&self) -> anyhow::Result<()> {
+        let url = "https://opencode.ai/zen";
+        println!("Open {url} to get your OpenCode Zen API key.");
+        let _ = crate::browser::open(url);
         println!("Paste your OpenCode Zen API key (input is hidden) and press Enter:");
         let key = crate::prompt::read_hidden_line("API key: ")?;
         if key.is_empty() {

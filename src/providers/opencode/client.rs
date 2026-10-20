@@ -484,8 +484,10 @@ impl OpenCodeClient {
             .post(url)
             .header(http::header::ACCEPT, accept)
             .header(http::header::CONTENT_TYPE, "application/json")
-            .header("x-opencode-session", &session_header_value)
             .json(body);
+        if provider_slug.starts_with("opencode") {
+            request = request.header("x-opencode-session", &session_header_value);
+        }
         if provider_slug == "opencode-zen" {
             request = request
                 .header(http::header::USER_AGENT, OPENCODE_CLI_USER_AGENT)
@@ -496,16 +498,17 @@ impl OpenCodeClient {
                 .header("x-opencode-client", "cli");
         }
         if let Some(api_key) = api_key {
-            request = request.header(http::header::AUTHORIZATION, format!("Bearer {api_key}"));
-            if !bearer_only {
+            if bearer_only || provider_slug == "opencode" {
+                request = request.header(http::header::AUTHORIZATION, format!("Bearer {api_key}"));
+            } else {
                 request = request.header("x-goog-api-key", api_key);
             }
         }
-        let response = request.send().await.map_err(|_| OpenCodeError {
+        let response = request.send().await.map_err(|err| OpenCodeError {
             status: StatusCode::BAD_GATEWAY,
             retry_after: None,
             body: None,
-            message: format!("{provider_label} upstream request failed"),
+            message: format!("{provider_label} upstream request failed: {err}"),
         })?;
 
         if let Some(capture) = traffic.as_ref() {
