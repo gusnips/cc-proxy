@@ -634,6 +634,32 @@ async fn model_label_settings_errors_do_not_fail_a_valid_request() {
 }
 
 #[tokio::test]
+async fn messages_ingress_hands_the_anthropic_beta_header_to_the_provider() {
+    let provider = Arc::new(IdentityCaptureProvider::default());
+    let app = app(Arc::new(Registry::from_providers([
+        provider.clone() as Arc<dyn Provider>
+    ])));
+    let body = json!({"model": "gpt-5.5", "max_tokens": 32,
+        "messages": [{"role": "user", "content": "hello"}]});
+    for headers in [
+        &[("anthropic-beta", "context-management-2025-06-27")][..],
+        &[],
+    ] {
+        assert_eq!(
+            call_identity_ingress(&app, "/v1/messages", headers, body.clone()).await,
+            StatusCode::OK
+        );
+    }
+
+    let bodies = provider.bodies.lock().unwrap();
+    assert_eq!(
+        bodies[0].anthropic_beta.as_deref(),
+        Some("context-management-2025-06-27")
+    );
+    assert!(bodies[1].anthropic_beta.is_none());
+}
+
+#[tokio::test]
 async fn thread_requests_are_rejected_before_any_provider_call() {
     let provider = Arc::new(IdentityCaptureProvider::default());
     let app = app(Arc::new(Registry::from_providers([

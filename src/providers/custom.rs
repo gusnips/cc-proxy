@@ -74,12 +74,13 @@ pub struct CustomProvider {
 
 impl CustomProvider {
     pub fn new_anthropic() -> Self {
-        let base_url = config::anthropic_base_url();
-        let api_key = config::anthropic_api_key();
-        let client = OpenCodeClient::new(base_url, api_key)
-            .map(Arc::new)
-            .map(ClientState::Ready)
-            .unwrap_or_else(|e| ClientState::Invalid(e.to_string()));
+        let client = OpenCodeClient::with_key_source(
+            config::anthropic_base_url(),
+            config::anthropic_api_key,
+        )
+        .map(Arc::new)
+        .map(ClientState::Ready)
+        .unwrap_or_else(|e| ClientState::Invalid(e.to_string()));
         let models = ANTHROPIC_MODELS.iter().map(|m| (*m).to_string()).collect();
         Self {
             name: "anthropic",
@@ -98,11 +99,18 @@ impl CustomProvider {
 
     pub fn from_config(name: &str, cfg: CustomProviderConfig) -> Self {
         let interned = intern_provider_name(name);
-        let (api_key, _) = config::custom_provider_api_key(interned, &cfg);
-        let client = OpenCodeClient::new(cfg.base_url.clone(), api_key)
-            .map(Arc::new)
-            .map(ClientState::Ready)
-            .unwrap_or_else(|e| ClientState::Invalid(e.to_string()));
+        // The entry is read again on each request, so a key from
+        // `cc-proxy auth login <name>` works on a proxy that is running.
+        let started_with = cfg.clone();
+        let client = OpenCodeClient::with_key_source(cfg.base_url.clone(), move || {
+            let current = config::custom_providers()
+                .remove(interned)
+                .unwrap_or_else(|| started_with.clone());
+            config::custom_provider_api_key(interned, &current).0
+        })
+        .map(Arc::new)
+        .map(ClientState::Ready)
+        .unwrap_or_else(|e| ClientState::Invalid(e.to_string()));
         Self {
             name: interned,
             label: interned,
@@ -229,6 +237,7 @@ impl CustomProvider {
                         self.name,
                         self.label,
                         self.builtin_anthropic,
+                        None,
                     )
                     .await
                 {
@@ -275,6 +284,7 @@ impl CustomProvider {
                         self.name,
                         self.label,
                         self.builtin_anthropic,
+                        body.anthropic_beta.as_deref(),
                     )
                     .await
                 {
@@ -322,6 +332,7 @@ impl CustomProvider {
                         self.name,
                         self.label,
                         self.builtin_anthropic,
+                        None,
                     )
                     .await
                 {
@@ -495,6 +506,7 @@ impl Provider for CustomProvider {
                         self.name,
                         self.label,
                         self.builtin_anthropic,
+                        None,
                     )
                     .await
                     .map_err(|e| self.map_error(e))?;
@@ -526,6 +538,7 @@ impl Provider for CustomProvider {
                         self.name,
                         self.label,
                         self.builtin_anthropic,
+                        body.anthropic_beta.as_deref(),
                     )
                     .await
                     .map_err(|e| self.map_error(e))?;
@@ -558,6 +571,7 @@ impl Provider for CustomProvider {
                         self.name,
                         self.label,
                         self.builtin_anthropic,
+                        None,
                     )
                     .await
                     .map_err(|e| self.map_error(e))?;
