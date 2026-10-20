@@ -21,7 +21,7 @@ pub const TIERS: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
 /// no bigger one is there: `gpt-6-sol-fast` is an opus, not a haiku.
 const WORDS: [(&str, &[&str]); 4] = [
     ("fable", &["astra", "fable"]),
-    ("opus", &["opus", "sol", "max", "ultra"]),
+    ("opus", &["opus", "sol", "max", "ultra", "argon"]),
     ("sonnet", &["sonnet", "terra", "pro", "plus"]),
     (
         "haiku",

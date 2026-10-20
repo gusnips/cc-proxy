@@ -19,7 +19,7 @@ use crate::ui::{self, Mood};
 use crate::{claude_settings, config, config_keys, daemon, tiers};
 
 /// The built-in providers `start` and `use` can send Claude Code to.
-pub const PROVIDERS: [&str; 9] = [
+pub const PROVIDERS: [&str; 10] = [
     "codex",
     "kimi",
     "cursor",
@@ -27,6 +27,7 @@ pub const PROVIDERS: [&str; 9] = [
     "copilot",
     "glm",
     "anthropic",
+    "gemini",
     "opencode",
     "opencode-zen",
 ];

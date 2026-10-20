@@ -122,6 +122,20 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "Anthropic API base URL",
     },
     ConfigKey {
+        path: "gemini.apiKey",
+        kind: ConfigKind::Secret,
+        env: &["CCP_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        default: None,
+        blurb: "Gemini API key",
+    },
+    ConfigKey {
+        path: "gemini.baseUrl",
+        kind: ConfigKind::Str,
+        env: &["CCP_GEMINI_BASE_URL"],
+        default: Some("https://generativelanguage.googleapis.com/v1beta"),
+        blurb: "Gemini API base URL",
+    },
+    ConfigKey {
         path: "codex.baseUrl",
         kind: ConfigKind::Str,
         env: &["CCP_CODEX_BASE_URL"],

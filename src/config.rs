@@ -69,6 +69,7 @@ struct FileConfig {
     pub opencode_zen: Option<OpenCodeConfig>,
     pub glm: Option<GlmConfig>,
     pub anthropic: Option<AnthropicConfig>,
+    pub gemini: Option<OpenCodeConfig>,
     pub providers: Option<BTreeMap<String, CustomProviderConfig>>,
     pub route: Option<RouteConfig>,
 }
@@ -924,6 +925,66 @@ pub fn clear_anthropic_api_key() -> anyhow::Result<bool> {
         .is_some();
     if had {
         crate::config_keys::remove_values(["anthropic.apiKey"])?;
+    }
+    Ok(had)
+}
+
+pub fn gemini_api_key_source() -> Option<&'static str> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    for var in ["CCP_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"] {
+        if env.get(var).is_some_and(|v| !v.trim().is_empty()) {
+            return Some(var);
+        }
+    }
+    let file = read_file_config(&paths::config_dir()).and_then(|f| f.gemini);
+    if file
+        .and_then(|c| c.api_key)
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        return Some("config.json");
+    }
+    None
+}
+
+pub fn gemini_api_key() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    for var in ["CCP_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"] {
+        if let Some(val) = env.get(var).filter(|v| !v.trim().is_empty()) {
+            return Some(val.clone());
+        }
+    }
+    read_file_config(&paths::config_dir())
+        .and_then(|f| f.gemini)
+        .and_then(|c| c.api_key)
+        .filter(|v| !v.trim().is_empty())
+}
+
+pub fn gemini_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(val) = env
+        .get("CCP_GEMINI_BASE_URL")
+        .filter(|v| !v.trim().is_empty())
+    {
+        return val.clone();
+    }
+    read_file_config(&paths::config_dir())
+        .and_then(|f| f.gemini)
+        .and_then(|c| c.base_url)
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string())
+}
+
+pub fn save_gemini_api_key(key: &str) -> anyhow::Result<PathBuf> {
+    crate::config_keys::write_value("gemini.apiKey", serde_json::Value::String(key.to_string()))
+}
+
+pub fn clear_gemini_api_key() -> anyhow::Result<bool> {
+    let had = read_file_config(&paths::config_dir())
+        .and_then(|f| f.gemini)
+        .and_then(|c| c.api_key)
+        .is_some();
+    if had {
+        crate::config_keys::remove_values(["gemini.apiKey"])?;
     }
     Ok(had)
 }

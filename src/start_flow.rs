@@ -220,7 +220,7 @@ mod tests {
     fn use_takes_a_provider_or_claude_in_any_case() {
         let registry = Registry::new();
         assert_eq!(pick_named(&registry, " Claude ").unwrap(), Pick::Claude);
-        let error = pick_named(&registry, "gemini").unwrap_err().to_string();
+        let error = pick_named(&registry, "unknown").unwrap_err().to_string();
         assert!(error.contains("codex, kimi, cursor, grok"), "{error}");
         assert!(error.contains("`claude`"), "{error}");
     }

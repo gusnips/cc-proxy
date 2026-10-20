@@ -75,6 +75,10 @@ impl Registry {
         );
         let anthropic = Arc::new(crate::providers::custom::CustomProvider::new_anthropic());
         models.insert("anthropic".into(), anthropic.supported_models());
+        models.insert(
+            "gemini".into(),
+            crate::providers::gemini::advertised_models(),
+        );
 
         let mut handlers = BTreeMap::new();
         for (name, entries) in &models {
@@ -88,6 +92,7 @@ impl Registry {
                 "glm" => Arc::new(crate::providers::glm::GlmProvider::new()),
                 "copilot" => Arc::new(crate::providers::copilot::CopilotProvider::new()),
                 "anthropic" => anthropic.clone(),
+                "gemini" => Arc::new(crate::providers::gemini::GeminiProvider::new()),
                 _ => Arc::new(PlaceholderProvider::new(name, entries.clone())),
             };
             handlers.insert(name.clone(), handler);
@@ -232,7 +237,9 @@ impl Registry {
         // qualified form above is the only way to select the OpenCode Go
         // version of a conflicting ID. `opencode` stays last: it resells
         // other providers' models, so native catalogs win bare IDs.
-        for name in ["codex", "kimi", "cursor", "grok", "glm", "opencode"] {
+        for name in [
+            "codex", "kimi", "cursor", "grok", "glm", "gemini", "opencode",
+        ] {
             if self
                 .models
                 .get(name)
@@ -248,7 +255,9 @@ impl Registry {
                 "cursor",
                 "grok",
                 "glm",
+                "gemini",
                 "opencode",
+                "opencode-zen",
                 "copilot",
                 "anthropic",
             ]
@@ -276,6 +285,9 @@ impl Registry {
         }
         if normalized.starts_with("glm-") {
             return self.handlers.get("glm").cloned();
+        }
+        if normalized.starts_with("gemini-") {
+            return self.handlers.get("gemini").cloned();
         }
 
         None
@@ -750,5 +762,28 @@ mod tests {
         // The [1m] compaction hint is stripped before routing.
         let p = registry.provider_for_model("glm-5.2[1m]");
         assert_eq!(p.expect("provider").name(), "glm");
+    }
+
+    #[test]
+    fn gemini_opencode_zen_and_anthropic_models_route_to_their_providers() {
+        let registry = Registry::new();
+        for (model, expected) in [
+            ("gemini-4-argon", "gemini"),
+            ("gemini/gemini-3.8-flash", "gemini"),
+            ("gemini-99-unlisted", "gemini"),
+            ("opencode-zen/gemini-4-argon", "opencode-zen"),
+            ("opencode-zen/claude-sonnet-5-5", "opencode-zen"),
+            ("opencode-zen/big-pickle", "opencode-zen"),
+            ("anthropic/claude-sonnet-5-5", "anthropic"),
+            ("anthropic/claude-opus-4-8", "anthropic"),
+        ] {
+            let p = registry.provider_for_model(model);
+            assert_eq!(
+                p.as_ref().map(|h| h.name()),
+                Some(expected),
+                "{model} should route to {expected}"
+            );
+        }
+        assert_eq!(registry.provider("opencode-go").unwrap().name(), "opencode");
     }
 }

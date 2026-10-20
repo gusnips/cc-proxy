@@ -2,6 +2,7 @@ pub mod codex;
 pub mod copilot;
 pub mod cursor;
 pub mod custom;
+pub mod gemini;
 pub mod glm;
 pub mod grok;
 pub mod kimi;

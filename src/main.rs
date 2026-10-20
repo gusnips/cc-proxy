@@ -980,6 +980,7 @@ fn print_models(registry: &Registry, full: bool) {
         "cursor",
         "glm",
         "anthropic",
+        "gemini",
     ];
     for provider in builtins.into_iter().map(str::to_string).chain(
         grouped
