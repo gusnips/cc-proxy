@@ -25,7 +25,7 @@ const DEFAULT_BASE_URL: &str = "https://api.individual.githubcopilot.com";
 const REFRESH_MARGIN_MS: u64 = 5 * 60 * 1000;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const LOGIN_HINT: &str = "Run `cc-proxy copilot auth login`.";
+pub const LOGIN_HINT: &str = "Run `cc-proxy auth login copilot`.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredAuth {

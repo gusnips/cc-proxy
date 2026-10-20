@@ -300,7 +300,7 @@ fn auth_error(_: anyhow::Error) -> GrokError {
         status: StatusCode::UNAUTHORIZED,
         retry_after: None,
         body: None,
-        message: "Grok authentication requires login; run `cc-proxy grok auth login` and retry the request".into(),
+        message: "Grok authentication requires login; run `cc-proxy auth login grok` and retry the request".into(),
     }
 }
 

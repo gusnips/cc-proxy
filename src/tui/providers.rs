@@ -90,29 +90,7 @@ fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
 }
 
 fn state_text(state: &AuthState) -> String {
-    match state {
-        AuthState::SignedIn {
-            account,
-            expires_ms,
-        } => {
-            let who = account.as_ref().map_or("signed in".to_string(), |account| {
-                format!("signed in as {account}")
-            });
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| since.as_millis() as u64);
-            match expires_ms {
-                Some(expires) if *expires > now_ms => format!(
-                    "{who}, token good for {}",
-                    ui::duration(Duration::from_millis(expires - now_ms))
-                ),
-                Some(_) => format!("{who}, renews on next use"),
-                None => who,
-            }
-        }
-        AuthState::KeySaved => "API key set".to_string(),
-        AuthState::Missing => "not set up".to_string(),
-    }
+    state.describe()
 }
 
 pub fn render_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, panel: &ProvidersPanel) {

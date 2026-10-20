@@ -60,21 +60,23 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
         "Validate the config file and ask a running service to reload it",
         "Attach a read-only dashboard to a running proxy",
         "List supported provider models",
-        "Manage Codex authentication",
-        "Manage Kimi authentication",
-        "Manage GitHub Copilot authentication",
-        "Manage Cursor authentication",
-        "Manage Grok authentication",
-        "Manage GLM authentication",
-        "Manage the OpenCode Go API key",
+        "Manage the background proxy service (start, stop, status, restart, reload)",
+        "Manage provider authentication (login, device, status, logout)",
         "Show how much of your Codex, Kimi and OpenCode Go plans you have used",
     ] {
         assert!(stdout.contains(description), "missing: {description}");
     }
     assert!(!stdout.contains("demo"));
     assert!(!stdout.contains("mock data and no proxy server"));
-    // The old launcher and hook commands are gone; the `claude` tombstone is hidden.
-    for gone in ["shell", "setup", "Send plain `claude`", "hook"] {
+    // The old launcher, hook, and top-level provider commands are gone; the `claude` tombstone is hidden.
+    for gone in [
+        "shell",
+        "setup",
+        "Send plain `claude`",
+        "hook",
+        "Manage Codex authentication",
+        "Manage Kimi authentication",
+    ] {
         assert!(!stdout.contains(gone), "still listed: {gone}");
     }
     Ok(())
@@ -93,7 +95,7 @@ fn invalid_command_exits_two() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn unsupported_provider_auth_command_exits_two() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("cc-proxy")?;
-    cmd.args(["cursor", "auth", "device"]);
+    cmd.args(["auth", "device", "cursor"]);
     let output = cmd.output()?;
     assert_eq!(output.status.code(), Some(2));
     let out = String::from_utf8(output.stderr)?;
@@ -105,7 +107,7 @@ fn unsupported_provider_auth_command_exits_two() -> Result<(), Box<dyn std::erro
 fn provider_logout_without_auth_is_success() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
     let mut cmd = Command::cargo_bin("cc-proxy")?;
-    cmd.args(["kimi", "auth", "logout"]);
+    cmd.args(["auth", "logout", "kimi"]);
     cmd.env("CCP_CONFIG_DIR", temp.path());
     cmd.assert().success();
     Ok(())
@@ -265,9 +267,14 @@ fn kimi_auth_status_reads_stored_auth() -> Result<(), Box<dyn std::error::Error>
         r#"{"access":"a","refresh":"r","expires":4102444800000,"scope":"openid","userId":"u"}"#,
     )?;
     let mut cmd = Command::cargo_bin("cc-proxy")?;
-    cmd.args(["kimi", "auth", "status"]);
+    cmd.args(["auth", "status", "kimi"]);
     cmd.env("CCP_CONFIG_DIR", temp.path());
     cmd.assert().success().stdout(contains("User: u"));
+
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    cmd.arg("auth");
+    cmd.env("CCP_CONFIG_DIR", temp.path());
+    cmd.assert().success().stdout(contains("kimi: signed in"));
     Ok(())
 }
 
@@ -284,7 +291,7 @@ fn opencode_auth_status_reports_config_source() -> Result<(), Box<dyn std::error
     let temp = TempDir::new()?;
     let mut cmd = Command::cargo_bin("cc-proxy")?;
     isolated_opencode_env(&mut cmd, &temp);
-    cmd.args(["opencode", "auth", "status"])
+    cmd.args(["auth", "status", "opencode"])
         .assert()
         .failure()
         .code(1)
@@ -297,7 +304,7 @@ fn opencode_auth_status_reports_config_source() -> Result<(), Box<dyn std::error
     )?;
     let mut cmd = Command::cargo_bin("cc-proxy")?;
     isolated_opencode_env(&mut cmd, &temp);
-    cmd.args(["opencode", "auth", "status"])
+    cmd.args(["auth", "status", "opencode"])
         .assert()
         .success()
         .stdout(contains("config.json"));
@@ -309,7 +316,7 @@ fn opencode_auth_login_stores_key_from_stdin() -> Result<(), Box<dyn std::error:
     let temp = TempDir::new()?;
     let mut cmd = Command::cargo_bin("cc-proxy")?;
     isolated_opencode_env(&mut cmd, &temp);
-    cmd.args(["opencode", "auth", "login"])
+    cmd.args(["auth", "login", "opencode"])
         .write_stdin("login-key\n")
         .assert()
         .success()
@@ -492,7 +499,7 @@ fn usage_shows_every_signed_in_plan_and_how_to_sign_in_to_the_rest()
             "  5-hour window: 28% used, already reset (Aug 9 09:00)\n",
             "  Weekly: 12% used, already reset (Aug 14 16:00)\n",
             "\n",
-            "opencode: no API key set. Run `cc-proxy opencode auth login` or set OPENCODE_API_KEY.\n",
+            "opencode: no API key set. Run `cc-proxy auth login opencode` or set OPENCODE_API_KEY.\n",
         )
     );
 
@@ -502,7 +509,7 @@ fn usage_shows_every_signed_in_plan_and_how_to_sign_in_to_the_rest()
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(output.stderr)?,
-        "opencode: no API key set. Run `cc-proxy opencode auth login` or set OPENCODE_API_KEY.\n"
+        "opencode: no API key set. Run `cc-proxy auth login opencode` or set OPENCODE_API_KEY.\n"
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(
@@ -530,15 +537,15 @@ fn usage_for_a_provider_that_is_not_signed_in_names_the_login_and_exits_one()
     for (provider, line) in [
         (
             "codex",
-            "codex: not signed in. Run `cc-proxy codex auth login`.\n",
+            "codex: not signed in. Run `cc-proxy auth login codex`.\n",
         ),
         (
             "kimi",
-            "kimi: not signed in. Run `cc-proxy kimi auth login`.\n",
+            "kimi: not signed in. Run `cc-proxy auth login kimi`.\n",
         ),
         (
             "opencode",
-            "opencode: no API key set. Run `cc-proxy opencode auth login` or set OPENCODE_API_KEY.\n",
+            "opencode: no API key set. Run `cc-proxy auth login opencode` or set OPENCODE_API_KEY.\n",
         ),
     ] {
         let mut cmd = Command::cargo_bin("cc-proxy")?;
@@ -567,7 +574,7 @@ fn usage_with_a_rejected_sign_in_says_how_to_fix_it_and_exits_two()
         .code(2)
         .stdout("")
         .stderr(
-            "Codex didn't accept the sign-in when asked for usage. Run `cc-proxy codex auth login` to sign in again.\n",
+            "Codex didn't accept the sign-in when asked for usage. Run `cc-proxy auth login codex` to sign in again.\n",
         );
     Ok(())
 }

@@ -97,41 +97,15 @@ enum Commands {
         #[arg(long)]
         version: Option<String>,
     },
-    /// Manage Codex authentication
-    Codex {
+    /// Manage the background proxy service (start, stop, status, restart, reload)
+    Service {
         #[command(subcommand)]
-        command: ProviderGroup,
+        command: Option<ServiceCommand>,
     },
-    /// Manage Kimi authentication
-    Kimi {
+    /// Manage provider authentication (login, device, status, logout)
+    Auth {
         #[command(subcommand)]
-        command: ProviderGroup,
-    },
-    /// Manage GitHub Copilot authentication
-    Copilot {
-        #[command(subcommand)]
-        command: ProviderGroup,
-    },
-    /// Manage Cursor authentication
-    Cursor {
-        #[command(subcommand)]
-        command: ProviderGroup,
-    },
-    /// Manage Grok authentication
-    Grok {
-        #[command(subcommand)]
-        command: ProviderGroup,
-    },
-    /// Manage GLM authentication
-    Glm {
-        #[command(subcommand)]
-        command: ProviderGroup,
-    },
-    /// Manage the OpenCode Go API key
-    #[command(name = "opencode")]
-    OpenCode {
-        #[command(subcommand)]
-        command: ProviderGroup,
+        command: Option<cc_proxy::provider::AuthCommand>,
     },
     /// Show how much of your Codex, Kimi and OpenCode Go plans you have used
     Usage {
@@ -143,12 +117,31 @@ enum Commands {
     },
 }
 
-#[derive(Debug, Subcommand)]
-enum ProviderGroup {
-    Auth {
-        #[command(subcommand)]
-        command: cc_proxy::provider::AuthCommand,
+#[derive(Debug, Clone, Subcommand)]
+enum ServiceCommand {
+    /// Start the proxy as a background service and send Claude Code through it
+    #[command(alias = "serve")]
+    Start {
+        #[arg(long)]
+        port: Option<u16>,
+        /// Only serve, in the foreground. Leaves Claude Code's settings alone
+        #[arg(long = "no-monitor", action = ArgAction::SetTrue)]
+        no_monitor: bool,
+        /// Run in the foreground with the monitor dashboard. Quitting it switches routing off
+        #[arg(long, conflicts_with = "no_monitor", action = ArgAction::SetTrue)]
+        monitor: bool,
     },
+    /// Switch routing off and stop the background proxy service
+    Stop,
+    /// Show whether the proxy is running and where Claude Code goes
+    Status,
+    /// Restart the background proxy service
+    Restart {
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Validate the config file and ask a running service to reload it
+    Reload,
 }
 
 #[derive(Debug, Subcommand)]
@@ -223,16 +216,11 @@ fn run() -> Result<()> {
             port,
             no_monitor,
             monitor,
-        } => {
-            if daemon::is_daemon_child() {
-                return daemon::serve_daemon_child(port);
-            }
-            match select_serve_mode(no_monitor, monitor) {
-                ServeMode::Daemon => start_daemon(port),
-                ServeMode::Plain => serve_plain(port),
-                ServeMode::Monitor => serve_with_monitor(port),
-            }
-        }
+        } => run_service_command(ServiceCommand::Start {
+            port,
+            no_monitor,
+            monitor,
+        }),
         Commands::Use { target } => use_target(target.as_deref()),
         Commands::Demo => {
             let registry = Registry::new();
@@ -305,17 +293,14 @@ fn run() -> Result<()> {
         Commands::Update { check, version } => {
             cc_proxy::update::run_update(check, version.as_deref())
         }
-        Commands::Stop => stop_daemon(),
-        Commands::Status => daemon_status(),
-        Commands::Restart { port } => restart_daemon(port),
-        Commands::Reload => reload_daemon(),
-        Commands::Codex { command } => run_provider_cli("codex", command),
-        Commands::Kimi { command } => run_provider_cli("kimi", command),
-        Commands::Copilot { command } => run_provider_cli("copilot", command),
-        Commands::Cursor { command } => run_provider_cli("cursor", command),
-        Commands::Grok { command } => run_provider_cli("grok", command),
-        Commands::Glm { command } => run_provider_cli("glm", command),
-        Commands::OpenCode { command } => run_provider_cli("opencode", command),
+        Commands::Stop => run_service_command(ServiceCommand::Stop),
+        Commands::Status => run_service_command(ServiceCommand::Status),
+        Commands::Restart { port } => run_service_command(ServiceCommand::Restart { port }),
+        Commands::Reload => run_service_command(ServiceCommand::Reload),
+        Commands::Service { command } => {
+            run_service_command(command.unwrap_or(ServiceCommand::Status))
+        }
+        Commands::Auth { command } => run_auth_cli(command),
         Commands::Usage { provider, json } => match cc_proxy::usage::run(provider, json)? {
             0 => Ok(()),
             code => std::process::exit(code),
@@ -419,6 +404,29 @@ fn select_serve_mode(no_monitor: bool, monitor: bool) -> ServeMode {
     }
 }
 
+fn run_service_command(command: ServiceCommand) -> Result<()> {
+    match command {
+        ServiceCommand::Start {
+            port,
+            no_monitor,
+            monitor,
+        } => {
+            if daemon::is_daemon_child() {
+                return daemon::serve_daemon_child(port);
+            }
+            match select_serve_mode(no_monitor, monitor) {
+                ServeMode::Daemon => start_daemon(port),
+                ServeMode::Plain => serve_plain(port),
+                ServeMode::Monitor => serve_with_monitor(port),
+            }
+        }
+        ServiceCommand::Stop => stop_daemon(),
+        ServiceCommand::Status => daemon_status(),
+        ServiceCommand::Restart { port } => restart_daemon(port),
+        ServiceCommand::Reload => reload_daemon(),
+    }
+}
+
 /// Commands that check, before they run, that a routed Claude Code still has
 /// a proxy to talk to. The ones that start or stop the proxy do their own.
 fn heals_first(command: &Commands) -> bool {
@@ -428,6 +436,13 @@ fn heals_first(command: &Commands) -> bool {
             | Commands::Stop
             | Commands::Use { .. }
             | Commands::Restart { .. }
+            | Commands::Service {
+                command: Some(
+                    ServiceCommand::Start { .. }
+                        | ServiceCommand::Stop
+                        | ServiceCommand::Restart { .. }
+                )
+            }
             | Commands::Version
             | Commands::Demo
             | Commands::Claude { .. }
@@ -791,43 +806,111 @@ fn reload_daemon() -> Result<()> {
     Ok(())
 }
 
-fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
+fn pick_auth_provider(registry: &Registry, asked: Option<&str>, question: &str) -> Result<String> {
+    if let Some(name) = asked {
+        return Ok(name.trim().to_ascii_lowercase());
+    }
+    let providers = registry.list_provider_names();
+    if providers.is_empty() {
+        anyhow::bail!("no providers are registered");
+    }
+    let labels: Vec<String> = providers
+        .iter()
+        .map(|id| format!("{} ({id})", ui::provider_name(id)))
+        .collect();
+    let idx = cc_proxy::prompt::choose(question, &labels, 0)?;
+    Ok(providers[idx].clone())
+}
+
+fn print_all_auth_status(registry: &Registry) -> Result<()> {
+    let styled = ui::styled(&std::io::stdout());
+    let mut any_signed_in = false;
+    for id in registry.list_provider_names() {
+        let Some(provider) = registry.provider(&id) else {
+            continue;
+        };
+        let state = provider.cli().auth_state();
+        if state != cc_proxy::provider::AuthState::Missing {
+            any_signed_in = true;
+        }
+        let label = ui::strong(&id, ui::provider_color(&id), styled);
+        println!("{label}: {}", state.describe());
+    }
+    if !any_signed_in {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_auth_cli(command: Option<cc_proxy::provider::AuthCommand>) -> Result<()> {
+    use cc_proxy::provider::AuthCommand;
     let registry = Registry::new();
-    let provider = registry
-        .provider(name)
-        .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
-    let handlers = provider.cli();
+    let command = command.unwrap_or(AuthCommand::Status { provider: None });
     match command {
-        ProviderGroup::Auth { command } => match command {
-            cc_proxy::provider::AuthCommand::Login => {
-                if let Err(err) = handlers.login() {
-                    eprintln!("{err}");
-                    std::process::exit(2);
+        AuthCommand::Status { provider: None } => print_all_auth_status(&registry),
+        AuthCommand::Status {
+            provider: Some(name),
+        } => {
+            let name = name.trim().to_ascii_lowercase();
+            let provider = registry
+                .provider(&name)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
+            if let Err(err) = provider.cli().status() {
+                println!("{err}");
+                if err.to_string() == "Not authenticated" {
+                    std::process::exit(1);
                 }
-                Ok(())
+                std::process::exit(2);
             }
-            cc_proxy::provider::AuthCommand::Device => {
-                if let Err(err) = handlers.device() {
-                    eprintln!("{err}");
-                    std::process::exit(2);
-                }
-                Ok(())
+            Ok(())
+        }
+        AuthCommand::Login { provider, device } => {
+            let name = pick_auth_provider(
+                &registry,
+                provider.as_deref(),
+                "Which provider do you want to sign in to?",
+            )?;
+            let provider = registry
+                .provider(&name)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
+            let result = if device {
+                provider.cli().device()
+            } else {
+                provider.cli().login()
+            };
+            if let Err(err) = result {
+                eprintln!("{err}");
+                std::process::exit(2);
             }
-            cc_proxy::provider::AuthCommand::Status => {
-                if let Err(err) = handlers.status() {
-                    println!("{err}");
-                    if err.to_string() == "Not authenticated" {
-                        std::process::exit(1);
-                    }
-                    std::process::exit(2);
-                }
-                Ok(())
+            Ok(())
+        }
+        AuthCommand::Device { provider } => {
+            let name = pick_auth_provider(
+                &registry,
+                provider.as_deref(),
+                "Which provider do you want to sign in to?",
+            )?;
+            let provider = registry
+                .provider(&name)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
+            if let Err(err) = provider.cli().device() {
+                eprintln!("{err}");
+                std::process::exit(2);
             }
-            cc_proxy::provider::AuthCommand::Logout => {
-                handlers.logout()?;
-                Ok(())
-            }
-        },
+            Ok(())
+        }
+        AuthCommand::Logout { provider } => {
+            let name = pick_auth_provider(
+                &registry,
+                provider.as_deref(),
+                "Which provider do you want to sign out of?",
+            )?;
+            let provider = registry
+                .provider(&name)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
+            provider.cli().logout()?;
+            Ok(())
+        }
     }
 }
 
@@ -919,6 +1002,21 @@ mod tests {
             vec!["cc-proxy", "start", "--monitor"],
             vec!["cc-proxy", "start", "--no-monitor"],
             vec!["cc-proxy", "serve", "--no-monitor"],
+            vec!["cc-proxy", "service"],
+            vec!["cc-proxy", "service", "status"],
+            vec!["cc-proxy", "service", "stop"],
+            vec!["cc-proxy", "service", "reload"],
+            vec!["cc-proxy", "service", "restart", "--port", "18766"],
+            vec!["cc-proxy", "service", "start", "--monitor"],
+            vec!["cc-proxy", "service", "serve", "--no-monitor"],
+            vec!["cc-proxy", "auth"],
+            vec!["cc-proxy", "auth", "status"],
+            vec!["cc-proxy", "auth", "status", "opencode"],
+            vec!["cc-proxy", "auth", "login"],
+            vec!["cc-proxy", "auth", "login", "opencode"],
+            vec!["cc-proxy", "auth", "login", "codex", "--device"],
+            vec!["cc-proxy", "auth", "device", "codex"],
+            vec!["cc-proxy", "auth", "logout", "kimi"],
             vec!["cc-proxy", "use"],
             vec!["cc-proxy", "use", "kimi"],
             vec!["cc-proxy", "use", "claude"],
@@ -926,11 +1024,18 @@ mod tests {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
         }
         assert!(Cli::try_parse_from(["cc-proxy", "start", "--monitor", "--no-monitor"]).is_err());
+        assert!(
+            Cli::try_parse_from(["cc-proxy", "service", "start", "--monitor", "--no-monitor"])
+                .is_err()
+        );
     }
 
     #[test]
     fn the_removed_commands_are_gone() {
-        for command in ["setup", "shell", "on", "off"] {
+        for command in [
+            "setup", "shell", "on", "off", "codex", "kimi", "copilot", "cursor", "grok", "glm",
+            "opencode",
+        ] {
             assert!(
                 Cli::try_parse_from(["cc-proxy", command]).is_err(),
                 "{command}"

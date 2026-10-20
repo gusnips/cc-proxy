@@ -126,7 +126,7 @@ fn pick_named(registry: &Registry, asked: &str) -> Result<Pick> {
     }
     let name = ui::provider_name(provider);
     if !prompt::confirm(&format!("{name} isn't signed in. Sign in now?"), false)? {
-        bail!("{name} isn't signed in. Run `cc-proxy {provider} auth login`, then try again.");
+        bail!("{name} isn't signed in. Run `cc-proxy auth login {provider}`, then try again.");
     }
     sign_in(registry, provider)?;
     Ok(Pick::Provider(provider))
@@ -203,7 +203,7 @@ fn sign_in(registry: &Registry, provider: &str) -> Result<()> {
     cli.login()?;
     if cli.auth_state() == AuthState::Missing {
         bail!(
-            "{name} still isn't signed in. Run `cc-proxy {provider} auth login`, then try again."
+            "{name} still isn't signed in. Run `cc-proxy auth login {provider}`, then try again."
         );
     }
     Ok(())

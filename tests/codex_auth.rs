@@ -7,7 +7,7 @@ use tempfile::TempDir;
 fn codex_cmd() -> (Command, TempDir) {
     let temp = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
-    cmd.args(["codex", "auth", "status"]);
+    cmd.args(["auth", "status", "codex"]);
     cmd.env("CCP_CONFIG_DIR", temp.path());
     cmd.env("HOME", temp.path());
     (cmd, temp)

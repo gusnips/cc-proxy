@@ -11,14 +11,29 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum AuthCommand {
-    /// Sign in using browser-based authentication
-    Login,
+    /// Sign in to a provider
+    Login {
+        /// Provider to sign in to. Leave it out to pick from a list
+        provider: Option<String>,
+        /// Sign in using a device code instead of opening a browser
+        #[arg(long)]
+        device: bool,
+    },
     /// Sign in using a device code
-    Device,
+    Device {
+        /// Provider to sign in to. Leave it out to pick from a list
+        provider: Option<String>,
+    },
     /// Show the current authentication status
-    Status,
+    Status {
+        /// Provider to check. Leave it out to see all of them
+        provider: Option<String>,
+    },
     /// Delete stored authentication credentials
-    Logout,
+    Logout {
+        /// Provider to sign out of. Leave it out to pick from a list
+        provider: Option<String>,
+    },
 }
 
 #[async_trait]
@@ -167,6 +182,34 @@ pub enum AuthState {
     /// An API key is set, in the config file or the environment.
     KeySaved,
     Missing,
+}
+
+impl AuthState {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::SignedIn {
+                account,
+                expires_ms,
+            } => {
+                let who = account.as_ref().map_or("signed in".to_string(), |account| {
+                    format!("signed in as {account}")
+                });
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_millis() as u64);
+                match expires_ms {
+                    Some(expires) if *expires > now_ms => format!(
+                        "{who}, token good for {}",
+                        crate::ui::duration(std::time::Duration::from_millis(expires - now_ms))
+                    ),
+                    Some(_) => format!("{who}, renews on next use"),
+                    None => who,
+                }
+            }
+            Self::KeySaved => "API key set".to_string(),
+            Self::Missing => "not set up".to_string(),
+        }
+    }
 }
 
 /// What a provider said about an API key.
