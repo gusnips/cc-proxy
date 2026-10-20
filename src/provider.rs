@@ -48,8 +48,8 @@ pub trait Provider: Send + Sync {
         self.supported_models()
     }
 
-    /// True when the catalog is a mix of other vendors' models, so no match
-    /// for a Claude name is certain and the user always confirms it.
+    /// True when the catalog is a mix of other vendors' models, so no model
+    /// is the obvious match for a Claude name and the user chooses each one.
     fn aggregator(&self) -> bool {
         false
     }

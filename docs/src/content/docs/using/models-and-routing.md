@@ -26,9 +26,9 @@ Claude Code asks for four model names: `fable`, `opus`, `sonnet` and `haiku`. It
 
 While routing is on, cc-proxy turns a tier into one model of the provider you picked with `cc-proxy start` or `cc-proxy use`. It looks in this order:
 
-1. Your choice, saved by `cc-proxy models map`.
-2. A match it works out from the models the provider offers.
-3. Neither: an HTTP 400 that names `cc-proxy models map`.
+1. Your choice, saved by `cc-proxy models choose` or `cc-proxy models map`.
+2. A match it works out from the models the provider offers. A provider that resells other vendors' models (OpenCode Go, OpenCode Zen, and providers you add with `cc-proxy provider add`, such as OpenRouter) gets no match: you choose.
+3. Neither: an HTTP 400 that names `cc-proxy models choose`.
 
 To work out a match, cc-proxy reads one word in each model ID and keeps the newest version:
 
@@ -45,18 +45,24 @@ Versions compare as numbers, so 6.10 is newer than 6.9. cc-proxy keeps no list o
 - A provider with one line of models (Kimi, GLM, Grok) uses it for every name. Its small models go to `haiku`.
 - On GitHub Copilot, the Claude models answer the Claude names.
 
-When two lines of models compete for a name, or the list is a mix of other vendors' models (OpenCode Go), cc-proxy isn't sure. `start` and `use` then show the guesses and ask once: `Use these? [Y/n]`. Your answer is saved. If there is nobody to answer (a script), cc-proxy uses its guesses for now and saves nothing.
+When two lines of models compete for a name, cc-proxy isn't sure. `start` and `use` then show the guesses and ask once: `Use these? [Y/n]`. Your answer is saved. If there is nobody to answer (a script), cc-proxy uses its guesses for now and saves nothing.
+
+On a reseller, `start` and `use` ask for each name that has no model, the same way `cc-proxy models choose` does. Press Enter to skip a name. A skipped name stays empty, and the next `start` or `use` asks about it again.
 
 An explicit provider model ID skips this tier lookup. Codex's `codex.model` override still applies. A name can point at a model of another provider.
 
 ### See or change a name
 
 ```sh
+cc-proxy models choose                   # ask for each name, with search
+cc-proxy models choose opencode-zen      # another provider
 cc-proxy models map                      # the four names on the current provider
-cc-proxy models map opus gpt-6.1-sol     # choose
+cc-proxy models map opus gpt-6.1-sol     # choose one name directly
 cc-proxy models map opus --reset         # let cc-proxy pick again
 cc-proxy models map --provider kimi      # another provider
 ```
+
+`models choose` asks about each name in turn and lists the best fits first. Type part of a name to search the whole catalog: every word must match, so `claude opus` finds `openrouter/anthropic/claude-opus-4.1`. Type a number to pick from the list shown, or press Enter to keep the name as it is.
 
 Each line says who decided: `your choice`, `picked by cc-proxy`, or `a guess, not confirmed`. A choice is checked against the models cc-proxy serves. It takes effect on the next request, with no restart. It is stored in `config.json` as `route.tiers.<provider>.<name>`.
 

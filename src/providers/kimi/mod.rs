@@ -32,6 +32,7 @@ use crate::registry::KIMI_MODELS;
 const KIMI: ChatUpstream = ChatUpstream {
     name: "Kimi",
     slug: "kimi",
+    tool_names: &[],
 };
 
 fn now_ms() -> u64 {

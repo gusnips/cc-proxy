@@ -31,11 +31,37 @@ const DEFAULT_MAX_TOKENS: u32 = 32_000;
 pub struct ChatUpstream {
     pub name: &'static str,
     pub slug: &'static str,
+    /// Tools the request renamed for this upstream, as (Claude Code's name,
+    /// the name sent). The upstream's calls get Claude Code's name back.
+    pub tool_names: &'static [(&'static str, &'static str)],
+}
+
+impl ChatUpstream {
+    fn claude_tool_name(&self, sent: &str) -> String {
+        self.tool_names
+            .iter()
+            .find(|(_, name)| *name == sent)
+            .map_or(sent, |(claude, _)| claude)
+            .to_string()
+    }
 }
 
 pub const OPENCODE_GO: ChatUpstream = ChatUpstream {
     name: "OpenCode Go",
     slug: "opencode",
+    tool_names: &[],
+};
+
+pub const OPENCODE_ZEN: ChatUpstream = ChatUpstream {
+    name: "OpenCode Zen",
+    slug: "opencode-zen",
+    tool_names: &[],
+};
+
+/// OpenCode Zen after Claude Code's `Read` went out as OpenCode's `read`.
+pub const OPENCODE_ZEN_READ: ChatUpstream = ChatUpstream {
+    tool_names: &[("Read", "read")],
+    ..OPENCODE_ZEN
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -774,7 +800,7 @@ impl TranslationState {
                 (
                     slot.block_index,
                     slot.downstream_id.clone(),
-                    slot.name.clone(),
+                    self.upstream.claude_tool_name(&slot.name),
                     slot.args.clone(),
                 )
             };

@@ -153,6 +153,16 @@ impl OpenCodeClient {
         Self::with_key_source(base_url, move || api_key.clone())
     }
 
+    /// This client, sending no key. OpenCode Zen's free tier needs none and
+    /// refuses a stale one with "Invalid credential".
+    pub fn anonymous(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            base_url: self.base_url.clone(),
+            api_key: Box::new(|| None),
+        }
+    }
+
     /// A client that reads its key from `api_key` on every request.
     pub fn with_key_source(
         base_url: String,

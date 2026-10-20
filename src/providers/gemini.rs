@@ -123,7 +123,7 @@ impl GeminiProvider {
             monitor.model_resolved(&ctx.req_id, &resolved);
             monitor.upstream_started(&ctx.req_id);
         }
-        let translated = match google::prepare_request(&body) {
+        let translated = match google::prepare_request(&body, google::ToolSchemas::JsonSchema) {
             Ok(translated) => translated,
             Err(err) => {
                 return json_error(
@@ -250,13 +250,14 @@ impl Provider for GeminiProvider {
             monitor.model_resolved(&ctx.req_id, &resolved);
             monitor.upstream_started(&ctx.req_id);
         }
-        let translated = google::prepare_request(&body).map_err(|err| {
-            ProviderError::new(
-                StatusCode::BAD_REQUEST,
-                ProviderErrorKind::InvalidRequest,
-                err.to_string(),
-            )
-        })?;
+        let translated =
+            google::prepare_request(&body, google::ToolSchemas::JsonSchema).map_err(|err| {
+                ProviderError::new(
+                    StatusCode::BAD_REQUEST,
+                    ProviderErrorKind::InvalidRequest,
+                    err.to_string(),
+                )
+            })?;
         let upstream = client
             .post_google(
                 &resolved,

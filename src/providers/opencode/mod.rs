@@ -106,19 +106,52 @@ impl OpenCodeProvider {
         }
     }
 
+    /// Claude Code's betas, for Zen's Claude models: their bodies carry the
+    /// fields those betas switch on, and the OpenCode CLI sends Zen's Messages
+    /// endpoint an `anthropic-beta` header too.
+    fn anthropic_beta<'a>(&self, body: &'a MessagesRequest) -> Option<&'a str> {
+        self.zen.then_some(body.anthropic_beta.as_deref()).flatten()
+    }
+
+    /// OpenCode Zen's free models take no key, and refuse a stale one.
+    fn client_for(&self, model_id: &str) -> Result<Arc<OpenCodeClient>, String> {
+        let client = self.client()?;
+        Ok(if self.zen && model::is_zen_free_model(model_id) {
+            Arc::new(client.anonymous())
+        } else {
+            client
+        })
+    }
+
+    fn prepare_chat(
+        &self,
+        body: &mut MessagesRequest,
+        model_id: &str,
+    ) -> anyhow::Result<(chat::ChatRequest, chat::ChatUpstream)> {
+        let upstream = if !self.zen {
+            chat::OPENCODE_GO
+        } else if model::is_zen_free_model(model_id) && offer_opencode_read(body) {
+            chat::OPENCODE_ZEN_READ
+        } else {
+            chat::OPENCODE_ZEN
+        };
+        Ok((chat::prepare_request(body, model_id)?, upstream))
+    }
+
     async fn buffered_messages_response(
         &self,
-        body: MessagesRequest,
+        mut body: MessagesRequest,
         ctx: RequestContext,
     ) -> Response {
-        let requested = body.model.as_deref().unwrap_or_default();
+        let requested_model = body.model.clone().unwrap_or_default();
+        let requested = requested_model.as_str();
         let Some(spec) = self.resolve_spec(requested) else {
             return unsupported_model(requested);
         };
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, spec.id.as_str());
         }
-        let client = match self.client() {
+        let client = match self.client_for(&spec.id) {
             Ok(client) => client,
             Err(error) => return invalid_configuration_response(error),
         };
@@ -127,8 +160,8 @@ impl OpenCodeProvider {
 
         let value = match spec.endpoint {
             EndpointKind::ChatCompletions => {
-                let translated = match chat::prepare_request(&body, &spec.id) {
-                    Ok(translated) => translated,
+                let (translated, chat_upstream) = match self.prepare_chat(&mut body, &spec.id) {
+                    Ok(prepared) => prepared,
                     Err(error) => return invalid_request_response(error),
                 };
                 mark_upstream_started(&ctx);
@@ -154,12 +187,12 @@ impl OpenCodeProvider {
                     Err(error) => return map_error(error),
                 };
                 capture_buffered_upstream(&ctx, &bytes, "sse");
-                match chat::accumulate_response(chat::OPENCODE_GO, &bytes, &message_id, requested) {
+                match chat::accumulate_response(chat_upstream, &bytes, &message_id, requested) {
                     Ok(value) => value,
                     Err(error) => {
                         return upstream_error::translation_error(
                             error,
-                            "OpenCode Go response translation failed",
+                            &format!("{} response translation failed", self.label()),
                         )
                         .response();
                     }
@@ -181,7 +214,7 @@ impl OpenCodeProvider {
                         self.slug(),
                         self.label(),
                         require_key,
-                        None,
+                        self.anthropic_beta(&body),
                     )
                     .await
                 {
@@ -233,10 +266,11 @@ impl OpenCodeProvider {
                 }
             }
             EndpointKind::Google => {
-                let translated = match google::prepare_request(&body) {
-                    Ok(translated) => translated,
-                    Err(error) => return invalid_request_response(error),
-                };
+                let translated =
+                    match google::prepare_request(&body, google::ToolSchemas::JsonSchema) {
+                        Ok(translated) => translated,
+                        Err(error) => return invalid_request_response(error),
+                    };
                 mark_upstream_started(&ctx);
                 let upstream = match client
                     .post_google(
@@ -304,7 +338,7 @@ impl Provider for OpenCodeProvider {
     }
 
     fn aggregator(&self) -> bool {
-        !self.zen
+        true
     }
 
     fn cli(&self) -> &dyn CliHandlers {
@@ -352,7 +386,8 @@ impl Provider for OpenCodeProvider {
         ctx: RequestContext,
     ) -> Result<Generation, ProviderError> {
         body.stream = true;
-        let requested = body.model.as_deref().unwrap_or_default();
+        let requested_model = body.model.clone().unwrap_or_default();
+        let requested = requested_model.as_str();
         let spec = self.resolve_spec(requested).ok_or_else(|| {
             ProviderError::new(
                 StatusCode::BAD_REQUEST,
@@ -360,7 +395,7 @@ impl Provider for OpenCodeProvider {
                 format!("Unsupported {} model: {requested}", self.label()),
             )
         })?;
-        let client = self.client().map_err(|error| {
+        let client = self.client_for(&spec.id).map_err(|error| {
             ProviderError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ProviderErrorKind::Api,
@@ -376,7 +411,8 @@ impl Provider for OpenCodeProvider {
         let require_key = self.require_key(&spec.id);
         let body = match spec.endpoint {
             EndpointKind::ChatCompletions => {
-                let translated = chat::prepare_request(&body, &spec.id)
+                let (translated, chat_upstream) = self
+                    .prepare_chat(&mut body, &spec.id)
                     .map_err(invalid_request_provider_error)?;
                 let upstream = client
                     .post_for_provider(
@@ -393,7 +429,7 @@ impl Provider for OpenCodeProvider {
                     .await
                     .map_err(opencode_provider_error)?;
                 chat::stream_body(
-                    chat::OPENCODE_GO,
+                    chat_upstream,
                     upstream.into_stream(),
                     message_id,
                     requested.to_string(),
@@ -415,7 +451,7 @@ impl Provider for OpenCodeProvider {
                         self.slug(),
                         self.label(),
                         require_key,
-                        None,
+                        self.anthropic_beta(&body),
                     )
                     .await
                     .map_err(opencode_provider_error)?;
@@ -455,8 +491,8 @@ impl Provider for OpenCodeProvider {
                 )
             }
             EndpointKind::Google => {
-                let translated =
-                    google::prepare_request(&body).map_err(invalid_request_provider_error)?;
+                let translated = google::prepare_request(&body, google::ToolSchemas::JsonSchema)
+                    .map_err(invalid_request_provider_error)?;
                 let upstream = client
                     .post_google(
                         &spec.id,
@@ -509,6 +545,61 @@ fn opencode_provider_error(error: OpenCodeError) -> ProviderError {
 
 fn map_error(error: OpenCodeError) -> Response {
     opencode_provider_error(error).response()
+}
+
+/// OpenCode Zen's free tier answers only a streamed call whose tools include
+/// OpenCode's own `read`, and every chat call here streams. Claude Code names
+/// that tool `Read`, so it goes out as `read`. A call without it gets a `read`
+/// the model is told not to use, or can't use when the call had no tools.
+/// Returns whether `Read` was renamed, so the model's calls get its name back.
+fn offer_opencode_read(body: &mut MessagesRequest) -> bool {
+    const SENT: &str = "read";
+    const CLAUDE: &str = "Read";
+    let named = |value: &serde_json::Value, name: &str| {
+        value.get("name").and_then(serde_json::Value::as_str) == Some(name)
+    };
+    let tools = body
+        .extra
+        .entry("tools")
+        .or_insert_with(|| serde_json::json!([]));
+    let Some(tools) = tools.as_array_mut() else {
+        return false;
+    };
+    if tools.iter().any(|tool| named(tool, SENT)) {
+        return false;
+    }
+    let Some(read) = tools.iter_mut().find(|tool| named(tool, CLAUDE)) else {
+        let had_tools = !tools.is_empty();
+        tools.push(serde_json::json!({
+            "name": SENT,
+            "description": "Not available in this conversation. Never call it.",
+            "input_schema": {"type": "object", "properties": {}}
+        }));
+        if !had_tools {
+            body.extra
+                .insert("tool_choice".into(), serde_json::json!({"type": "none"}));
+        }
+        return false;
+    };
+    read["name"] = serde_json::json!(SENT);
+    for message in &mut body.messages {
+        let Some(blocks) = message.content.as_array_mut() else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
+                && named(block, CLAUDE)
+            {
+                block["name"] = serde_json::json!(SENT);
+            }
+        }
+    }
+    if let Some(choice) = body.extra.get_mut("tool_choice")
+        && named(choice, CLAUDE)
+    {
+        choice["name"] = serde_json::json!(SENT);
+    }
+    true
 }
 
 fn unsupported_model(requested: &str) -> Response {
@@ -1246,5 +1337,202 @@ mod tests {
             assert_eq!(error.status, status);
             assert_eq!(error.kind, ProviderErrorKind::Permission);
         }
+    }
+
+    type SeenChat = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+    /// What the live free tier checks, measured against OpenCode Zen: a
+    /// streamed call with an `opencode/` user agent, `x-opencode-session`, and
+    /// a tool named `read`. A stale key turns it into "Invalid credential".
+    #[tokio::test]
+    async fn zen_free_models_get_opencodes_read_and_no_key() {
+        async fn capture_chat(
+            State(seen): State<SeenChat>,
+            headers: HeaderMap,
+            Json(body): Json<serde_json::Value>,
+        ) -> Response {
+            let auth = headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            seen.lock().unwrap().push((auth, body));
+            let sse = concat!(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"file_path\\\":\\\"a.txt\\\"}\"}}]}}]}\n\n",
+                "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            ([(http::header::CONTENT_TYPE, "text/event-stream")], sse).into_response()
+        }
+
+        let seen: SeenChat = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/chat/completions", post(capture_chat))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client =
+            OpenCodeClient::new(format!("http://{address}/v1"), Some("stale-key".into())).unwrap();
+        let provider = OpenCodeProvider {
+            client: ClientState::Ready(Arc::new(client)),
+            zen: true,
+        };
+        let request = |model: &str| -> MessagesRequest {
+            serde_json::from_value(json!({
+                "model": model,
+                "stream": false,
+                "messages": [
+                    {"role": "user", "content": "Open a.txt"},
+                    {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "b.txt"}}
+                    ]},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "b"}
+                    ]}
+                ],
+                "tools": [
+                    {"name": "Bash", "input_schema": {"type": "object"}},
+                    {"name": "Read", "input_schema": {"type": "object"}}
+                ],
+                "tool_choice": {"type": "tool", "name": "Read"}
+            }))
+            .unwrap()
+        };
+
+        let free = provider
+            .handle_messages(request("opencode-zen/glm-5.3-flash-free"), context())
+            .await;
+        assert_eq!(free.status(), StatusCode::OK);
+        let free = axum::body::to_bytes(free.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let free: serde_json::Value = serde_json::from_slice(&free).unwrap();
+        // The model called OpenCode's `read`; Claude Code gets its own `Read`.
+        assert_eq!(free["content"][0]["name"], "Read");
+        let paid = provider
+            .handle_messages(request("opencode-zen/glm-5.3"), context())
+            .await;
+        assert_eq!(paid.status(), StatusCode::OK);
+        server.abort();
+
+        let seen = seen.lock().unwrap();
+        let tool_names = |body: &serde_json::Value| {
+            body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let (auth, sent) = &seen[0];
+        assert!(auth.is_empty(), "the free tier got a key: {auth}");
+        assert_eq!(tool_names(sent), ["Bash", "read"]);
+        assert_eq!(
+            sent["tool_choice"],
+            json!({"type": "function", "function": {"name": "read"}})
+        );
+        let earlier_call = sent["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|message| message.get("tool_calls"))
+            .unwrap();
+        assert_eq!(earlier_call[0]["function"]["name"], "read");
+        // Paid models keep the key and Claude Code's names.
+        let (auth, sent) = &seen[1];
+        assert_eq!(auth, "Bearer stale-key");
+        assert_eq!(tool_names(sent), ["Bash", "Read"]);
+    }
+
+    #[tokio::test]
+    async fn zen_claude_models_get_claude_codes_betas() {
+        async fn capture_beta(
+            State(seen): State<Arc<Mutex<Vec<String>>>>,
+            headers: HeaderMap,
+            Json(_body): Json<serde_json::Value>,
+        ) -> Response {
+            seen.lock().unwrap().push(
+                headers
+                    .get("anthropic-beta")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+            Json(json!({
+                "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1}
+            }))
+            .into_response()
+        }
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/messages", post(capture_beta))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client =
+            || OpenCodeClient::new(format!("http://{address}/v1"), Some("key".into())).unwrap();
+        let zen = OpenCodeProvider {
+            client: ClientState::Ready(Arc::new(client())),
+            zen: true,
+        };
+        let go = OpenCodeProvider::with_client(client());
+        let request = |model: &str| {
+            let mut body: MessagesRequest = serde_json::from_value(json!({
+                "model": model,
+                "stream": false,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap();
+            body.anthropic_beta = Some("oauth-2025-04-20,context-management-2025-06-27".into());
+            body
+        };
+
+        let zen_reply = zen
+            .handle_messages(request("opencode-zen/claude-haiku-5-5"), context())
+            .await;
+        assert_eq!(zen_reply.status(), StatusCode::OK);
+        let go_reply = go
+            .handle_messages(request("opencode-go/minimax-m3"), context())
+            .await;
+        assert_eq!(go_reply.status(), StatusCode::OK);
+        server.abort();
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            ["context-management-2025-06-27", ""]
+        );
+    }
+
+    #[test]
+    fn calls_without_claude_codes_read_still_offer_opencodes() {
+        let request = |extra: serde_json::Value| -> MessagesRequest {
+            let mut body = json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(body).unwrap()
+        };
+
+        // No tools at all: a `read` the model can't call.
+        let mut bare = request(json!({}));
+        assert!(!offer_opencode_read(&mut bare));
+        assert_eq!(bare.extra["tools"][0]["name"], "read");
+        assert_eq!(bare.extra["tool_choice"], json!({"type": "none"}));
+
+        // Tools without `Read`: a `read` it is told not to use.
+        let mut other = request(json!({"tools": [{"name": "Bash", "input_schema": {}}]}));
+        assert!(!offer_opencode_read(&mut other));
+        assert_eq!(other.extra["tools"][1]["name"], "read");
+        assert!(other.extra.get("tool_choice").is_none());
+
+        // Already OpenCode's own `read`: left as it is.
+        let mut native = request(json!({"tools": [{"name": "read", "input_schema": {}}]}));
+        assert!(!offer_opencode_read(&mut native));
+        assert_eq!(native.extra["tools"].as_array().unwrap().len(), 1);
     }
 }
