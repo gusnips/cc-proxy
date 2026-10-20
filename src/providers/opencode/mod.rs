@@ -233,10 +233,11 @@ impl OpenCodeProvider {
                 }
             }
             EndpointKind::Google => {
-                let translated = match google::prepare_request(&body) {
-                    Ok(translated) => translated,
-                    Err(error) => return invalid_request_response(error),
-                };
+                let translated =
+                    match google::prepare_request(&body, google::ToolSchemas::JsonSchema) {
+                        Ok(translated) => translated,
+                        Err(error) => return invalid_request_response(error),
+                    };
                 mark_upstream_started(&ctx);
                 let upstream = match client
                     .post_google(
@@ -455,8 +456,8 @@ impl Provider for OpenCodeProvider {
                 )
             }
             EndpointKind::Google => {
-                let translated =
-                    google::prepare_request(&body).map_err(invalid_request_provider_error)?;
+                let translated = google::prepare_request(&body, google::ToolSchemas::JsonSchema)
+                    .map_err(invalid_request_provider_error)?;
                 let upstream = client
                     .post_google(
                         &spec.id,

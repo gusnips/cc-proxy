@@ -371,7 +371,7 @@ fn build_antigravity_envelope(
     project_id: &str,
     session_id: Option<&str>,
 ) -> Result<Value> {
-    let mut inner = google::prepare_request(body)?;
+    let mut inner = google::prepare_request(body, google::ToolSchemas::OpenApi)?;
     if let Some(parts) = inner
         .pointer_mut("/systemInstruction/parts")
         .and_then(Value::as_array_mut)

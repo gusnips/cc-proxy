@@ -1,6 +1,6 @@
 //! Google Gemini `v1beta` (`generateContent` / `streamGenerateContent?alt=sse`)
-//! wire translator. Shared by OpenCode (`opencode`, `opencode-zen`) and the
-//! native `gemini` provider.
+//! wire translator. Shared by OpenCode (`opencode`, `opencode-zen`), the
+//! native `gemini` provider and `antigravity`.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -29,7 +29,18 @@ fn emit_sse(out: &mut Vec<u8>, event: &str, payload: &Value) {
     out.extend(encode_sse_event(Some(event), &data));
 }
 
-pub fn prepare_request(body: &MessagesRequest) -> anyhow::Result<Value> {
+/// The field a Google backend reads tool schemas from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSchemas {
+    /// `parametersJsonSchema`, standard JSON Schema: the Gemini API and the
+    /// OpenCode gateways in front of it.
+    JsonSchema,
+    /// `parameters`, Google's OpenAPI subset: Cloud Code Assist (Antigravity),
+    /// which turns it into Claude's `input_schema`.
+    OpenApi,
+}
+
+pub fn prepare_request(body: &MessagesRequest, schemas: ToolSchemas) -> anyhow::Result<Value> {
     let mut tool_names_by_id: HashMap<String, String> = HashMap::new();
     for message in &body.messages {
         for block in normalize_content(&message.content, json!({})) {
@@ -139,7 +150,13 @@ pub fn prepare_request(body: &MessagesRequest) -> anyhow::Result<Value> {
                     decl.insert("description".to_string(), Value::String(desc.to_string()));
                 }
                 if let Some(schema) = tool.get("input_schema") {
-                    decl.insert("parameters".to_string(), clean_json_schema(schema));
+                    let (field, schema) = match schemas {
+                        ToolSchemas::JsonSchema => {
+                            ("parametersJsonSchema", gemini_json_schema(schema))
+                        }
+                        ToolSchemas::OpenApi => ("parameters", clean_json_schema(schema)),
+                    };
+                    decl.insert(field.to_string(), schema);
                 }
                 Some(Value::Object(decl))
             })
@@ -187,9 +204,166 @@ fn flatten_tool_result(content: &Value) -> String {
     }
 }
 
-/// Sanitizes a JSON Schema to the exact subset Google's `v1beta` and
-/// Antigravity `functionDeclarations` accept (`type`, `nullable`,
-/// `description`, `format`, `enum`, `properties`, `items`, `required`, `anyOf`).
+/// Keys whose value maps names to schemas.
+const SCHEMA_MAPS: [&str; 6] = [
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+    "dependencies",
+];
+/// Keys whose value is literal data, never a schema to rewrite.
+const SCHEMA_VALUES: [&str; 5] = ["const", "default", "enum", "examples", "dependentRequired"];
+
+/// A tool schema for `parametersJsonSchema`. Gemini takes standard JSON
+/// Schema there, arrays without `items` included, and rejects only a few
+/// shapes that published tool schemas often contain. Those are rewritten the
+/// way opencode's `GeminiJsonSchema.normalize` does, and the rest goes as is.
+fn gemini_json_schema(schema: &Value) -> Value {
+    let Value::Object(mut root) = normalize_json_schema(schema) else {
+        return json!({ "type": "object" });
+    };
+    // Function arguments are always an object.
+    root.entry("type").or_insert_with(|| json!("object"));
+    for defs in ["$defs", "definitions"] {
+        if let Some(Value::Object(entries)) = root.get_mut(defs) {
+            for (name, def) in entries.iter_mut() {
+                *def = cut_ref_loops(def, &format!("#/{defs}/{name}"), false);
+            }
+        }
+    }
+    cut_ref_loops(&Value::Object(root), "#", false)
+}
+
+fn normalize_json_schema(schema: &Value) -> Value {
+    let node = match schema {
+        Value::Array(items) => {
+            return Value::Array(items.iter().map(normalize_json_schema).collect());
+        }
+        Value::Object(node) => node,
+        other => return other.clone(),
+    };
+    let properties = node.get("properties").and_then(Value::as_object);
+    let tuple = node.get("items").is_some_and(Value::is_array);
+    let mut out = Map::new();
+    for (key, value) in node {
+        match (key.as_str(), value) {
+            (key, _) if SCHEMA_VALUES.contains(&key) => {
+                out.insert(key.to_string(), value.clone());
+            }
+            (key, Value::Object(children)) if SCHEMA_MAPS.contains(&key) => {
+                let children = children
+                    .iter()
+                    .map(|(name, child)| (name.clone(), normalize_json_schema(child)))
+                    .collect();
+                out.insert(key.to_string(), Value::Object(children));
+            }
+            // `required` may only name declared properties. Gemini refuses a
+            // name it can't find, even when there is no `properties` at all.
+            ("required", Value::Array(names)) => {
+                let declared = names
+                    .iter()
+                    .filter(|name| {
+                        name.as_str()
+                            .is_some_and(|name| properties.is_some_and(|p| p.contains_key(name)))
+                    })
+                    .cloned()
+                    .collect();
+                out.insert(key.clone(), Value::Array(declared));
+            }
+            // Draft-04 boolean exclusive bounds become the numeric form.
+            ("exclusiveMinimum" | "exclusiveMaximum", Value::Bool(exclusive)) => {
+                let bound = if key == "exclusiveMinimum" {
+                    "minimum"
+                } else {
+                    "maximum"
+                };
+                if let Some(limit) = node
+                    .get(bound)
+                    .filter(|limit| *exclusive && limit.is_number())
+                {
+                    out.insert(key.clone(), limit.clone());
+                }
+            }
+            ("minimum", _) if node.get("exclusiveMinimum") == Some(&Value::Bool(true)) => {}
+            ("maximum", _) if node.get("exclusiveMaximum") == Some(&Value::Bool(true)) => {}
+            // Draft-07 tuples (`items` array plus `additionalItems`) are
+            // `prefixItems` plus `items` in 2020-12.
+            ("items", Value::Array(_)) => {
+                out.insert("prefixItems".to_string(), normalize_json_schema(value));
+            }
+            ("additionalItems", _) if tuple => {
+                out.insert("items".to_string(), normalize_json_schema(value));
+            }
+            _ => {
+                out.insert(key.clone(), normalize_json_schema(value));
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+/// Gemini takes a recursive `$ref` only when the loop passes through an
+/// optional property or an `items` that may be empty. Any other
+/// self-reference to `target` becomes an unconstrained schema.
+fn cut_ref_loops(schema: &Value, target: &str, safe: bool) -> Value {
+    let node = match schema {
+        Value::Array(items) => {
+            return Value::Array(
+                items
+                    .iter()
+                    .map(|item| cut_ref_loops(item, target, safe))
+                    .collect(),
+            );
+        }
+        Value::Object(node) => node,
+        other => return other.clone(),
+    };
+    if !safe && node.get("$ref").and_then(Value::as_str) == Some(target) {
+        return json!({});
+    }
+    let required: Vec<&str> = node
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let may_be_empty = !node
+        .get("minItems")
+        .and_then(Value::as_f64)
+        .is_some_and(|min| min > 0.0);
+    let out = node
+        .iter()
+        .map(|(key, value)| {
+            let value = match (key.as_str(), value) {
+                (key, _) if SCHEMA_VALUES.contains(&key) => value.clone(),
+                ("items", _) => cut_ref_loops(value, target, safe || may_be_empty),
+                ("properties", Value::Object(children)) => Value::Object(
+                    children
+                        .iter()
+                        .map(|(name, child)| {
+                            let optional = !required.contains(&name.as_str());
+                            (name.clone(), cut_ref_loops(child, target, safe || optional))
+                        })
+                        .collect(),
+                ),
+                (key, Value::Object(children)) if SCHEMA_MAPS.contains(&key) => Value::Object(
+                    children
+                        .iter()
+                        .map(|(name, child)| (name.clone(), cut_ref_loops(child, target, safe)))
+                        .collect(),
+                ),
+                _ => cut_ref_loops(value, target, safe),
+            };
+            (key.clone(), value)
+        })
+        .collect();
+    Value::Object(out)
+}
+
+/// Sanitizes a JSON Schema to the subset Google's `parameters` field accepts
+/// (`type`, `nullable`, `description`, `format`, `enum`, `properties`,
+/// `items`, `required`, `anyOf`). Only Cloud Code Assist gets this dialect.
 fn clean_json_schema(value: &Value) -> Value {
     let Some(map) = value.as_object() else {
         return json!({ "type": "object" });
@@ -310,6 +484,11 @@ fn clean_json_schema(value: &Value) -> Value {
     }
     if !out.contains_key("type") && !out.contains_key("anyOf") {
         out.insert("type".to_string(), Value::String("string".to_string()));
+    }
+    // `parameters` rejects an array without `items` for the whole request, so
+    // a string item keeps it valid, as opencodex's `completeArrayItems` does.
+    if out.get("type").and_then(Value::as_str) == Some("array") && !out.contains_key("items") {
+        out.insert("items".to_string(), json!({ "type": "string" }));
     }
     Value::Object(out)
 }
@@ -821,15 +1000,20 @@ mod tests {
             ]
         }))
         .unwrap();
-        let prepared = prepare_request(&req).unwrap();
+        let prepared = prepare_request(&req, ToolSchemas::JsonSchema).unwrap();
         assert_eq!(
             prepared["systemInstruction"]["parts"][0]["text"],
             "You are helpful."
         );
         assert_eq!(prepared["contents"][0]["parts"][0]["text"], "Hi");
-        let params = &prepared["tools"][0]["functionDeclarations"][0]["parameters"];
-        assert!(params.get("$schema").is_none());
-        assert!(params.get("additionalProperties").is_none());
+        // Gemini takes standard JSON Schema in `parametersJsonSchema`, so the
+        // tool's schema goes as Claude Code wrote it.
+        let declaration = &prepared["tools"][0]["functionDeclarations"][0];
+        assert!(declaration.get("parameters").is_none());
+        assert_eq!(
+            declaration["parametersJsonSchema"],
+            req.extra["tools"][0]["input_schema"]
+        );
 
         let upstream = serde_json::to_vec(&json!({
             "candidates": [{
@@ -850,5 +1034,125 @@ mod tests {
         assert_eq!(acc["usage"]["output_tokens"], 5);
         assert_eq!(acc["content"][0]["text"], "let me run bash");
         assert_eq!(acc["content"][1]["name"], "bash");
+    }
+
+    fn declared_schema(schema: Value, schemas: ToolSchemas) -> Value {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gemini-4-argon",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{"name": "probe", "input_schema": schema}]
+        }))
+        .unwrap();
+        let prepared = prepare_request(&req, schemas).unwrap();
+        let field = match schemas {
+            ToolSchemas::JsonSchema => "parametersJsonSchema",
+            ToolSchemas::OpenApi => "parameters",
+        };
+        prepared["tools"][0]["functionDeclarations"][0][field].clone()
+    }
+
+    /// Each rewrite matches a 400 the Gemini API returned for the shape as
+    /// written. Everything it accepted goes through unchanged.
+    #[test]
+    fn json_schema_tools_rewrite_only_what_gemini_rejects() {
+        let schema = declared_schema(
+            json!({
+                "properties": {
+                    "batch": {"type": "array", "description": "Operations"},
+                    "items": {"type": ["array", "null"]},
+                    "pair": {
+                        "type": "array",
+                        "items": [{"type": "string"}, {"type": "number"}],
+                        "additionalItems": false
+                    },
+                    "n": {"type": "number", "minimum": 0, "exclusiveMinimum": true},
+                    "m": {"type": "number", "maximum": 9, "exclusiveMaximum": false},
+                    "choice": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "settings": {"type": "object", "required": ["ghost"]},
+                    "child": {"$ref": "#"},
+                    "children": {"type": "array", "items": {"$ref": "#"}},
+                    "picked": {"default": {"items": [1, 2]}, "enum": [{"items": [3]}]}
+                },
+                "required": ["batch", "child", "ghost"],
+                "$defs": {
+                    "Node": {
+                        "type": "object",
+                        "properties": {
+                            "next": {"$ref": "#/$defs/Node"},
+                            "parent": {"$ref": "#/$defs/Node"}
+                        },
+                        "required": ["next"]
+                    }
+                }
+            }),
+            ToolSchemas::JsonSchema,
+        );
+        let properties = &schema["properties"];
+        assert_eq!(schema["type"], "object");
+        // Arrays without `items` are valid JSON Schema, and Gemini takes them.
+        assert_eq!(
+            properties["batch"],
+            json!({"type": "array", "description": "Operations"})
+        );
+        assert_eq!(properties["items"], json!({"type": ["array", "null"]}));
+        assert_eq!(
+            properties["pair"],
+            json!({"type": "array", "prefixItems": [{"type": "string"}, {"type": "number"}], "items": false})
+        );
+        assert_eq!(
+            properties["n"],
+            json!({"type": "number", "exclusiveMinimum": 0})
+        );
+        assert_eq!(properties["m"], json!({"type": "number", "maximum": 9}));
+        assert_eq!(
+            properties["choice"],
+            json!({"anyOf": [{"type": "string"}, {"type": "null"}]})
+        );
+        assert_eq!(schema["required"], json!(["batch", "child"]));
+        assert_eq!(
+            properties["settings"],
+            json!({"type": "object", "required": []})
+        );
+        // A required loop is cut, an optional one or one through `items` stays.
+        assert_eq!(properties["child"], json!({}));
+        assert_eq!(properties["children"]["items"], json!({"$ref": "#"}));
+        let node = &schema["$defs"]["Node"]["properties"];
+        assert_eq!(node["next"], json!({}));
+        assert_eq!(node["parent"], json!({"$ref": "#/$defs/Node"}));
+        // Literal values are data, not schemas.
+        assert_eq!(
+            properties["picked"],
+            json!({"default": {"items": [1, 2]}, "enum": [{"items": [3]}]})
+        );
+    }
+
+    #[test]
+    fn parameters_give_every_array_items() {
+        let schema = declared_schema(
+            json!({
+                "type": "object",
+                "properties": {
+                    "batch": {"type": "array"},
+                    "items": {"type": ["array", "null"]},
+                    "nested": {"type": "array", "items": {"type": "array"}},
+                    "tags": {"type": "array", "items": {"type": "integer"}}
+                }
+            }),
+            ToolSchemas::OpenApi,
+        );
+        let properties = &schema["properties"];
+        assert_eq!(
+            properties["batch"],
+            json!({"type": "array", "items": {"type": "string"}})
+        );
+        assert_eq!(
+            properties["items"],
+            json!({"type": "array", "nullable": true, "items": {"type": "string"}})
+        );
+        assert_eq!(
+            properties["nested"]["items"],
+            json!({"type": "array", "items": {"type": "string"}})
+        );
+        assert_eq!(properties["tags"]["items"], json!({"type": "integer"}));
     }
 }
