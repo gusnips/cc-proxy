@@ -288,6 +288,10 @@ pub fn resolve(registry: &Registry, route: &Route, model: &str) -> Result<String
     if let Some(chosen) = route.tier(provider, tier) {
         return Ok(chosen.to_string());
     }
+    if provider == "anthropic" && model.starts_with("claude-") && model != format!("claude-{tier}")
+    {
+        return Ok(format!("anthropic/{model}"));
+    }
     match for_provider(registry, provider).remove(tier) {
         Some(guess) => Ok(guess.model),
         None => Err(format!(
@@ -350,7 +354,14 @@ pub fn model_label(
         }
         "copilot" => resolved.strip_prefix(copilot::MODEL_PREFIX)?.to_string(),
         "glm" => normalize_incoming_model(&resolved),
-        _ => return None,
+        other => {
+            let prefix = format!("{other}/");
+            let normalized = normalize_incoming_model(&resolved);
+            normalized
+                .strip_prefix(&prefix)
+                .unwrap_or(&normalized)
+                .to_string()
+        }
     };
     if upstream.is_empty() {
         return None;

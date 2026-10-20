@@ -132,7 +132,7 @@ impl Provider for KimiProvider {
         vec![KIMI_DEFAULT_MODEL.to_string()]
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         &KIMI_CLI
     }
 

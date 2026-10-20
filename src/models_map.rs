@@ -4,7 +4,7 @@
 use anyhow::{Result, bail};
 
 use crate::registry::Registry;
-use crate::route::PROVIDERS;
+use crate::route::routable_providers;
 use crate::tiers::{self, Basis, TIERS};
 use crate::{config, config_keys, ui};
 
@@ -14,9 +14,9 @@ pub fn run(
     reset: bool,
     provider: Option<&str>,
 ) -> Result<()> {
-    let provider = provider_arg(provider)?;
-    let tier = tier.map(tier_arg).transpose()?;
     let registry = Registry::new();
+    let provider = provider_arg(&registry, provider)?;
+    let tier = tier.map(tier_arg).transpose()?;
     match (tier, model, reset) {
         (Some(tier), Some(model), false) => set(&registry, provider, tier, model)?,
         (tier, None, true) => reset_choice(provider, tier)?,
@@ -33,17 +33,18 @@ pub fn run(
     Ok(())
 }
 
-fn provider_arg(asked: Option<&str>) -> Result<&'static str> {
+fn provider_arg(registry: &Registry, asked: Option<&str>) -> Result<&'static str> {
     let remembered = config::route().provider;
     let asked = asked.map(str::to_ascii_lowercase).or(remembered);
     let Some(asked) = asked else {
         bail!("Name a provider with `--provider`, or run `cc-proxy start` to choose one first.");
     };
-    match PROVIDERS.iter().find(|provider| **provider == asked) {
-        Some(provider) => Ok(provider),
+    let providers = routable_providers(registry);
+    match providers.iter().find(|provider| **provider == asked) {
+        Some(&provider) => Ok(provider),
         None => bail!(
             "`{asked}` isn't a provider cc-proxy can route to. Use one of: {}.",
-            PROVIDERS.join(", ")
+            providers.join(", ")
         ),
     }
 }

@@ -54,7 +54,7 @@ pub trait Provider: Send + Sync {
         false
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers;
+    fn cli(&self) -> &dyn CliHandlers;
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response;
 
     async fn handle_messages_with_conversation_identity(
@@ -229,6 +229,19 @@ pub trait CliHandlers: Send + Sync {
     fn device(&self) -> Result<()>;
     fn status(&self) -> Result<()>;
     fn logout(&self) -> Result<()>;
+}
+
+pub fn intern_provider_name(name: &str) -> &'static str {
+    static INTERNED: once_cell::sync::Lazy<
+        std::sync::Mutex<std::collections::HashSet<&'static str>>,
+    > = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut guard = INTERNED.lock().unwrap();
+    if let Some(&existing) = guard.get(name) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    guard.insert(leaked);
+    leaked
 }
 
 #[derive(Debug, Clone)]

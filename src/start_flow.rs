@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::provider::AuthState;
 use crate::registry::Registry;
-use crate::route::{CLAUDE, PROVIDERS};
+use crate::route::{CLAUDE, routable_providers};
 use crate::tiers::{self, Basis};
 use crate::ui::{self, Mood};
 use crate::{config, config_keys, prompt};
@@ -114,11 +114,12 @@ fn pick_named(registry: &Registry, asked: &str) -> Result<Pick> {
     if asked == CLAUDE {
         return Ok(Pick::Claude);
     }
-    let Some(provider) = PROVIDERS.iter().find(|provider| **provider == asked) else {
+    let providers = routable_providers(registry);
+    let Some(&provider) = providers.iter().find(|provider| **provider == asked) else {
         bail!(
             "cc-proxy can't send Claude Code to `{asked}`. Use one of: {}, or `{CLAUDE}` for your \
              Claude subscription.",
-            PROVIDERS.join(", ")
+            providers.join(", ")
         );
     };
     if is_signed_in(registry, provider) {
@@ -133,8 +134,10 @@ fn pick_named(registry: &Registry, asked: &str) -> Result<Pick> {
 }
 
 fn pick_for_start(registry: &Registry) -> Result<Pick> {
-    let signed_in: Vec<&'static str> = PROVIDERS
-        .into_iter()
+    let providers = routable_providers(registry);
+    let signed_in: Vec<&'static str> = providers
+        .iter()
+        .copied()
         .filter(|provider| is_signed_in(registry, provider))
         .collect();
     let remembered = config::route().provider;
@@ -153,7 +156,7 @@ fn pick_for_start(registry: &Registry) -> Result<Pick> {
             Ok(Pick::Provider(only))
         }
         [] => {
-            let mut options: Vec<String> = PROVIDERS
+            let mut options: Vec<String> = providers
                 .iter()
                 .map(|provider| ui::provider_name(provider).to_string())
                 .collect();
@@ -163,7 +166,7 @@ fn pick_for_start(registry: &Registry) -> Result<Pick> {
                 &options,
                 0,
             )?;
-            let Some(provider) = PROVIDERS.get(answer) else {
+            let Some(&provider) = providers.get(answer) else {
                 return Ok(Pick::Claude);
             };
             sign_in(registry, provider)?;
@@ -196,10 +199,10 @@ fn is_signed_in(registry: &Registry, provider: &str) -> bool {
 
 fn sign_in(registry: &Registry, provider: &str) -> Result<()> {
     let name = ui::provider_name(provider);
-    let cli = registry
+    let handler = registry
         .provider(provider)
-        .with_context(|| format!("{name} isn't a known provider"))?
-        .cli();
+        .with_context(|| format!("{name} isn't a known provider"))?;
+    let cli = handler.cli();
     cli.login()?;
     if cli.auth_state() == AuthState::Missing {
         bail!(

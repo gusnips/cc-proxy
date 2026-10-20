@@ -69,6 +69,8 @@ impl Registry {
             "copilot".into(),
             crate::providers::copilot::advertised_models(),
         );
+        let anthropic = Arc::new(crate::providers::custom::CustomProvider::new_anthropic());
+        models.insert("anthropic".into(), anthropic.supported_models());
 
         let mut handlers = BTreeMap::new();
         for (name, entries) in &models {
@@ -80,9 +82,22 @@ impl Registry {
                 "opencode" => Arc::new(crate::providers::opencode::OpenCodeProvider::new()),
                 "glm" => Arc::new(crate::providers::glm::GlmProvider::new()),
                 "copilot" => Arc::new(crate::providers::copilot::CopilotProvider::new()),
+                "anthropic" => anthropic.clone(),
                 _ => Arc::new(PlaceholderProvider::new(name, entries.clone())),
             };
             handlers.insert(name.clone(), handler);
+        }
+
+        for (name, cfg) in crate::config::custom_providers() {
+            let key = name.trim().to_ascii_lowercase();
+            if key.is_empty() || handlers.contains_key(&key) {
+                continue;
+            }
+            let provider = Arc::new(crate::providers::custom::CustomProvider::from_config(
+                &key, cfg,
+            ));
+            models.insert(key.clone(), provider.supported_models());
+            handlers.insert(key, provider);
         }
 
         Self { models, handlers }
@@ -183,8 +198,20 @@ impl Registry {
         if normalized.starts_with(crate::providers::opencode::model::MODEL_PREFIX) {
             return self.handlers.get("opencode").cloned();
         }
+        if let Some(rest) = normalized.strip_prefix("anthropic/")
+            && !rest.is_empty()
+        {
+            return self.handlers.get("anthropic").cloned();
+        }
         if is_cursor_model(&normalized) {
             return self.handlers.get("cursor").cloned();
+        }
+        if let Some((prefix, rest)) = normalized.split_once('/')
+            && !rest.is_empty()
+            && prefix != "opencode"
+            && let Some(handler) = self.handlers.get(prefix)
+        {
+            return Some(handler.clone());
         }
 
         // Explicit priority, not map order: a bare ID owned by several
@@ -197,6 +224,23 @@ impl Registry {
                 .models
                 .get(name)
                 .is_some_and(|entries| entries.iter().any(|candidate| candidate == &normalized))
+            {
+                return self.handlers.get(name).cloned();
+            }
+        }
+        for (name, entries) in &self.models {
+            if ![
+                "codex",
+                "kimi",
+                "cursor",
+                "grok",
+                "glm",
+                "opencode",
+                "copilot",
+                "anthropic",
+            ]
+            .contains(&name.as_str())
+                && entries.iter().any(|candidate| candidate == &normalized)
             {
                 return self.handlers.get(name).cloned();
             }
@@ -305,7 +349,7 @@ impl Provider for PlaceholderProvider {
         self.models.clone()
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         match self.name {
             "codex" => &CODEX_CLI,
             "kimi" => &KIMI_CLI,

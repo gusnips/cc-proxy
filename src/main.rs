@@ -107,6 +107,11 @@ enum Commands {
         #[command(subcommand)]
         command: Option<cc_proxy::provider::AuthCommand>,
     },
+    /// Add, remove, or list custom providers (OpenAI, Responses, or Anthropic compatible)
+    Provider {
+        #[command(subcommand)]
+        command: Option<ProviderCommand>,
+    },
     /// Show how much of your Codex, Kimi and OpenCode Go plans you have used
     Usage {
         /// Show only this provider; leave it out to see all of them
@@ -142,6 +147,33 @@ enum ServiceCommand {
     },
     /// Validate the config file and ask a running service to reload it
     Reload,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum ProviderCommand {
+    /// Add or update a custom provider endpoint in config.json
+    Add {
+        /// Short name for the provider (e.g. openrouter, ollama)
+        name: String,
+        /// Base URL for the endpoint (e.g. https://openrouter.ai/api/v1)
+        base_url: String,
+        /// Wire protocol: openai (chat/completions), responses, or anthropic (messages)
+        #[arg(long, value_enum, default_value_t = cc_proxy::config::CustomFormat::OpenAi)]
+        format: cc_proxy::config::CustomFormat,
+        /// Model IDs this provider serves (repeat --model for multiple)
+        #[arg(long = "model", short = 'm')]
+        models: Vec<String>,
+        /// Environment variable that holds the API key
+        #[arg(long)]
+        api_key_env: Option<String>,
+    },
+    /// Remove a custom provider from config.json
+    Remove {
+        /// Name of the custom provider to remove
+        name: String,
+    },
+    /// List built-in and custom providers
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -301,6 +333,27 @@ fn run() -> Result<()> {
             run_service_command(command.unwrap_or(ServiceCommand::Status))
         }
         Commands::Auth { command } => run_auth_cli(command),
+        Commands::Provider { command } => match command.unwrap_or(ProviderCommand::List) {
+            ProviderCommand::Add {
+                name,
+                base_url,
+                format,
+                models,
+                api_key_env,
+            } => cc_proxy::providers::custom::run_provider_add(
+                &name,
+                &base_url,
+                format,
+                models,
+                api_key_env,
+            ),
+            ProviderCommand::Remove { name } => {
+                cc_proxy::providers::custom::run_provider_remove(&name)
+            }
+            ProviderCommand::List => {
+                cc_proxy::providers::custom::run_provider_list(&Registry::new())
+            }
+        },
         Commands::Usage { provider, json } => match cc_proxy::usage::run(provider, json)? {
             0 => Ok(()),
             code => std::process::exit(code),
@@ -917,13 +970,26 @@ fn run_auth_cli(command: Option<cc_proxy::provider::AuthCommand>) -> Result<()> 
 fn print_models(registry: &Registry, full: bool) {
     let grouped = registry.grouped_models();
     let styled = ui::styled(&std::io::stdout());
-    for provider in [
-        "codex", "kimi", "grok", "opencode", "copilot", "cursor", "glm",
-    ] {
-        let Some(models) = grouped.get(provider) else {
+    let builtins = [
+        "codex",
+        "kimi",
+        "grok",
+        "opencode",
+        "copilot",
+        "cursor",
+        "glm",
+        "anthropic",
+    ];
+    for provider in builtins.into_iter().map(str::to_string).chain(
+        grouped
+            .keys()
+            .filter(|k| !builtins.contains(&k.as_str()))
+            .cloned(),
+    ) {
+        let Some(models) = grouped.get(&provider) else {
             continue;
         };
-        let name = ui::strong(provider, ui::provider_color(provider), styled);
+        let name = ui::strong(&provider, ui::provider_color(&provider), styled);
         if full || provider != "cursor" {
             println!("{name}: {}", models.join(", "));
         } else {

@@ -1,9 +1,45 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::paths;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum CustomFormat {
+    #[default]
+    #[value(name = "openai")]
+    OpenAi,
+    #[value(name = "responses")]
+    Responses,
+    #[value(name = "anthropic")]
+    Anthropic,
+}
+
+impl CustomFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Responses => "responses",
+            Self::Anthropic => "anthropic",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomProviderConfig {
+    pub base_url: String,
+    #[serde(default)]
+    pub format: CustomFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
@@ -30,6 +66,8 @@ struct FileConfig {
     pub grok: Option<GrokConfig>,
     pub opencode: Option<OpenCodeConfig>,
     pub glm: Option<GlmConfig>,
+    pub anthropic: Option<AnthropicConfig>,
+    pub providers: Option<BTreeMap<String, CustomProviderConfig>>,
     pub route: Option<RouteConfig>,
 }
 
@@ -110,6 +148,14 @@ struct OpenCodeConfig {
 
 #[derive(Deserialize, Clone)]
 struct GlmConfig {
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct AnthropicConfig {
+    #[serde(rename = "apiKey")]
+    pub api_key: Option<String>,
     #[serde(rename = "baseUrl")]
     pub base_url: Option<String>,
 }
@@ -727,6 +773,156 @@ pub fn opencode_api_key_source() -> Option<&'static str> {
 pub fn opencode_base_url() -> String {
     let env: HashMap<_, _> = std::env::vars().collect();
     resolve_opencode_config(&env, &paths::config_dir()).base_url
+}
+
+pub fn anthropic_api_key_source() -> Option<&'static str> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if env
+        .get("CCP_ANTHROPIC_API_KEY")
+        .is_some_and(|v| !v.is_empty())
+    {
+        return Some("CCP_ANTHROPIC_API_KEY");
+    }
+    if env.get("ANTHROPIC_API_KEY").is_some_and(|v| !v.is_empty()) {
+        return Some("ANTHROPIC_API_KEY");
+    }
+    let file = read_file_config(&paths::config_dir()).and_then(|f| f.anthropic);
+    if file
+        .and_then(|c| c.api_key)
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        return Some("config.json");
+    }
+    None
+}
+
+pub fn anthropic_api_key() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(value) = env
+        .get("CCP_ANTHROPIC_API_KEY")
+        .filter(|v| !v.trim().is_empty())
+    {
+        return Some(value.clone());
+    }
+    if let Some(value) = env
+        .get("ANTHROPIC_API_KEY")
+        .filter(|v| !v.trim().is_empty())
+    {
+        return Some(value.clone());
+    }
+    read_file_config(&paths::config_dir())
+        .and_then(|f| f.anthropic)
+        .and_then(|c| c.api_key)
+        .filter(|v| !v.trim().is_empty())
+}
+
+pub fn anthropic_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(value) = env
+        .get("CCP_ANTHROPIC_BASE_URL")
+        .filter(|v| !v.trim().is_empty())
+    {
+        return value.clone();
+    }
+    read_file_config(&paths::config_dir())
+        .and_then(|f| f.anthropic)
+        .and_then(|c| c.base_url)
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "https://api.anthropic.com".to_string())
+}
+
+pub fn save_anthropic_api_key(key: &str) -> anyhow::Result<PathBuf> {
+    crate::config_keys::write_value(
+        "anthropic.apiKey",
+        serde_json::Value::String(key.to_string()),
+    )
+}
+
+pub fn clear_anthropic_api_key() -> anyhow::Result<bool> {
+    let had = read_file_config(&paths::config_dir())
+        .and_then(|f| f.anthropic)
+        .and_then(|c| c.api_key)
+        .is_some();
+    if had {
+        crate::config_keys::remove_values(["anthropic.apiKey"])?;
+    }
+    Ok(had)
+}
+
+pub fn custom_providers() -> BTreeMap<String, CustomProviderConfig> {
+    read_file_config(&paths::config_dir())
+        .and_then(|f| f.providers)
+        .unwrap_or_default()
+}
+
+pub fn custom_provider_api_key(
+    name: &str,
+    cfg: &CustomProviderConfig,
+) -> (Option<String>, Option<String>) {
+    let upper: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let ccp_env = format!("CCP_{upper}_API_KEY");
+    if let Ok(val) = std::env::var(&ccp_env)
+        && !val.trim().is_empty()
+    {
+        return (Some(val), Some(ccp_env));
+    }
+    if let Some(env_name) = cfg.api_key_env.as_deref().filter(|s| !s.trim().is_empty())
+        && let Ok(val) = std::env::var(env_name)
+        && !val.trim().is_empty()
+    {
+        return (Some(val), Some(env_name.to_string()));
+    }
+    let direct_env = format!("{upper}_API_KEY");
+    if let Ok(val) = std::env::var(&direct_env)
+        && !val.trim().is_empty()
+    {
+        return (Some(val), Some(direct_env));
+    }
+    if let Some(key) = cfg.api_key.as_ref().filter(|s| !s.trim().is_empty()) {
+        return (Some(key.clone()), Some("config.json".to_string()));
+    }
+    (None, None)
+}
+
+pub fn save_custom_provider(name: &str, cfg: &CustomProviderConfig) -> anyhow::Result<PathBuf> {
+    let path = format!("providers.{name}");
+    crate::config_keys::write_value(&path, serde_json::to_value(cfg)?)
+}
+
+pub fn remove_custom_provider(name: &str) -> anyhow::Result<bool> {
+    let exists = custom_providers().contains_key(name);
+    if exists {
+        let provider_key = format!("providers.{name}");
+        let tiers_key = format!("route.tiers.{name}");
+        crate::config_keys::remove_values([provider_key.as_str(), tiers_key.as_str()])?;
+    }
+    Ok(exists)
+}
+
+pub fn save_custom_provider_api_key(name: &str, key: &str) -> anyhow::Result<PathBuf> {
+    let path = format!("providers.{name}.apiKey");
+    crate::config_keys::write_value(&path, serde_json::Value::String(key.to_string()))
+}
+
+pub fn clear_custom_provider_api_key(name: &str) -> anyhow::Result<bool> {
+    let had = custom_providers()
+        .get(name)
+        .and_then(|c| c.api_key.as_ref())
+        .is_some();
+    if had {
+        let path = format!("providers.{name}.apiKey");
+        crate::config_keys::remove_values([path.as_str()])?;
+    }
+    Ok(had)
 }
 
 pub fn is_verbose() -> bool {

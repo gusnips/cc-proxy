@@ -568,7 +568,7 @@ impl Provider for CodexProvider {
         tier_catalog()
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         &CODEX_CLI
     }
 

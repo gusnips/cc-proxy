@@ -30,8 +30,10 @@ pub fn provider_color(provider: &str) -> Color {
         "cursor" => Color::Rgb(150, 150, 245),
         "kimi" => Color::Rgb(200, 140, 230),
         "grok" => Color::Rgb(240, 130, 170),
-        "opencode" => Color::Rgb(240, 165, 100),
+        "opencode" | "opencode-go" | "opencode-zen" => Color::Rgb(240, 165, 100),
         "copilot" => Color::Rgb(160, 150, 255),
+        "anthropic" => Color::Rgb(230, 145, 110),
+        "gemini" => Color::Rgb(110, 170, 250),
         _ => DIM_WHITE,
     }
 }
@@ -45,7 +47,10 @@ pub fn provider_name(provider: &str) -> &str {
         "cursor" => "Cursor",
         "kimi" => "Kimi",
         "grok" => "Grok",
-        "opencode" => "OpenCode Go",
+        "anthropic" => "Anthropic",
+        "gemini" => "Gemini",
+        "opencode" | "opencode-go" => "OpenCode Go",
+        "opencode-zen" => "OpenCode Zen",
         other => other,
     }
 }

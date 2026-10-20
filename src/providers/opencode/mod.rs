@@ -211,7 +211,7 @@ impl Provider for OpenCodeProvider {
         true
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         &OPENCODE_CLI
     }
 

@@ -94,6 +94,20 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "OpenCode Go API base URL",
     },
     ConfigKey {
+        path: "anthropic.apiKey",
+        kind: ConfigKind::Secret,
+        env: &["CCP_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+        default: None,
+        blurb: "Anthropic API key",
+    },
+    ConfigKey {
+        path: "anthropic.baseUrl",
+        kind: ConfigKind::Str,
+        env: &["CCP_ANTHROPIC_BASE_URL"],
+        default: Some("https://api.anthropic.com"),
+        blurb: "Anthropic API base URL",
+    },
+    ConfigKey {
         path: "codex.baseUrl",
         kind: ConfigKind::Str,
         env: &["CCP_CODEX_BASE_URL"],

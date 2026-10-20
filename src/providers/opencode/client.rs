@@ -144,7 +144,36 @@ impl OpenCodeClient {
         traffic: Option<Arc<TrafficCapture>>,
         session_id: Option<&str>,
     ) -> Result<OpenCodeResponse, OpenCodeError> {
-        let api_key = self.api_key()?;
+        self.post_for_provider(
+            endpoint,
+            body,
+            stream,
+            traffic,
+            session_id,
+            "opencode",
+            "OpenCode Go",
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn post_for_provider<T: Serialize + ?Sized>(
+        &self,
+        endpoint: EndpointKind,
+        body: &T,
+        stream: bool,
+        traffic: Option<Arc<TrafficCapture>>,
+        session_id: Option<&str>,
+        provider_slug: &str,
+        provider_label: &str,
+        require_key: bool,
+    ) -> Result<OpenCodeResponse, OpenCodeError> {
+        let api_key = if require_key {
+            Some(self.api_key()?)
+        } else {
+            self.api_key.as_deref().filter(|key| !key.is_empty())
+        };
         let url = self.endpoint_url(endpoint);
         let accept = if stream {
             "text/event-stream"
@@ -169,11 +198,11 @@ impl OpenCodeClient {
                 &serde_json::json!({
                     "method": "POST",
                     "url": url.as_str(),
-                    "provider": "opencode",
+                    "provider": provider_slug,
                     "transport": "http",
                     "headers": {
                         "accept": accept,
-                        auth_header: "[redacted]",
+                        auth_header: if api_key.is_some() { "[redacted]" } else { "[none]" },
                         "content-type": "application/json",
                         "x-opencode-session": session_header_value
                     }
@@ -190,19 +219,23 @@ impl OpenCodeClient {
             .json(body);
         match endpoint {
             EndpointKind::ChatCompletions | EndpointKind::Responses => {
-                request = request.header(http::header::AUTHORIZATION, format!("Bearer {api_key}"));
+                if let Some(api_key) = api_key {
+                    request =
+                        request.header(http::header::AUTHORIZATION, format!("Bearer {api_key}"));
+                }
             }
             EndpointKind::Messages => {
-                request = request
-                    .header("x-api-key", api_key)
-                    .header("anthropic-version", "2023-06-01");
+                request = request.header("anthropic-version", "2023-06-01");
+                if let Some(api_key) = api_key {
+                    request = request.header("x-api-key", api_key);
+                }
             }
         }
         let response = request.send().await.map_err(|_| OpenCodeError {
             status: StatusCode::BAD_GATEWAY,
             retry_after: None,
             body: None,
-            message: "OpenCode Go upstream request failed".to_string(),
+            message: format!("{provider_label} upstream request failed"),
         })?;
 
         if let Some(capture) = traffic.as_ref() {
@@ -216,7 +249,7 @@ impl OpenCodeClient {
         }
 
         if !response.status().is_success() {
-            return Err(rejected_response(response, Some(api_key)).await);
+            return Err(rejected_response(response, api_key).await);
         }
         Ok(OpenCodeResponse { response })
     }
@@ -288,12 +321,36 @@ impl OpenCodeClient {
     fn endpoint_url(&self, endpoint: EndpointKind) -> reqwest::Url {
         let mut url = self.base_url.clone();
         let base_path = url.path().trim_end_matches('/');
-        let suffix = match endpoint {
-            EndpointKind::ChatCompletions => "chat/completions",
-            EndpointKind::Messages => "messages",
-            EndpointKind::Responses => "responses",
+        let new_path = match endpoint {
+            EndpointKind::ChatCompletions => {
+                if base_path.ends_with("/chat/completions") {
+                    base_path.to_string()
+                } else if base_path.is_empty() {
+                    "/v1/chat/completions".to_string()
+                } else {
+                    format!("{base_path}/chat/completions")
+                }
+            }
+            EndpointKind::Messages => {
+                if base_path.ends_with("/messages") {
+                    base_path.to_string()
+                } else if base_path.ends_with("/v1") {
+                    format!("{base_path}/messages")
+                } else {
+                    format!("{base_path}/v1/messages")
+                }
+            }
+            EndpointKind::Responses => {
+                if base_path.ends_with("/responses") {
+                    base_path.to_string()
+                } else if base_path.is_empty() {
+                    "/v1/responses".to_string()
+                } else {
+                    format!("{base_path}/responses")
+                }
+            }
         };
-        url.set_path(&format!("{base_path}/{suffix}"));
+        url.set_path(&new_path);
         url
     }
 

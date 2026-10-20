@@ -578,3 +578,74 @@ fn usage_with_a_rejected_sign_in_says_how_to_fix_it_and_exits_two()
         );
     Ok(())
 }
+
+#[test]
+fn custom_provider_add_auth_models_and_remove_round_trip() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = TempDir::new()?;
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.env_remove("CCP_ANTHROPIC_API_KEY")
+            .env_remove("ANTHROPIC_API_KEY");
+        cmd.args(args);
+        cmd
+    };
+
+    run(&[
+        "provider",
+        "add",
+        "openrouter",
+        "https://openrouter.ai/api/v1",
+        "--format",
+        "openai",
+        "--model",
+        "deepseek-r1",
+    ])
+    .assert()
+    .success()
+    .stdout(contains("Added provider `openrouter`"));
+
+    run(&["auth", "login", "openrouter"])
+        .write_stdin("or-secret-key\n")
+        .assert()
+        .success()
+        .stdout(contains("saved"));
+
+    run(&["auth", "status", "openrouter"])
+        .assert()
+        .success()
+        .stdout(contains("Format: openai"))
+        .stdout(contains("https://openrouter.ai/api/v1"));
+
+    run(&["models"])
+        .assert()
+        .success()
+        .stdout(contains("anthropic:"))
+        .stdout(contains("openrouter: deepseek-r1, openrouter/deepseek-r1"));
+
+    run(&["provider", "list"])
+        .assert()
+        .success()
+        .stdout(contains(
+            "openrouter: custom (openai, https://openrouter.ai/api/v1)",
+        ));
+
+    run(&["provider", "remove", "openrouter"])
+        .assert()
+        .success()
+        .stdout(contains("Removed provider `openrouter`"));
+
+    run(&["auth", "login", "anthropic"])
+        .write_stdin("sk-ant-test\n")
+        .assert()
+        .success()
+        .stdout(contains("Anthropic API key saved"));
+
+    run(&["auth", "status", "anthropic"])
+        .assert()
+        .success()
+        .stdout(contains("https://api.anthropic.com"));
+
+    Ok(())
+}

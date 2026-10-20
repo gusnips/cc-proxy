@@ -44,7 +44,7 @@ impl Provider for GlmProvider {
         GLM_MODELS.iter().map(|s| s.to_string()).collect()
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         &GLM_CLI
     }
 

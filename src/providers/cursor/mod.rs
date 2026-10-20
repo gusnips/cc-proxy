@@ -66,7 +66,7 @@ impl Provider for CursorProvider {
         model::cursor_supported_models()
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         &CURSOR_CLI
     }
 
