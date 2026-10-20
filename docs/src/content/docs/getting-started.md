@@ -77,7 +77,11 @@ name a model from the provider you picked. To see them, or to change one:
 ```sh
 cc-proxy models map
 cc-proxy models map haiku gpt-6-luna
+cc-proxy models choose
 ```
+
+`cc-proxy models choose` asks about each name in turn. Type part of a model
+name to search, or press Enter to keep a name as it is.
 
 `claude --model <id>` with a full model id, such as `gpt-6.1-sol`, works too.
 

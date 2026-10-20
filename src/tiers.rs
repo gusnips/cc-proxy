@@ -51,9 +51,8 @@ const NOT_FOR_CHAT: [&str; 11] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Guess {
     pub model: String,
-    /// False when another model had an equal claim, or the catalog is a mix of
-    /// other vendors' models. A guess that isn't confident is shown to the
-    /// user to confirm, once.
+    /// False when another model had an equal claim. A guess that isn't
+    /// confident is shown to the user to confirm, once.
     pub confident: bool,
 }
 
@@ -148,7 +147,7 @@ fn pool<'a, 'b>(parsed: &'b [Parsed<'a>], tier: &str) -> Vec<&'b Parsed<'a>> {
     }
 }
 
-fn best(pool: &[&Parsed<'_>], aggregator: bool) -> Option<Guess> {
+fn best(pool: &[&Parsed<'_>]) -> Option<Guess> {
     // Newest version first. Of equal versions the shorter id wins
     // (`glm-5.3` over `glm-5.3-highspeed`).
     let top = pool.iter().max_by(|a, b| {
@@ -165,27 +164,31 @@ fn best(pool: &[&Parsed<'_>], aggregator: bool) -> Option<Guess> {
         == 1;
     Some(Guess {
         model: top.id.to_string(),
-        confident: one_line && no_tie && !aggregator,
+        confident: one_line && no_tie,
     })
 }
 
 /// The model for each tier, worked out from `models`. A tier is missing when
-/// there is nothing to pick from. `aggregator` is true for a catalog that
-/// mixes other vendors' models: nothing in it is a confident match.
-pub fn derive(models: &[String], aggregator: bool) -> BTreeMap<&'static str, Guess> {
+/// there is nothing to pick from.
+pub fn derive(models: &[String]) -> BTreeMap<&'static str, Guess> {
     let parsed: Vec<Parsed> = models.iter().filter_map(|id| parse(id)).collect();
     TIERS
         .into_iter()
-        .filter_map(|tier| Some((tier, best(&pool(&parsed, tier), aggregator)?)))
+        .filter_map(|tier| Some((tier, best(&pool(&parsed, tier))?)))
         .collect()
 }
 
-/// `derive` for a provider the registry knows.
+/// `derive` for a provider the registry knows. A provider that resells other
+/// vendors' models gets no guesses: nothing in its catalog is the obvious
+/// match, so the user chooses with `cc-proxy models choose`.
 pub fn for_provider(registry: &Registry, provider: &str) -> BTreeMap<&'static str, Guess> {
-    let aggregator = registry
+    if registry
         .provider(provider)
-        .is_some_and(|handler| handler.aggregator());
-    derive(&registry.catalog_for(provider), aggregator)
+        .is_some_and(|handler| handler.aggregator())
+    {
+        return BTreeMap::new();
+    }
+    derive(&registry.catalog_for(provider))
 }
 
 /// The config.json key that holds the user's choice for `tier` on `provider`.
@@ -238,9 +241,9 @@ pub fn mapping(registry: &Registry, route: &Route, provider: &str) -> Vec<Mappin
         .collect()
 }
 
-/// What each Claude name means, one line each, or one line when they all mean
-/// the same model.
-pub fn describe(mappings: &[Mapping]) -> Vec<String> {
+/// What each Claude name means on `provider`, one line each, or one line when
+/// they all mean the same model.
+pub fn describe(provider: &str, mappings: &[Mapping]) -> Vec<String> {
     let first = mappings.first().and_then(|first| first.model.as_deref());
     if let Some(model) = first
         && mappings.iter().all(|m| m.model.as_deref() == Some(model))
@@ -252,8 +255,8 @@ pub fn describe(mappings: &[Mapping]) -> Vec<String> {
         .map(|m| match &m.model {
             Some(model) => format!("{} uses {model}.", m.tier),
             None => format!(
-                "{} has no model. Run `cc-proxy models map {} <model>`.",
-                m.tier, m.tier
+                "{} has no model yet. Pick one with `cc-proxy models choose {provider}`.",
+                m.tier
             ),
         })
         .collect()
@@ -303,8 +306,8 @@ pub fn resolve(registry: &Registry, route: &Route, model: &str) -> Result<String
     match for_provider(registry, provider).remove(tier) {
         Some(guess) => Ok(guess.model),
         None => Err(format!(
-            "cc-proxy has no {tier} model for {}. Run `cc-proxy models map {tier} <model>` to \
-             choose one.",
+            "cc-proxy has no {tier} model for {}. Run `cc-proxy models choose {provider}` to pick \
+             one.",
             ui::provider_name(provider)
         )),
     }
@@ -390,8 +393,8 @@ mod tests {
         models.iter().map(|model| (*model).to_string()).collect()
     }
 
-    fn picked(models: &[&str], aggregator: bool) -> Vec<(&'static str, String, bool)> {
-        let mut found = derive(&ids(models), aggregator);
+    fn picked(models: &[&str]) -> Vec<(&'static str, String, bool)> {
+        let mut found = derive(&ids(models));
         TIERS
             .into_iter()
             .filter_map(|tier| Some((tier, found.remove(tier)?)))
@@ -401,19 +404,16 @@ mod tests {
 
     #[test]
     fn codex_families_map_by_their_words_and_the_newest_version_wins() {
-        let found = derive(
-            &ids(&[
-                "gpt-5.5",
-                "gpt-5.6-luna",
-                "gpt-5.6-sol",
-                "gpt-5.6-terra",
-                "gpt-6-astra",
-                "gpt-6-luna",
-                "gpt-6-sol",
-                "gpt-6.1-sol",
-            ]),
-            false,
-        );
+        let found = derive(&ids(&[
+            "gpt-5.5",
+            "gpt-5.6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+        ]));
         let model = |tier: &str| found[tier].model.as_str();
         assert_eq!(model("fable"), "gpt-6-astra");
         // 6.1 is newer than 6, and the plain `gpt-5.5` plays no tier.
@@ -425,24 +425,21 @@ mod tests {
 
     #[test]
     fn versions_compare_as_numbers() {
-        let found = derive(&ids(&["gpt-6.9-sol", "gpt-6.10-sol"]), false);
+        let found = derive(&ids(&["gpt-6.9-sol", "gpt-6.10-sol"]));
         assert_eq!(found["opus"].model, "gpt-6.10-sol");
     }
 
     #[test]
     fn a_service_variant_does_not_become_the_small_model() {
         // `-fast` is a haiku word, but `sol` is a bigger one.
-        let found = derive(&ids(&["gpt-6-sol", "gpt-6-sol-fast"]), false);
+        let found = derive(&ids(&["gpt-6-sol", "gpt-6-sol-fast"]));
         assert_eq!(found["opus"].model, "gpt-6-sol");
         assert_eq!(found["haiku"].model, "gpt-6-sol");
     }
 
     #[test]
     fn one_line_of_models_fills_every_tier_and_small_ones_take_haiku() {
-        let found = picked(
-            &["grok-4.5", "grok-4.6", "grok-4.7", "grok-composer-2.5-fast"],
-            false,
-        );
+        let found = picked(&["grok-4.5", "grok-4.6", "grok-4.7", "grok-composer-2.5-fast"]);
         assert_eq!(
             found,
             [
@@ -456,37 +453,35 @@ mod tests {
 
     #[test]
     fn a_tie_is_a_guess_not_a_certainty() {
-        let found = derive(&ids(&["glm-5.2", "glm-5.3", "glm-5.3-highspeed"]), false);
+        let found = derive(&ids(&["glm-5.2", "glm-5.3", "glm-5.3-highspeed"]));
         assert_eq!(found["opus"].model, "glm-5.3");
         assert!(!found["opus"].confident);
     }
 
     #[test]
     fn models_from_different_lines_are_a_guess() {
-        let found = derive(&ids(&["deepseek-v4-pro", "mimo-v2.6-pro"]), false);
+        let found = derive(&ids(&["deepseek-v4-pro", "mimo-v2.6-pro"]));
         assert_eq!(found["sonnet"].model, "deepseek-v4-pro");
         assert!(!found["sonnet"].confident);
     }
 
     #[test]
-    fn a_reseller_is_never_confident() {
-        let found = derive(&ids(&["deepseek-v4-pro"]), true);
-        assert_eq!(found["sonnet"].model, "deepseek-v4-pro");
-        assert!(!found["sonnet"].confident);
+    fn a_reseller_gets_no_guesses() {
+        let registry = Registry::new();
+        for provider in ["opencode", "opencode-zen"] {
+            assert!(for_provider(&registry, provider).is_empty(), "{provider}");
+        }
     }
 
     #[test]
     fn copilot_keeps_claude_models_for_claude_names() {
-        let found = picked(
-            &[
-                "copilot/claude-opus-4.8",
-                "copilot/claude-sonnet-5",
-                "copilot/gpt-5.3-codex",
-                "copilot/gpt-5.4-mini",
-                "copilot/gpt-5.5",
-            ],
-            false,
-        );
+        let found = picked(&[
+            "copilot/claude-opus-4.8",
+            "copilot/claude-sonnet-5",
+            "copilot/gpt-5.3-codex",
+            "copilot/gpt-5.4-mini",
+            "copilot/gpt-5.5",
+        ]);
         assert_eq!(
             found,
             [
@@ -500,22 +495,19 @@ mod tests {
 
     #[test]
     fn models_that_are_not_for_chat_or_not_ready_are_left_out() {
-        let found = derive(
-            &ids(&[
-                "text-embedding-3",
-                "deepseek-v4-flash-vision-exp",
-                "hy4-preview",
-                "deepseek-v4-flash",
-            ]),
-            false,
-        );
+        let found = derive(&ids(&[
+            "text-embedding-3",
+            "deepseek-v4-flash-vision-exp",
+            "hy4-preview",
+            "deepseek-v4-flash",
+        ]));
         assert_eq!(found["haiku"].model, "deepseek-v4-flash");
         assert_eq!(found["opus"].model, "deepseek-v4-flash");
     }
 
     #[test]
     fn a_provider_with_no_models_has_no_tiers() {
-        assert!(derive(&[], false).is_empty());
+        assert!(derive(&[]).is_empty());
     }
 
     #[test]
@@ -534,9 +526,13 @@ mod tests {
         assert_eq!(found[1].basis, Basis::Chosen);
         assert_eq!(found[2].basis, Basis::Sure);
 
-        // OpenCode resells other vendors' models, so it always asks.
+        // OpenCode resells other vendors' models, so it has none until you choose.
         let found = mapping(&registry, &route, "opencode");
-        assert!(found.iter().all(|m| m.basis == Basis::Guess));
+        assert!(
+            found
+                .iter()
+                .all(|m| m.basis == Basis::Guess && m.model.is_none())
+        );
     }
 
     #[test]
@@ -546,13 +542,19 @@ mod tests {
             model: Some("k3".into()),
             basis: Basis::Sure,
         };
-        assert_eq!(describe(&TIERS.map(same)), ["Every Claude name uses k3."]);
+        assert_eq!(
+            describe("kimi", &TIERS.map(same)),
+            ["Every Claude name uses k3."]
+        );
 
         let mut mixed = TIERS.map(same);
         mixed[3].model = None;
-        let lines = describe(&mixed);
+        let lines = describe("kimi", &mixed);
         assert_eq!(lines[0], "fable uses k3.");
-        assert!(lines[3].starts_with("haiku has no model."), "{}", lines[3]);
+        assert_eq!(
+            lines[3],
+            "haiku has no model yet. Pick one with `cc-proxy models choose kimi`."
+        );
     }
 
     #[test]

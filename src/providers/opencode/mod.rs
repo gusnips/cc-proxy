@@ -338,7 +338,7 @@ impl Provider for OpenCodeProvider {
     }
 
     fn aggregator(&self) -> bool {
-        !self.zen
+        true
     }
 
     fn cli(&self) -> &dyn CliHandlers {

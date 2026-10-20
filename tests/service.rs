@@ -410,32 +410,42 @@ fn picker_labels_follow_active_provider_maps_and_restore_the_original_picker() {
 }
 
 #[test]
-fn use_asks_which_model_a_claude_name_gets_when_it_cannot_tell_and_asks_once() {
+fn use_asks_a_reseller_for_each_claude_name_and_again_only_for_empty_ones() {
     let sandbox = Sandbox::new();
     sandbox.sign_in_with_key();
 
-    // OpenCode Go resells other vendors' models, so nothing in it is a sure
-    // match. Enter takes the guesses.
+    // OpenCode Go resells other vendors' models, so cc-proxy picks none.
+    // fable: a search, then a number. opus: a number from the first list.
+    // sonnet: an exact name. haiku: Enter skips it.
+    sandbox
+        .cmd()
+        .args(["use", "opencode"])
+        .write_stdin("kimi\n1\n1\nopencode-go/glm-5.2\n\n")
+        .assert()
+        .success()
+        .stdout(contains(
+            "Which OpenCode Go model should `fable` use? Now: no model yet.",
+        ))
+        .stdout(contains("Claude Code goes to OpenCode Go"))
+        .stdout(contains(
+            "haiku has no model yet. Pick one with `cc-proxy models choose opencode`.",
+        ));
+    let kept = sandbox.route()["tiers"]["opencode"].clone();
+    let model = |tier: &str| kept[tier].as_str().unwrap_or_default().to_string();
+    assert!(model("fable").starts_with("opencode-go/kimi"), "{kept}");
+    assert!(model("opus").starts_with("opencode-go/"), "{kept}");
+    assert_eq!(model("sonnet"), "opencode-go/glm-5.2");
+    assert!(kept.get("haiku").is_none(), "{kept}");
+
+    // Only the name still without a model is asked again.
     sandbox
         .cmd()
         .args(["use", "opencode"])
         .write_stdin("\n")
         .assert()
         .success()
-        .stdout(contains("Use these?"))
-        .stdout(contains("Claude Code goes to OpenCode Go"));
-    let kept = sandbox.route()["tiers"]["opencode"].clone();
-    for tier in ["fable", "opus", "sonnet", "haiku"] {
-        assert!(kept[tier].is_string(), "{tier} was not kept: {kept}");
-    }
-
-    // The answer is kept, so the next `use` has nothing left to ask.
-    sandbox
-        .cmd()
-        .args(["use", "opencode"])
-        .assert()
-        .success()
-        .stdout(contains("Use these?").not());
+        .stdout(contains("should `haiku` use?"))
+        .stdout(contains("should `fable` use?").not());
 }
 
 #[test]
@@ -449,8 +459,10 @@ fn use_keeps_nothing_when_nobody_answers_the_model_question() {
         .write_stdin("")
         .assert()
         .success()
-        .stdout(contains("Use these?"))
-        .stdout(contains("No answer"));
+        .stdout(contains(
+            "Choose the OpenCode Go model each Claude name uses",
+        ))
+        .stdout(contains("fable has no model yet"));
     assert!(
         sandbox.route().get("tiers").is_none(),
         "{}",

@@ -1,5 +1,8 @@
-//! `cc-proxy models map`: see or change which model answers each of Claude
-//! Code's names (`fable`, `opus`, `sonnet`, `haiku`) on a provider.
+//! `cc-proxy models choose` and `cc-proxy models map`: see or change which
+//! model answers each of Claude Code's names (`fable`, `opus`, `sonnet`,
+//! `haiku`) on a provider.
+
+use std::collections::HashSet;
 
 use anyhow::{Result, bail};
 
@@ -20,10 +23,7 @@ pub fn run(
     let tier = tier.map(tier_arg).transpose()?;
     match (tier, model, reset) {
         (Some(tier), Some(model), false) => set(&registry, provider, tier, model)?,
-        (Some(tier), None, false) => {
-            let chosen = pick_model_interactively(&registry, provider, tier)?;
-            set(&registry, provider, tier, &chosen)?;
-        }
+        (Some(tier), None, false) => choose(&registry, provider, &[tier])?,
         (tier, None, true) => reset_choice(provider, tier)?,
         (None, None, false) => {}
         _ => bail!(
@@ -38,18 +38,88 @@ pub fn run(
     Ok(())
 }
 
-pub fn run_interactive_set(provider: Option<&str>) -> Result<()> {
+pub fn run_choose(provider: Option<&str>) -> Result<()> {
     let registry = Registry::new();
     let provider = provider_arg(&registry, provider)?;
-    for tier in TIERS {
-        let chosen = pick_model_interactively(&registry, provider, tier)?;
-        set(&registry, provider, tier, &chosen)?;
-    }
+    choose(&registry, provider, &TIERS)?;
     if config::route().target() == Some(provider) {
         crate::route::refresh_model_labels();
     }
     show(&registry, provider);
     Ok(())
+}
+
+/// Asks which `provider` model each of `tiers` uses, with search, because a
+/// catalog can hold thousands. Enter keeps what a name has now, or leaves it
+/// without a model. Each answer is saved as it comes.
+pub fn choose(registry: &Registry, provider: &str, tiers: &[&'static str]) -> Result<()> {
+    let name = ui::provider_name(provider);
+    let now = tiers::mapping(registry, &config::route(), provider);
+    for &tier in tiers {
+        let models = choices(registry, provider, tier);
+        if models.is_empty() {
+            bail!(
+                "{name} has no models listed. Run `cc-proxy models refresh {provider}`, then try again."
+            );
+        }
+        let current = match now.iter().find(|mapping| mapping.tier == tier) {
+            Some(tiers::Mapping {
+                model: Some(model),
+                basis,
+                ..
+            }) => format!("{model} ({})", basis_label(*basis)),
+            _ => "no model yet".to_string(),
+        };
+        let question = format!("Which {name} model should `{tier}` use? Now: {current}.");
+        if let Some(index) = crate::prompt::search(&question, &models)? {
+            set(registry, provider, tier, &models[index])?;
+        }
+    }
+    Ok(())
+}
+
+/// Every model `provider` offers, the best fits for `tier` first.
+fn choices(registry: &Registry, provider: &str, tier: &str) -> Vec<String> {
+    let mut models = tiers::ranked(registry, provider, tier);
+    let ranked: HashSet<String> = models.iter().cloned().collect();
+    models.extend(
+        registry
+            .catalog_for(provider)
+            .into_iter()
+            .filter(|model| !ranked.contains(model)),
+    );
+    once_each(models)
+}
+
+/// `models` with a model listed both bare and as `prefix/model` kept once, in
+/// the prefixed form: it reaches this provider even if another one starts
+/// serving the bare name.
+fn once_each(models: Vec<String>) -> Vec<String> {
+    let listed: HashSet<&str> = models.iter().map(String::as_str).collect();
+    let prefixes: HashSet<&str> = models
+        .iter()
+        .filter_map(|model| model.split_once('/').map(|(prefix, _)| prefix))
+        .collect();
+    let prefixed_too = |model: &str| {
+        !model.contains('/')
+            && prefixes
+                .iter()
+                .any(|prefix| listed.contains(format!("{prefix}/{model}").as_str()))
+    };
+    let keep: Vec<bool> = models.iter().map(|model| !prefixed_too(model)).collect();
+    models
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(model, keep)| keep.then_some(model))
+        .collect()
+}
+
+fn basis_label(basis: Basis) -> &'static str {
+    match basis {
+        Basis::Chosen => "your choice",
+        Basis::Sure => "picked by cc-proxy",
+        Basis::Guess => "a guess, not confirmed",
+    }
 }
 
 pub fn run_refresh(provider: Option<&str>) -> Result<()> {
@@ -77,27 +147,6 @@ pub fn run_refresh(provider: Option<&str>) -> Result<()> {
         crate::route::refresh_model_labels();
     }
     Ok(())
-}
-
-fn pick_model_interactively(registry: &Registry, provider: &str, tier: &str) -> Result<String> {
-    let mut models = tiers::ranked(registry, provider, tier);
-    for m in registry.catalog_for(provider) {
-        if !models.contains(&m) {
-            models.push(m);
-        }
-    }
-    if models.is_empty() {
-        bail!(
-            "{} has no models listed. Run `cc-proxy models` to see what cc-proxy knows.",
-            ui::provider_name(provider)
-        );
-    }
-    let question = format!(
-        "Which {} model should `{tier}` use?",
-        ui::provider_name(provider)
-    );
-    let idx = crate::prompt::choose(&question, &models, 0)?;
-    Ok(models[idx].clone())
 }
 
 fn provider_arg(registry: &Registry, asked: Option<&str>) -> Result<&'static str> {
@@ -150,20 +199,37 @@ fn show(registry: &Registry, provider: &str) {
     let mappings = tiers::mapping(registry, &config::route(), provider);
     println!("Claude names on {}:", ui::provider_name(provider));
     for mapping in &mappings {
-        let model = mapping.model.as_deref().unwrap_or("no model");
-        let basis = match mapping.basis {
-            Basis::Chosen => "your choice",
-            Basis::Sure => "picked by cc-proxy",
-            Basis::Guess => "a guess, not confirmed",
-        };
-        println!("  {:<7} {model} ({basis})", mapping.tier);
+        match &mapping.model {
+            Some(model) => println!(
+                "  {:<7} {model} ({})",
+                mapping.tier,
+                basis_label(mapping.basis)
+            ),
+            None => println!("  {:<7} no model yet", mapping.tier),
+        }
     }
-    println!("Change one with `cc-proxy models map <name> <model>`.");
+    println!("Change them with `cc-proxy models choose {provider}`.");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_listed_bare_and_prefixed_is_offered_once_prefixed() {
+        let models = [
+            "kimi-k2.5",
+            "opencode-go/kimi-k2.5",
+            "glm-5",
+            "opencode-go/kimi-k3",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            once_each(models),
+            ["opencode-go/kimi-k2.5", "glm-5", "opencode-go/kimi-k3"]
+        );
+    }
 
     #[test]
     fn names_are_matched_in_any_case() {

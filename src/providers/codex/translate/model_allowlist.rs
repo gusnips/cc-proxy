@@ -137,7 +137,7 @@ pub fn tier_catalog() -> Vec<String> {
 
 /// Newest model the proxy knows for a Claude family.
 pub fn latest_for_claude_family(claude_family: &str) -> Option<String> {
-    crate::tiers::derive(&tier_catalog(), false)
+    crate::tiers::derive(&tier_catalog())
         .remove(claude_family)
         .map(|guess| guess.model)
 }
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn baseline_covers_every_claude_family_with_its_newest_model() {
         let baseline: Vec<String> = ALLOWED_MODELS.iter().map(|m| (*m).to_string()).collect();
-        let found = crate::tiers::derive(&baseline, false);
+        let found = crate::tiers::derive(&baseline);
         for (claude_family, expected) in [
             ("fable", "gpt-6-astra"),
             ("opus", "gpt-6.1-sol"),

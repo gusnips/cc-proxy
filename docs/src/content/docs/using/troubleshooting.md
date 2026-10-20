@@ -55,7 +55,7 @@ OpenCode Go has no `auth status` command; configure its API key through
 
 ## Model returns HTTP 400
 
-If the message says routing is off, that Claude Code window still points at the proxy but you ran `cc-proxy stop` or `cc-proxy use claude`. Restart the window, or run `cc-proxy start` to route it again. If it says cc-proxy has no model for a name, run `cc-proxy models map <name> <model>`.
+If the message says routing is off, that Claude Code window still points at the proxy but you ran `cc-proxy stop` or `cc-proxy use claude`. Restart the window, or run `cc-proxy start` to route it again. If it says cc-proxy has no model for a name, run `cc-proxy models choose`.
 
 Otherwise run:
 

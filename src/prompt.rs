@@ -140,6 +140,71 @@ pub fn choose(question: &str, options: &[String], default: usize) -> Result<usiz
     }
 }
 
+/// Pick one of `options` by searching, for lists too long to read through.
+/// Shows the first options, then reads a line: a number picks from the list
+/// shown, an option's exact name picks it, other text searches every option,
+/// and Enter keeps what is there. Input that has ended keeps it too. Returns
+/// the index picked, or `None` to keep.
+pub fn search(question: &str, options: &[String]) -> Result<Option<usize>> {
+    println!("{question}");
+    let mut shown: Vec<usize> = (0..options.len().min(MAX_SHOWN)).collect();
+    print_numbered(options, &shown, options.len());
+    loop {
+        print!("Type to search, a number to pick, or Enter to keep: ");
+        let Some(answer) = read_line()? else {
+            println!();
+            return Ok(None);
+        };
+        if answer.is_empty() {
+            return Ok(None);
+        }
+        let by_number = answer
+            .parse::<usize>()
+            .ok()
+            .and_then(|number| number.checked_sub(1))
+            .and_then(|index| shown.get(index).copied());
+        let by_name = options
+            .iter()
+            .position(|option| option.eq_ignore_ascii_case(&answer));
+        if let Some(index) = by_number.or(by_name) {
+            return Ok(Some(index));
+        }
+        let found = matching(options, &answer);
+        if found.is_empty() {
+            println!("Nothing matches \"{answer}\". Try another word, or press Enter to keep.");
+            continue;
+        }
+        shown = found.iter().take(MAX_SHOWN).copied().collect();
+        print_numbered(options, &shown, found.len());
+    }
+}
+
+/// The options that hold every word of `query`, in any case, in list order.
+fn matching(options: &[String], query: &str) -> Vec<usize> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    options
+        .iter()
+        .enumerate()
+        .filter(|(_, option)| {
+            let option = option.to_lowercase();
+            words.iter().all(|word| option.contains(word.as_str()))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn print_numbered(options: &[String], shown: &[usize], total: usize) {
+    for (number, index) in shown.iter().enumerate() {
+        println!("  {}. {}", number + 1, options[*index]);
+    }
+    if total > shown.len() {
+        println!(
+            "  ...and {} more. Type part of a name to search.",
+            total - shown.len()
+        );
+    }
+}
+
 /// A yes/no question. Enter, or input that has ended, takes `default`.
 pub fn confirm(question: &str, default: bool) -> Result<bool> {
     Ok(ask_yes_no(question, default)?.unwrap_or(default))
@@ -160,5 +225,26 @@ pub fn ask_yes_no(question: &str, default: bool) -> Result<Option<bool>> {
             "n" | "no" => return Ok(Some(false)),
             _ => println!("Answer y or n."),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_matches_every_word_in_any_case_and_order() {
+        let options: Vec<String> = [
+            "openrouter/anthropic/claude-opus-4.1",
+            "openrouter/google/gemini-2.5-pro",
+            "openrouter/anthropic/claude-sonnet-4.5",
+            "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+        ]
+        .map(String::from)
+        .into();
+        assert_eq!(matching(&options, "claude"), [0, 2]);
+        assert_eq!(matching(&options, "OPUS claude"), [0]);
+        assert_eq!(matching(&options, "free llama"), [3]);
+        assert!(matching(&options, "gpt").is_empty());
     }
 }

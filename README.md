@@ -120,7 +120,11 @@ See which one each name gets, or choose your own:
 ```sh
 cc-proxy models map
 cc-proxy models map haiku gpt-6-luna
+cc-proxy models choose
 ```
+
+`cc-proxy models choose` asks about each name in turn, with search, which helps
+on providers with hundreds of models. Press Enter to keep a name as it is.
 
 A window that was open before `~/.claude/settings.json` existed can't see the
 change until you restart it. See

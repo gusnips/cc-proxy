@@ -189,9 +189,8 @@ enum ModelsCommand {
         #[arg(long)]
         full: bool,
     },
-    /// Interactively choose which model each Claude name (fable, opus, sonnet, haiku) uses
-    #[command(alias = "change")]
-    Set {
+    /// Choose the model each Claude name (fable, opus, sonnet, haiku) uses, with search
+    Choose {
         /// Provider to configure. Defaults to the one Claude Code goes to now
         provider: Option<String>,
     },
@@ -324,9 +323,9 @@ fn run() -> Result<()> {
             Ok(())
         }
         Commands::Models {
-            command: Some(ModelsCommand::Set { provider }),
+            command: Some(ModelsCommand::Choose { provider }),
             ..
-        } => cc_proxy::models_map::run_interactive_set(provider.as_deref()),
+        } => cc_proxy::models_map::run_choose(provider.as_deref()),
         Commands::Models {
             command: Some(ModelsCommand::Refresh { provider }),
             ..
@@ -655,7 +654,7 @@ fn route_lines(pick: Pick) -> Vec<String> {
             "Windows that are already open follow within a few seconds.".into(),
         );
         let mappings = tiers::mapping(&Registry::new(), &config::route(), provider);
-        lines.splice(2..2, tiers::describe(&mappings));
+        lines.splice(2..2, tiers::describe(provider, &mappings));
     }
     lines
 }

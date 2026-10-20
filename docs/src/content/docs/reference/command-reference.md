@@ -104,10 +104,13 @@ Opens the monitor with deterministic simulated traffic. It does not bind a netwo
 
 ```sh
 cc-proxy models [--full]
+cc-proxy models choose [provider]
 cc-proxy models map [name] [model] [--reset] [--provider <provider>]
 ```
 
 `models` prints supported IDs grouped by provider. The default output compacts Cursor's runtime catalog. `--full` prints every Cursor alias.
+
+`models choose` asks which model each Claude name uses, one name at a time. Type part of a name to search the provider's catalog (every word must match), a number to pick from the list shown, or press Enter to keep the name as it is. The provider defaults to the one Claude Code goes to now.
 
 `models map` shows which model each Claude name (`fable`, `opus`, `sonnet`, `haiku`) uses on a provider, and who decided it. With a name and a model, it saves your choice. With `--reset`, it forgets your choice for that name, or for all four names when you give no name. The provider defaults to the one Claude Code goes to now; `--provider` picks another. A model must be one cc-proxy serves. The change applies on the next request.
 
