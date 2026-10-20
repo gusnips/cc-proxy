@@ -82,22 +82,40 @@ pub fn sync_model_labels(
     let Some(target) = route.target() else {
         return Ok(false);
     };
-    let mut base: Vec<String> = tiers::TIERS.iter().map(|t| (*t).to_string()).collect();
-    if matches!(target, "opencode" | "opencode-zen" | "antigravity")
-        || registry
-            .provider(target)
-            .is_some_and(|handler| handler.aggregator())
-    {
-        for model in registry.catalog_for(target) {
-            if !base.contains(&model) {
-                base.push(model);
-            }
-        }
-    }
+    let base = picker_models(registry, target);
     let base_refs: Vec<&str> = base.iter().map(String::as_str).collect();
     claude_settings::sync_model_labels(&base_refs, observed, |model| {
         tiers::model_label(registry, route, model)
     })
+}
+
+/// The most catalog models Claude Code's `/model` picker gets. OpenCode's
+/// catalogs fit. OpenRouter lists thousands, which would bury the picker and
+/// cost seconds per request to label, so a catalog that big gets only the
+/// four Claude names.
+const PICKER_CATALOG_LIMIT: usize = 100;
+
+/// What Claude Code's picker lists for `target`: the four Claude names, then
+/// the whole catalog of a provider whose models those names don't cover,
+/// when it is small enough to read.
+fn picker_models(registry: &Registry, target: &str) -> Vec<String> {
+    let mut models: Vec<String> = tiers::TIERS
+        .iter()
+        .map(|tier| (*tier).to_string())
+        .collect();
+    let whole_catalog = target == "antigravity"
+        || registry
+            .provider(target)
+            .is_some_and(|handler| handler.aggregator());
+    let catalog = registry.catalog_for(target);
+    if whole_catalog && catalog.len() <= PICKER_CATALOG_LIMIT {
+        for model in catalog {
+            if !models.contains(&model) {
+                models.push(model);
+            }
+        }
+    }
+    models
 }
 
 /// Commands refresh labels after saving their changes. A display failure must
@@ -230,5 +248,37 @@ pub fn version_note(port: u16) -> Option<String> {
              `cc-proxy restart` updates it."
         )),
         None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::config::{CustomFormat, CustomProviderConfig};
+    use crate::provider::Provider;
+    use crate::providers::custom::CustomProvider;
+
+    fn reseller(name: &str, models: usize) -> Arc<dyn Provider> {
+        Arc::new(CustomProvider::from_config(
+            name,
+            CustomProviderConfig {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                format: CustomFormat::OpenAi,
+                api_key: None,
+                api_key_env: None,
+                models: (0..models).map(|i| format!("vendor/model-{i}")).collect(),
+            },
+        ))
+    }
+
+    #[test]
+    fn a_catalog_too_big_to_read_leaves_the_picker_to_the_claude_names() {
+        let registry = Registry::from_providers([reseller("thousands", 150), reseller("few", 3)]);
+        assert_eq!(picker_models(&registry, "thousands"), tiers::TIERS);
+        let few = picker_models(&registry, "few");
+        assert_eq!(few.len(), tiers::TIERS.len() + 3);
+        assert!(few.contains(&"few/vendor/model-2".to_string()), "{few:?}");
     }
 }
