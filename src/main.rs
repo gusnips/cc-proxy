@@ -43,6 +43,8 @@ enum Commands {
     /// Start the proxy as a background service and send Claude Code through it (default)
     #[command(alias = "serve")]
     Start {
+        /// Provider to send Claude Code to (or `claude`). Leave it out to pick from a list
+        target: Option<String>,
         #[arg(long)]
         port: Option<u16>,
         /// Only serve, in the foreground. Leaves Claude Code's settings alone
@@ -127,6 +129,8 @@ enum ServiceCommand {
     /// Start the proxy as a background service and send Claude Code through it
     #[command(alias = "serve")]
     Start {
+        /// Provider to send Claude Code to (or `claude`). Leave it out to pick from a list
+        target: Option<String>,
         #[arg(long)]
         port: Option<u16>,
         /// Only serve, in the foreground. Leaves Claude Code's settings alone
@@ -229,6 +233,7 @@ fn run() -> Result<()> {
     }
 
     let commands = cli.command.unwrap_or(Commands::Start {
+        target: None,
         port: None,
         no_monitor: false,
         monitor: false,
@@ -245,10 +250,12 @@ fn run() -> Result<()> {
         }
         Commands::Claude { .. } => old_claude_command(),
         Commands::Start {
+            target,
             port,
             no_monitor,
             monitor,
         } => run_service_command(ServiceCommand::Start {
+            target,
             port,
             no_monitor,
             monitor,
@@ -460,6 +467,7 @@ fn select_serve_mode(no_monitor: bool, monitor: bool) -> ServeMode {
 fn run_service_command(command: ServiceCommand) -> Result<()> {
     match command {
         ServiceCommand::Start {
+            target,
             port,
             no_monitor,
             monitor,
@@ -468,9 +476,9 @@ fn run_service_command(command: ServiceCommand) -> Result<()> {
                 return daemon::serve_daemon_child(port);
             }
             match select_serve_mode(no_monitor, monitor) {
-                ServeMode::Daemon => start_daemon(port),
+                ServeMode::Daemon => start_daemon(target.as_deref(), port),
                 ServeMode::Plain => serve_plain(port),
-                ServeMode::Monitor => serve_with_monitor(port),
+                ServeMode::Monitor => serve_with_monitor(target.as_deref(), port),
             }
         }
         ServiceCommand::Stop => stop_daemon(),
@@ -614,10 +622,10 @@ fn route_lines(pick: Pick) -> Vec<String> {
     lines
 }
 
-fn start_daemon(port: Option<u16>) -> Result<()> {
+fn start_daemon(target: Option<&str>, port: Option<u16>) -> Result<()> {
     route::preflight()?;
     let hook_note = remove_old_hook();
-    let pick = start_flow::pick(None)?;
+    let pick = start_flow::pick(target)?;
     let proxy = ensure_proxy(port)?;
     set_route(pick, &proxy.url)?;
 
@@ -672,13 +680,13 @@ fn serve_plain(port: Option<u16>) -> Result<()> {
 
 /// Serve in the foreground with the dashboard. Routing lasts as long as the
 /// dashboard does.
-fn serve_with_monitor(port: Option<u16>) -> Result<()> {
+fn serve_with_monitor(target: Option<&str>, port: Option<u16>) -> Result<()> {
     route::preflight()?;
     if let Some(note) = remove_old_hook() {
         ui::print_note(Mood::Awake, &[note]);
     }
     // Asked before the dashboard takes the screen.
-    let pick = start_flow::pick(None)?;
+    let pick = start_flow::pick(target)?;
     let bind_address = config::bind_address();
     let effective_port = port.unwrap_or_else(config::port);
     let registry = Registry::new();
@@ -1068,6 +1076,8 @@ mod tests {
             vec!["cc-proxy", "restart"],
             vec!["cc-proxy", "restart", "--port", "18766"],
             vec!["cc-proxy", "start", "--monitor"],
+            vec!["cc-proxy", "start", "codex"],
+            vec!["cc-proxy", "start", "codex", "--monitor"],
             vec!["cc-proxy", "start", "--no-monitor"],
             vec!["cc-proxy", "serve", "--no-monitor"],
             vec!["cc-proxy", "service"],
@@ -1075,6 +1085,7 @@ mod tests {
             vec!["cc-proxy", "service", "stop"],
             vec!["cc-proxy", "service", "reload"],
             vec!["cc-proxy", "service", "restart", "--port", "18766"],
+            vec!["cc-proxy", "service", "start", "codex"],
             vec!["cc-proxy", "service", "start", "--monitor"],
             vec!["cc-proxy", "service", "serve", "--no-monitor"],
             vec!["cc-proxy", "auth"],
