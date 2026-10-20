@@ -106,6 +106,13 @@ impl OpenCodeProvider {
         }
     }
 
+    /// Claude Code's betas, for Zen's Claude models: their bodies carry the
+    /// fields those betas switch on, and the OpenCode CLI sends Zen's Messages
+    /// endpoint an `anthropic-beta` header too.
+    fn anthropic_beta<'a>(&self, body: &'a MessagesRequest) -> Option<&'a str> {
+        self.zen.then_some(body.anthropic_beta.as_deref()).flatten()
+    }
+
     /// OpenCode Zen's free models take no key, and refuse a stale one.
     fn client_for(&self, model_id: &str) -> Result<Arc<OpenCodeClient>, String> {
         let client = self.client()?;
@@ -207,7 +214,7 @@ impl OpenCodeProvider {
                         self.slug(),
                         self.label(),
                         require_key,
-                        None,
+                        self.anthropic_beta(&body),
                     )
                     .await
                 {
@@ -444,7 +451,7 @@ impl Provider for OpenCodeProvider {
                         self.slug(),
                         self.label(),
                         require_key,
-                        None,
+                        self.anthropic_beta(&body),
                     )
                     .await
                     .map_err(opencode_provider_error)?;
@@ -1436,6 +1443,69 @@ mod tests {
         let (auth, sent) = &seen[1];
         assert_eq!(auth, "Bearer stale-key");
         assert_eq!(tool_names(sent), ["Bash", "Read"]);
+    }
+
+    #[tokio::test]
+    async fn zen_claude_models_get_claude_codes_betas() {
+        async fn capture_beta(
+            State(seen): State<Arc<Mutex<Vec<String>>>>,
+            headers: HeaderMap,
+            Json(_body): Json<serde_json::Value>,
+        ) -> Response {
+            seen.lock().unwrap().push(
+                headers
+                    .get("anthropic-beta")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+            Json(json!({
+                "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1}
+            }))
+            .into_response()
+        }
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/messages", post(capture_beta))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client =
+            || OpenCodeClient::new(format!("http://{address}/v1"), Some("key".into())).unwrap();
+        let zen = OpenCodeProvider {
+            client: ClientState::Ready(Arc::new(client())),
+            zen: true,
+        };
+        let go = OpenCodeProvider::with_client(client());
+        let request = |model: &str| {
+            let mut body: MessagesRequest = serde_json::from_value(json!({
+                "model": model,
+                "stream": false,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap();
+            body.anthropic_beta = Some("oauth-2025-04-20,context-management-2025-06-27".into());
+            body
+        };
+
+        let zen_reply = zen
+            .handle_messages(request("opencode-zen/claude-haiku-5-5"), context())
+            .await;
+        assert_eq!(zen_reply.status(), StatusCode::OK);
+        let go_reply = go
+            .handle_messages(request("opencode-go/minimax-m3"), context())
+            .await;
+        assert_eq!(go_reply.status(), StatusCode::OK);
+        server.abort();
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            ["context-management-2025-06-27", ""]
+        );
     }
 
     #[test]
