@@ -3,6 +3,32 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.5 (2026-10-20)
+
+- CLI commands now follow a consistent `cc-proxy <domain> [action] [choice]`
+  order:
+  - Provider authentication moves under
+    `cc-proxy auth [login|device|status|logout] [provider] [--device]`.
+    Running `cc-proxy auth` or `cc-proxy auth status` shows the sign-in status
+    for all providers at once.
+  - Background service controls live under
+    `cc-proxy service [start|stop|status|restart|reload]`, while top-level
+    `start`, `stop`, `status`, `restart`, and `reload` remain as shortcuts.
+  - `cc-proxy start [provider]` (and `cc-proxy service start [provider]`)
+    accepts an optional provider target directly.
+- Custom provider endpoints can now be added with
+  `cc-proxy provider add <name> <base-url> [--format openai|responses|anthropic] [--model <id>]`
+  and managed with `cc-proxy provider list` and `cc-proxy provider remove`.
+- New providers:
+  - `anthropic`: direct Anthropic API key routing (`CCP_ANTHROPIC_API_KEY`,
+    `ANTHROPIC_API_KEY`, or `cc-proxy auth login anthropic`).
+  - `opencode-zen`: OpenCode Zen pay-as-you-go and free models alongside
+    `opencode` (`opencode-go`), including Google `v1beta` model support,
+    OpenCode CLI headers and `ses_` session affinity IDs, and Console device
+    OAuth (`cc-proxy auth login opencode-zen --device`).
+  - `gemini`: native Google Gemini provider supporting `GEMINI_API_KEY` /
+    `GOOGLE_API_KEY`, stored keys, and `~/.gemini/oauth_creds.json` import.
+
 ## v0.2.4 (2026-10-18)
 
 - Codex requests stopped being throttled to one every eight seconds for the rest

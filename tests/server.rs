@@ -66,7 +66,7 @@ impl Provider for FakeProvider {
         self.models.clone()
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         &FAKE_CLI
     }
 
@@ -119,7 +119,7 @@ impl Provider for TranslatingProvider {
         vec![self.model.to_string()]
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         &FAKE_CLI
     }
 
@@ -217,7 +217,7 @@ impl Provider for IdentityCaptureProvider {
         cc_proxy::providers::codex::translate::model_allowlist::tier_catalog()
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         &FAKE_CLI
     }
 

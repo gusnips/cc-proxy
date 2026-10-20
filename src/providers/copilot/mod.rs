@@ -141,7 +141,7 @@ impl Provider for CopilotProvider {
         advertised_models()
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         &COPILOT_CLI
     }
 

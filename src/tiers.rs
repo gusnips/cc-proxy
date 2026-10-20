@@ -21,7 +21,7 @@ pub const TIERS: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
 /// no bigger one is there: `gpt-6-sol-fast` is an opus, not a haiku.
 const WORDS: [(&str, &[&str]); 4] = [
     ("fable", &["astra", "fable"]),
-    ("opus", &["opus", "sol", "max", "ultra"]),
+    ("opus", &["opus", "sol", "max", "ultra", "argon"]),
     ("sonnet", &["sonnet", "terra", "pro", "plus"]),
     (
         "haiku",
@@ -288,6 +288,10 @@ pub fn resolve(registry: &Registry, route: &Route, model: &str) -> Result<String
     if let Some(chosen) = route.tier(provider, tier) {
         return Ok(chosen.to_string());
     }
+    if provider == "anthropic" && model.starts_with("claude-") && model != format!("claude-{tier}")
+    {
+        return Ok(format!("anthropic/{model}"));
+    }
     match for_provider(registry, provider).remove(tier) {
         Some(guess) => Ok(guess.model),
         None => Err(format!(
@@ -350,7 +354,14 @@ pub fn model_label(
         }
         "copilot" => resolved.strip_prefix(copilot::MODEL_PREFIX)?.to_string(),
         "glm" => normalize_incoming_model(&resolved),
-        _ => return None,
+        other => {
+            let prefix = format!("{other}/");
+            let normalized = normalize_incoming_model(&resolved);
+            normalized
+                .strip_prefix(&prefix)
+                .unwrap_or(&normalized)
+                .to_string()
+        }
     };
     if upstream.is_empty() {
         return None;

@@ -52,7 +52,7 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
     pub async fn get_auth(&self) -> Result<StoredAuth, anyhow::Error> {
         let stored = self
             .load_auth()?
-            .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run: cc-proxy codex auth login"))?;
+            .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run: cc-proxy auth login codex"))?;
 
         if stored.expires > Self::now_ms() + REFRESH_MARGIN_MS {
             return Ok(stored);

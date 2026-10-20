@@ -70,7 +70,7 @@ pub fn auth_location() -> String {
 pub fn missing_auth_message() -> String {
     [
         "GLM (z.ai) API key not found.",
-        "Run `cc-proxy glm auth login`, or set CCP_GLM_API_KEY / GLM_API_KEY.",
+        "Run `cc-proxy auth login glm`, or set CCP_GLM_API_KEY / GLM_API_KEY.",
     ]
     .join(" ")
 }

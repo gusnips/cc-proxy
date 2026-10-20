@@ -77,7 +77,7 @@ impl Provider for GrokProvider {
             .map(|model| (*model).to_string())
             .collect()
     }
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         &GROK_CLI
     }
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {

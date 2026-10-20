@@ -49,10 +49,10 @@ impl UsageProvider {
 
     fn not_signed_in(self) -> &'static str {
         match self {
-            Self::Codex => "codex: not signed in. Run `cc-proxy codex auth login`.",
-            Self::Kimi => "kimi: not signed in. Run `cc-proxy kimi auth login`.",
+            Self::Codex => "codex: not signed in. Run `cc-proxy auth login codex`.",
+            Self::Kimi => "kimi: not signed in. Run `cc-proxy auth login kimi`.",
             Self::OpenCode => {
-                "opencode: no API key set. Run `cc-proxy opencode auth login` or set OPENCODE_API_KEY."
+                "opencode: no API key set. Run `cc-proxy auth login opencode` or set OPENCODE_API_KEY."
             }
         }
     }
@@ -63,14 +63,14 @@ impl UsageProvider {
         match failure {
             Failure::SignInUnusable => format!(
                 "cc-proxy couldn't use the saved {name} sign-in. It may have expired or been \
-                 revoked. Run `cc-proxy {id} auth login` to sign in again."
+                 revoked. Run `cc-proxy auth login {id}` to sign in again."
             ),
             Failure::Setup(detail) => {
                 format!("cc-proxy couldn't build the {name} usage request: {detail}.")
             }
             Failure::Rejected(401 | 403) => format!(
                 "{name} didn't accept the sign-in when asked for usage. Run \
-                 `cc-proxy {id} auth login` to sign in again."
+                 `cc-proxy auth login {id}` to sign in again."
             ),
             Failure::Rejected(429) => format!(
                 "{name} is limiting requests and turned down the usage request. Wait a \
@@ -795,7 +795,7 @@ mod tests {
         let message = UsageProvider::Codex.describe(Failure::Rejected(401));
         assert_eq!(
             message,
-            "Codex didn't accept the sign-in when asked for usage. Run `cc-proxy codex auth login` to sign in again."
+            "Codex didn't accept the sign-in when asked for usage. Run `cc-proxy auth login codex` to sign in again."
         );
         let message = UsageProvider::Kimi.describe(Failure::Unreadable);
         assert_eq!(

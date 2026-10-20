@@ -11,14 +11,29 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum AuthCommand {
-    /// Sign in using browser-based authentication
-    Login,
+    /// Sign in to a provider
+    Login {
+        /// Provider to sign in to. Leave it out to pick from a list
+        provider: Option<String>,
+        /// Sign in using a device code instead of opening a browser
+        #[arg(long)]
+        device: bool,
+    },
     /// Sign in using a device code
-    Device,
+    Device {
+        /// Provider to sign in to. Leave it out to pick from a list
+        provider: Option<String>,
+    },
     /// Show the current authentication status
-    Status,
+    Status {
+        /// Provider to check. Leave it out to see all of them
+        provider: Option<String>,
+    },
     /// Delete stored authentication credentials
-    Logout,
+    Logout {
+        /// Provider to sign out of. Leave it out to pick from a list
+        provider: Option<String>,
+    },
 }
 
 #[async_trait]
@@ -39,7 +54,7 @@ pub trait Provider: Send + Sync {
         false
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers;
+    fn cli(&self) -> &dyn CliHandlers;
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response;
 
     async fn handle_messages_with_conversation_identity(
@@ -169,6 +184,34 @@ pub enum AuthState {
     Missing,
 }
 
+impl AuthState {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::SignedIn {
+                account,
+                expires_ms,
+            } => {
+                let who = account.as_ref().map_or("signed in".to_string(), |account| {
+                    format!("signed in as {account}")
+                });
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_millis() as u64);
+                match expires_ms {
+                    Some(expires) if *expires > now_ms => format!(
+                        "{who}, token good for {}",
+                        crate::ui::duration(std::time::Duration::from_millis(expires - now_ms))
+                    ),
+                    Some(_) => format!("{who}, renews on next use"),
+                    None => who,
+                }
+            }
+            Self::KeySaved => "API key set".to_string(),
+            Self::Missing => "not set up".to_string(),
+        }
+    }
+}
+
 /// What a provider said about an API key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyCheck {
@@ -186,6 +229,19 @@ pub trait CliHandlers: Send + Sync {
     fn device(&self) -> Result<()>;
     fn status(&self) -> Result<()>;
     fn logout(&self) -> Result<()>;
+}
+
+pub fn intern_provider_name(name: &str) -> &'static str {
+    static INTERNED: once_cell::sync::Lazy<
+        std::sync::Mutex<std::collections::HashSet<&'static str>>,
+    > = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut guard = INTERNED.lock().unwrap();
+    if let Some(&existing) = guard.get(name) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    guard.insert(leaked);
+    leaked
 }
 
 #[derive(Debug, Clone)]

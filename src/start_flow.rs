@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::provider::AuthState;
 use crate::registry::Registry;
-use crate::route::{CLAUDE, PROVIDERS};
+use crate::route::{CLAUDE, routable_providers};
 use crate::tiers::{self, Basis};
 use crate::ui::{self, Mood};
 use crate::{config, config_keys, prompt};
@@ -114,11 +114,12 @@ fn pick_named(registry: &Registry, asked: &str) -> Result<Pick> {
     if asked == CLAUDE {
         return Ok(Pick::Claude);
     }
-    let Some(provider) = PROVIDERS.iter().find(|provider| **provider == asked) else {
+    let providers = routable_providers(registry);
+    let Some(&provider) = providers.iter().find(|provider| **provider == asked) else {
         bail!(
             "cc-proxy can't send Claude Code to `{asked}`. Use one of: {}, or `{CLAUDE}` for your \
              Claude subscription.",
-            PROVIDERS.join(", ")
+            providers.join(", ")
         );
     };
     if is_signed_in(registry, provider) {
@@ -126,15 +127,17 @@ fn pick_named(registry: &Registry, asked: &str) -> Result<Pick> {
     }
     let name = ui::provider_name(provider);
     if !prompt::confirm(&format!("{name} isn't signed in. Sign in now?"), false)? {
-        bail!("{name} isn't signed in. Run `cc-proxy {provider} auth login`, then try again.");
+        bail!("{name} isn't signed in. Run `cc-proxy auth login {provider}`, then try again.");
     }
     sign_in(registry, provider)?;
     Ok(Pick::Provider(provider))
 }
 
 fn pick_for_start(registry: &Registry) -> Result<Pick> {
-    let signed_in: Vec<&'static str> = PROVIDERS
-        .into_iter()
+    let providers = routable_providers(registry);
+    let signed_in: Vec<&'static str> = providers
+        .iter()
+        .copied()
         .filter(|provider| is_signed_in(registry, provider))
         .collect();
     let remembered = config::route().provider;
@@ -153,7 +156,7 @@ fn pick_for_start(registry: &Registry) -> Result<Pick> {
             Ok(Pick::Provider(only))
         }
         [] => {
-            let mut options: Vec<String> = PROVIDERS
+            let mut options: Vec<String> = providers
                 .iter()
                 .map(|provider| ui::provider_name(provider).to_string())
                 .collect();
@@ -163,7 +166,7 @@ fn pick_for_start(registry: &Registry) -> Result<Pick> {
                 &options,
                 0,
             )?;
-            let Some(provider) = PROVIDERS.get(answer) else {
+            let Some(&provider) = providers.get(answer) else {
                 return Ok(Pick::Claude);
             };
             sign_in(registry, provider)?;
@@ -196,14 +199,14 @@ fn is_signed_in(registry: &Registry, provider: &str) -> bool {
 
 fn sign_in(registry: &Registry, provider: &str) -> Result<()> {
     let name = ui::provider_name(provider);
-    let cli = registry
+    let handler = registry
         .provider(provider)
-        .with_context(|| format!("{name} isn't a known provider"))?
-        .cli();
+        .with_context(|| format!("{name} isn't a known provider"))?;
+    let cli = handler.cli();
     cli.login()?;
     if cli.auth_state() == AuthState::Missing {
         bail!(
-            "{name} still isn't signed in. Run `cc-proxy {provider} auth login`, then try again."
+            "{name} still isn't signed in. Run `cc-proxy auth login {provider}`, then try again."
         );
     }
     Ok(())
@@ -217,7 +220,7 @@ mod tests {
     fn use_takes_a_provider_or_claude_in_any_case() {
         let registry = Registry::new();
         assert_eq!(pick_named(&registry, " Claude ").unwrap(), Pick::Claude);
-        let error = pick_named(&registry, "gemini").unwrap_err().to_string();
+        let error = pick_named(&registry, "unknown").unwrap_err().to_string();
         assert!(error.contains("codex, kimi, cursor, grok"), "{error}");
         assert!(error.contains("`claude`"), "{error}");
     }

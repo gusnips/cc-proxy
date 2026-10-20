@@ -1,10 +1,12 @@
 pub const MODEL_PREFIX: &str = "opencode-go/";
+pub const ZEN_MODEL_PREFIX: &str = "opencode-zen/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointKind {
     ChatCompletions,
     Messages,
     Responses,
+    Google,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +188,205 @@ pub const MODELS: &[ModelSpec] = &[
         id: "space-bunny-free",
         endpoint: EndpointKind::ChatCompletions,
     },
+    ModelSpec {
+        id: "gemini-4-argon-contributor",
+        endpoint: EndpointKind::Google,
+    },
+];
+
+pub const ZEN_MODELS: &[ModelSpec] = &[
+    ModelSpec {
+        id: "gpt-6-astra",
+        endpoint: EndpointKind::Responses,
+    },
+    ModelSpec {
+        id: "gpt-6-sol",
+        endpoint: EndpointKind::Responses,
+    },
+    ModelSpec {
+        id: "gpt-6.1-sol",
+        endpoint: EndpointKind::Responses,
+    },
+    ModelSpec {
+        id: "gpt-6-luna",
+        endpoint: EndpointKind::Responses,
+    },
+    ModelSpec {
+        id: "gpt-5.6-sol",
+        endpoint: EndpointKind::Responses,
+    },
+    ModelSpec {
+        id: "gpt-5.6-terra",
+        endpoint: EndpointKind::Responses,
+    },
+    ModelSpec {
+        id: "gpt-5.6-luna",
+        endpoint: EndpointKind::Responses,
+    },
+    ModelSpec {
+        id: "gpt-5.5",
+        endpoint: EndpointKind::Responses,
+    },
+    ModelSpec {
+        id: "claude-fable-5-1",
+        endpoint: EndpointKind::Messages,
+    },
+    ModelSpec {
+        id: "claude-opus-5-5",
+        endpoint: EndpointKind::Messages,
+    },
+    ModelSpec {
+        id: "claude-sonnet-5-5",
+        endpoint: EndpointKind::Messages,
+    },
+    ModelSpec {
+        id: "claude-haiku-5-5",
+        endpoint: EndpointKind::Messages,
+    },
+    ModelSpec {
+        id: "gemini-4-argon",
+        endpoint: EndpointKind::Google,
+    },
+    ModelSpec {
+        id: "gemini-3.8-flash",
+        endpoint: EndpointKind::Google,
+    },
+    ModelSpec {
+        id: "gemini-3.7-flash",
+        endpoint: EndpointKind::Google,
+    },
+    ModelSpec {
+        id: "gemini-3.6-flash",
+        endpoint: EndpointKind::Google,
+    },
+    ModelSpec {
+        id: "gemini-3.5-flash",
+        endpoint: EndpointKind::Google,
+    },
+    ModelSpec {
+        id: "gemini-3.5-flash-lite",
+        endpoint: EndpointKind::Google,
+    },
+    ModelSpec {
+        id: "gemini-3.1-pro",
+        endpoint: EndpointKind::Google,
+    },
+    ModelSpec {
+        id: "gemini-3-flash",
+        endpoint: EndpointKind::Google,
+    },
+    ModelSpec {
+        id: "grok-4.7",
+        endpoint: EndpointKind::Responses,
+    },
+    ModelSpec {
+        id: "grok-4.6",
+        endpoint: EndpointKind::Responses,
+    },
+    ModelSpec {
+        id: "grok-4.5",
+        endpoint: EndpointKind::Responses,
+    },
+    ModelSpec {
+        id: "qwen3.8-max",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "qwen3.8-flash",
+        endpoint: EndpointKind::Messages,
+    },
+    ModelSpec {
+        id: "qwen3.7-max",
+        endpoint: EndpointKind::Messages,
+    },
+    ModelSpec {
+        id: "qwen3.7-plus",
+        endpoint: EndpointKind::Messages,
+    },
+    ModelSpec {
+        id: "deepseek-v4.1-flash",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "deepseek-v4-pro",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "minimax-m3",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "glm-5.3-flash",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "glm-5.3",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "kimi-k3",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "kimi-k2.7-code",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "mistral-large-4",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "big-pickle",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "glm-5.3-flash-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "deepseek-v4.1-flash-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "space-bunny-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "beam-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "ll-alpha-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "longcat-2.5-preview-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "exo-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "mimo-v2.6-flash-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "mimo-v2.5-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "nemotron-3-ultra-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "nemotron-3.5-lightning-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
+    ModelSpec {
+        id: "nemotron-3.5-super-vl-free",
+        endpoint: EndpointKind::ChatCompletions,
+    },
 ];
 
 /// A model ID resolved to the wire protocol used for the upstream request.
@@ -223,13 +424,46 @@ pub fn resolve(raw: &str) -> Option<ResolvedModel> {
 /// `scripts/refresh-opencode-models.py` applies the same rules when it
 /// registers new catalog entries, so keep the two in sync.
 pub fn infer_endpoint(id: &str) -> EndpointKind {
-    if id.starts_with("minimax-") || id.starts_with("qwen") {
+    if id.starts_with("gemini-") {
+        EndpointKind::Google
+    } else if id.starts_with("minimax-") || id.starts_with("qwen") || id.starts_with("claude-") {
         EndpointKind::Messages
     } else if id.starts_with("grok-") || id.starts_with("gpt-") || id.starts_with("muse-spark-") {
         EndpointKind::Responses
     } else {
         EndpointKind::ChatCompletions
     }
+}
+
+pub fn is_zen_free_model(id: &str) -> bool {
+    id == "big-pickle" || id.ends_with("-free")
+}
+
+pub fn resolve_zen(raw: &str) -> Option<ResolvedModel> {
+    let prefixed = raw.strip_prefix(ZEN_MODEL_PREFIX);
+    let id = prefixed?;
+    if id.is_empty() {
+        return None;
+    }
+    if let Some(known) = ZEN_MODELS.iter().find(|model| model.id == id) {
+        return Some(ResolvedModel {
+            id: id.to_string(),
+            endpoint: known.endpoint,
+        });
+    }
+    Some(ResolvedModel {
+        id: id.to_string(),
+        endpoint: infer_endpoint(id),
+    })
+}
+
+pub fn advertised_zen_models() -> Vec<String> {
+    let mut result: Vec<String> = ZEN_MODELS
+        .iter()
+        .map(|model| format!("{ZEN_MODEL_PREFIX}{}", model.id))
+        .collect();
+    result.sort_unstable();
+    result
 }
 
 pub fn advertised_models() -> Vec<String> {
@@ -264,9 +498,13 @@ mod tests {
             .iter()
             .filter(|model| model.endpoint == EndpointKind::Responses)
             .count();
+        let google = MODELS
+            .iter()
+            .filter(|model| model.endpoint == EndpointKind::Google)
+            .count();
         // Partition counts are derived, not hardcoded, so the refresh script
         // can add catalog entries without touching this test.
-        assert_eq!(chat + messages + responses, MODELS.len());
+        assert_eq!(chat + messages + responses + google, MODELS.len());
         assert!(chat > messages);
         assert!(messages > 0);
         assert!(responses > 0);

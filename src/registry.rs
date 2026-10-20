@@ -62,12 +62,22 @@ impl Registry {
             crate::providers::opencode::advertised_models(),
         );
         models.insert(
+            "opencode-zen".into(),
+            crate::providers::opencode::advertised_zen_models(),
+        );
+        models.insert(
             "glm".into(),
             GLM_MODELS.iter().map(|m| (*m).to_string()).collect(),
         );
         models.insert(
             "copilot".into(),
             crate::providers::copilot::advertised_models(),
+        );
+        let anthropic = Arc::new(crate::providers::custom::CustomProvider::new_anthropic());
+        models.insert("anthropic".into(), anthropic.supported_models());
+        models.insert(
+            "gemini".into(),
+            crate::providers::gemini::advertised_models(),
         );
 
         let mut handlers = BTreeMap::new();
@@ -78,11 +88,26 @@ impl Registry {
                 "cursor" => Arc::new(crate::providers::cursor::CursorProvider::new()),
                 "grok" => Arc::new(crate::providers::grok::GrokProvider::new()),
                 "opencode" => Arc::new(crate::providers::opencode::OpenCodeProvider::new()),
+                "opencode-zen" => Arc::new(crate::providers::opencode::OpenCodeProvider::new_zen()),
                 "glm" => Arc::new(crate::providers::glm::GlmProvider::new()),
                 "copilot" => Arc::new(crate::providers::copilot::CopilotProvider::new()),
+                "anthropic" => anthropic.clone(),
+                "gemini" => Arc::new(crate::providers::gemini::GeminiProvider::new()),
                 _ => Arc::new(PlaceholderProvider::new(name, entries.clone())),
             };
             handlers.insert(name.clone(), handler);
+        }
+
+        for (name, cfg) in crate::config::custom_providers() {
+            let key = name.trim().to_ascii_lowercase();
+            if key.is_empty() || handlers.contains_key(&key) {
+                continue;
+            }
+            let provider = Arc::new(crate::providers::custom::CustomProvider::from_config(
+                &key, cfg,
+            ));
+            models.insert(key.clone(), provider.supported_models());
+            handlers.insert(key, provider);
         }
 
         Self { models, handlers }
@@ -106,7 +131,12 @@ impl Registry {
     }
 
     pub fn provider(&self, name: &str) -> Option<Arc<dyn Provider>> {
-        self.handlers.get(name).cloned()
+        let lookup = if name == "opencode-go" {
+            "opencode"
+        } else {
+            name
+        };
+        self.handlers.get(lookup).cloned()
     }
 
     pub fn supported_models_for(&self, provider: &str) -> Vec<String> {
@@ -183,8 +213,23 @@ impl Registry {
         if normalized.starts_with(crate::providers::opencode::model::MODEL_PREFIX) {
             return self.handlers.get("opencode").cloned();
         }
+        if normalized.starts_with(crate::providers::opencode::model::ZEN_MODEL_PREFIX) {
+            return self.handlers.get("opencode-zen").cloned();
+        }
+        if let Some(rest) = normalized.strip_prefix("anthropic/")
+            && !rest.is_empty()
+        {
+            return self.handlers.get("anthropic").cloned();
+        }
         if is_cursor_model(&normalized) {
             return self.handlers.get("cursor").cloned();
+        }
+        if let Some((prefix, rest)) = normalized.split_once('/')
+            && !rest.is_empty()
+            && prefix != "opencode"
+            && let Some(handler) = self.handlers.get(prefix)
+        {
+            return Some(handler.clone());
         }
 
         // Explicit priority, not map order: a bare ID owned by several
@@ -192,11 +237,32 @@ impl Registry {
         // qualified form above is the only way to select the OpenCode Go
         // version of a conflicting ID. `opencode` stays last: it resells
         // other providers' models, so native catalogs win bare IDs.
-        for name in ["codex", "kimi", "cursor", "grok", "glm", "opencode"] {
+        for name in [
+            "codex", "kimi", "cursor", "grok", "glm", "gemini", "opencode",
+        ] {
             if self
                 .models
                 .get(name)
                 .is_some_and(|entries| entries.iter().any(|candidate| candidate == &normalized))
+            {
+                return self.handlers.get(name).cloned();
+            }
+        }
+        for (name, entries) in &self.models {
+            if ![
+                "codex",
+                "kimi",
+                "cursor",
+                "grok",
+                "glm",
+                "gemini",
+                "opencode",
+                "opencode-zen",
+                "copilot",
+                "anthropic",
+            ]
+            .contains(&name.as_str())
+                && entries.iter().any(|candidate| candidate == &normalized)
             {
                 return self.handlers.get(name).cloned();
             }
@@ -219,6 +285,9 @@ impl Registry {
         }
         if normalized.starts_with("glm-") {
             return self.handlers.get("glm").cloned();
+        }
+        if normalized.starts_with("gemini-") {
+            return self.handlers.get("gemini").cloned();
         }
 
         None
@@ -305,7 +374,7 @@ impl Provider for PlaceholderProvider {
         self.models.clone()
     }
 
-    fn cli(&self) -> &'static dyn CliHandlers {
+    fn cli(&self) -> &dyn CliHandlers {
         match self.name {
             "codex" => &CODEX_CLI,
             "kimi" => &KIMI_CLI,
@@ -693,5 +762,28 @@ mod tests {
         // The [1m] compaction hint is stripped before routing.
         let p = registry.provider_for_model("glm-5.2[1m]");
         assert_eq!(p.expect("provider").name(), "glm");
+    }
+
+    #[test]
+    fn gemini_opencode_zen_and_anthropic_models_route_to_their_providers() {
+        let registry = Registry::new();
+        for (model, expected) in [
+            ("gemini-4-argon", "gemini"),
+            ("gemini/gemini-3.8-flash", "gemini"),
+            ("gemini-99-unlisted", "gemini"),
+            ("opencode-zen/gemini-4-argon", "opencode-zen"),
+            ("opencode-zen/claude-sonnet-5-5", "opencode-zen"),
+            ("opencode-zen/big-pickle", "opencode-zen"),
+            ("anthropic/claude-sonnet-5-5", "anthropic"),
+            ("anthropic/claude-opus-4-8", "anthropic"),
+        ] {
+            let p = registry.provider_for_model(model);
+            assert_eq!(
+                p.as_ref().map(|h| h.name()),
+                Some(expected),
+                "{model} should route to {expected}"
+            );
+        }
+        assert_eq!(registry.provider("opencode-go").unwrap().name(), "opencode");
     }
 }

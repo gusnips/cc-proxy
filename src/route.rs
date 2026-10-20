@@ -18,10 +18,34 @@ use crate::registry::Registry;
 use crate::ui::{self, Mood};
 use crate::{claude_settings, config, config_keys, daemon, tiers};
 
-/// The providers `start` and `use` can send Claude Code to.
-pub const PROVIDERS: [&str; 7] = [
-    "codex", "kimi", "cursor", "grok", "copilot", "glm", "opencode",
+/// The built-in providers `start` and `use` can send Claude Code to.
+pub const PROVIDERS: [&str; 10] = [
+    "codex",
+    "kimi",
+    "cursor",
+    "grok",
+    "copilot",
+    "glm",
+    "anthropic",
+    "gemini",
+    "opencode",
+    "opencode-zen",
 ];
+
+/// Every provider `start` and `use` can send Claude Code to: the built-ins in
+/// their canonical order, followed by any user-configured custom providers.
+pub fn routable_providers(registry: &Registry) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = PROVIDERS
+        .into_iter()
+        .filter(|name| registry.provider(name).is_some())
+        .collect();
+    for name in registry.list_provider_names() {
+        if !out.contains(&name.as_str()) {
+            out.push(crate::provider::intern_provider_name(&name));
+        }
+    }
+    out
+}
 
 /// What `cc-proxy use` takes to mean "no routing".
 pub const CLAUDE: &str = "claude";
