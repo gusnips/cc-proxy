@@ -321,6 +321,24 @@ fn normalized_tool_result_image(part: &Value) -> Option<String> {
     Some(image_source_to_url(&source))
 }
 
+fn is_server_only_tool(tool: &Value) -> bool {
+    tool.get("input_schema").is_none()
+        && tool
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind != "custom" && kind != "function")
+}
+
+fn ensure_object_schema(schema: Option<&Value>) -> Value {
+    let mut map = schema
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    map.entry("type".to_string())
+        .or_insert_with(|| Value::String("object".to_string()));
+    Value::Object(map)
+}
+
 fn read_tools(req: &MessagesRequest) -> anyhow::Result<Vec<Value>> {
     let Some(value) = req.extra.get("tools") else {
         return Ok(Vec::new());
@@ -330,6 +348,7 @@ fn read_tools(req: &MessagesRequest) -> anyhow::Result<Vec<Value>> {
         .ok_or_else(|| anyhow::anyhow!("tools must be an array"))?;
     tools
         .iter()
+        .filter(|tool| !is_server_only_tool(tool))
         .map(|tool| {
             let name = tool
                 .get("name")
@@ -337,10 +356,7 @@ fn read_tools(req: &MessagesRequest) -> anyhow::Result<Vec<Value>> {
                 .filter(|name| !name.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("tool name must be a non-empty string"))?;
             let description = tool.get("description").cloned();
-            let parameters = tool
-                .get("input_schema")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
+            let parameters = ensure_object_schema(tool.get("input_schema"));
             let mut function = serde_json::Map::new();
             function.insert("name".into(), Value::String(name.to_string()));
             if let Some(description) = description.filter(|value| !value.is_null()) {
@@ -1883,5 +1899,25 @@ mod tests {
         let failure = upstream_error::carried(&error).expect("classified upstream error");
         assert_eq!(failure.status, http::StatusCode::BAD_REQUEST);
         assert!(failure.message.starts_with("prompt is too long"));
+    }
+
+    #[test]
+    fn skips_server_only_tools_and_gives_every_function_schema_an_object_type() {
+        let req = request(json!({
+            "model": "deepseek-v4.1-flash-free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "advisor_20260301", "name": "advisor"},
+                {"name": "Bash", "input_schema": {}}
+            ]
+        }));
+        let prepared = prepare_request(&req, "deepseek-v4.1-flash-free").unwrap();
+        let tools = prepared.tools.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "Bash");
+        assert_eq!(
+            tools[0]["function"]["parameters"],
+            json!({"type": "object"})
+        );
     }
 }

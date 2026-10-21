@@ -137,6 +137,14 @@ pub fn prepare_request(body: &MessagesRequest, schemas: ToolSchemas) -> anyhow::
             .iter()
             .filter_map(|tool| {
                 let name = tool.get("name")?.as_str()?;
+                if tool.get("input_schema").is_none()
+                    && tool
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| kind != "custom" && kind != "function")
+                {
+                    return None;
+                }
                 let mut decl = Map::new();
                 decl.insert("name".to_string(), Value::String(name.to_string()));
                 if let Some(desc) = tool.get("description").and_then(Value::as_str)
