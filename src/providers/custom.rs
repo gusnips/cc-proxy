@@ -728,7 +728,9 @@ pub fn validate_base_url(raw: &str) -> Result<String> {
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
-fn discover_models(base_url: &str, api_key: Option<&str>) -> Vec<String> {
+/// The endpoint's model ids from `GET <base>/models`, or none when it doesn't
+/// answer within `timeout` with an OpenAI-style list.
+fn discover_models(base_url: &str, api_key: Option<&str>, timeout: Duration) -> Vec<String> {
     let Ok(mut url) = reqwest::Url::parse(base_url) else {
         return Vec::new();
     };
@@ -740,8 +742,8 @@ fn discover_models(base_url: &str, api_key: Option<&str>) -> Vec<String> {
     };
     url.set_path(&models_path);
     let Ok(client) = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(3))
+        .connect_timeout(timeout.min(Duration::from_secs(10)))
+        .timeout(timeout)
         .build()
     else {
         return Vec::new();
@@ -788,7 +790,7 @@ pub fn run_provider_add(
     };
     let (existing_key, _) = config::custom_provider_api_key(&name, &temp_cfg);
     if models.is_empty() {
-        models = discover_models(&base_url, existing_key.as_deref());
+        models = discover_models(&base_url, existing_key.as_deref(), Duration::from_secs(3));
     }
     let existing = config::custom_providers().remove(&name);
     let cfg = CustomProviderConfig {
@@ -805,12 +807,35 @@ pub fn run_provider_add(
         base_url,
         path.display()
     );
-    if !models.is_empty() {
-        println!("Models: {}", models.join(", "));
-    } else {
+    if models.is_empty() {
         println!("Route any model with `{name}/<model-id>`.");
+    } else {
+        println!(
+            "It lists {} models. `cc-proxy models choose {name}` picks one for each Claude name.",
+            models.len()
+        );
     }
     Ok(())
+}
+
+/// Fetches the live model list of a provider you added and saves it, for
+/// catalogs such as OpenRouter's that change every week.
+pub fn refresh_models(name: &str) -> Result<Vec<String>> {
+    let Some(mut cfg) = config::custom_providers().remove(name) else {
+        bail!("`{name}` isn't a provider you added. `cc-proxy provider list` shows them.");
+    };
+    let (key, _) = config::custom_provider_api_key(name, &cfg);
+    let models = discover_models(&cfg.base_url, key.as_deref(), Duration::from_secs(30));
+    if models.is_empty() {
+        bail!(
+            "{name} sent no model list from {}/models. Check the address, and the key with \
+             `cc-proxy auth status {name}`.",
+            cfg.base_url.trim_end_matches('/')
+        );
+    }
+    cfg.models = models.clone();
+    config::save_custom_provider(name, &cfg)?;
+    Ok(models)
 }
 
 pub fn run_provider_remove(name: &str) -> Result<()> {
@@ -828,21 +853,44 @@ pub fn run_provider_remove(name: &str) -> Result<()> {
 pub fn run_provider_list(registry: &crate::registry::Registry) -> Result<()> {
     let styled = ui::styled(&std::io::stdout());
     let custom = config::custom_providers();
+    let route = config::route();
+    let active = route.target();
     for id in registry.list_provider_names() {
         let Some(provider) = registry.provider(&id) else {
             continue;
         };
         let label = ui::strong(&id, ui::provider_color(&id), styled);
         let state = provider.cli().auth_state().describe();
+        let here = if active == Some(id.as_str()) {
+            " · Claude Code goes here"
+        } else {
+            ""
+        };
         if let Some(cfg) = custom.get(&id) {
             println!(
-                "{label}: custom ({}, {}) · {state}",
+                "{label}: custom ({}, {}) · {state}{here}",
                 cfg.format.as_str(),
                 cfg.base_url
             );
         } else {
-            println!("{label}: {} · {state}", ui::provider_name(&id));
+            println!("{label}: {} · {state}{here}", ui::provider_name(&id));
         }
     }
+    println!();
+    if active.is_some() {
+        println!(
+            "Switch with `cc-proxy use <provider>`, or go back to your Claude subscription with \
+             `cc-proxy use claude`."
+        );
+    } else {
+        println!(
+            "Claude Code uses your Claude subscription. `cc-proxy use <provider>` sends it through \
+             one."
+        );
+    }
+    println!(
+        "Sign in with `cc-proxy auth login <provider>`, and pick models with \
+         `cc-proxy models choose <provider>`."
+    );
     Ok(())
 }

@@ -12,7 +12,7 @@ One `start` process supports every provider. Choose based on the account you hav
 | [Grok](/providers/grok/) | grok.com | Responses API | `grok-composer-2.5-fast`, `grok-4.5`, `grok-4.6`, `grok-4.7`; unlisted `grok-*` forward raw | Function tools, reasoning, web search, X search, citations |
 | [OpenCode Go](/providers/opencode-go/) | OpenCode Go subscription | OpenAI-compatible Chat Completions, OpenAI Responses, or Anthropic-compatible Messages | Non-conflicting bare IDs and `opencode-go/<model-id>` forms | Curated models tested and benchmarked for coding-agent use |
 | [GLM](/providers/glm/) | z.ai API key | Anthropic Messages, native | `glm-5.3`, `glm-5.3-flash`; unlisted `glm-*` forward raw | No translation; requests forward verbatim |
-| [GitHub Copilot](/providers/copilot/) | GitHub account with a Copilot plan | OpenAI-style chat completions | `copilot/<id>`; `cc-proxy models` lists yours | Function tools, image input, premium requests billed per turn |
+| [GitHub Copilot](/providers/copilot/) | GitHub account with a Copilot plan | OpenAI-style chat completions | `copilot/<id>`; `cc-proxy models list` lists yours | Function tools, image input, premium requests billed per turn |
 | [Cursor Agent](/providers/cursor-agent/) | Cursor account | HTTP/2 Connect stream | Cursor modes and `cursor:<model-id>` prefixes | Dynamic model catalog, effort variants, images, plan and ask modes, session continuation |
 
 ## Practical guidance
@@ -32,4 +32,4 @@ All providers route by model ID, use proxy-owned credentials, refresh tokens whe
 <strong>Account policy matters.</strong> Provider subscriptions, model access, regional availability, rate limits, and rules for unofficial clients can change. Review the terms for your account before using a provider through the proxy.
 </div>
 
-Use `cc-proxy models` for the current compact catalog and `cc-proxy models --full` for all advertised aliases. The [Models and routing](/using/models-and-routing/) page explains aliases and discovery.
+Use `cc-proxy models list` for the current compact catalog and `cc-proxy models list --full` for all advertised aliases. The [Models and routing](/using/models-and-routing/) page explains aliases and discovery.

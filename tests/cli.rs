@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use std::env;
 #[cfg(unix)]
@@ -27,9 +28,9 @@ fn version_aliases_print_expected_version() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn models_prints_all_providers() -> Result<(), Box<dyn std::error::Error>> {
+fn models_list_prints_all_providers() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("cc-proxy")?;
-    cmd.arg("models");
+    cmd.args(["models", "list"]);
     let out = String::from_utf8(cmd.output()?.stdout)?;
     assert!(out.contains("codex:"));
     assert!(out.contains("kimi:"));
@@ -37,8 +38,8 @@ fn models_prints_all_providers() -> Result<(), Box<dyn std::error::Error>> {
     assert!(out.contains("cursor:"));
 
     let mut cmd = Command::cargo_bin("cc-proxy")?;
-    cmd.args(["models", "--full"]);
-    cmd.output()?;
+    cmd.args(["models", "list", "--full"]);
+    cmd.assert().success();
     Ok(())
 }
 
@@ -59,9 +60,10 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
         "Restart the background proxy service",
         "Validate the config file and ask a running service to reload it",
         "Attach a read-only dashboard to a running proxy",
-        "List supported provider models",
+        "List every provider and where Claude Code goes, or add and remove your own",
+        "Sign in to providers, or see who is signed in (login, device, status, logout)",
+        "See or choose the model each Claude name uses, and list provider models",
         "Manage the background proxy service (start, stop, status, restart, reload)",
-        "Manage provider authentication (login, device, status, logout)",
         "Show how much of your Codex, Kimi and OpenCode Go plans you have used",
     ] {
         assert!(stdout.contains(description), "missing: {description}");
@@ -116,7 +118,7 @@ fn provider_logout_without_auth_is_success() -> Result<(), Box<dyn std::error::E
 #[test]
 fn models_output_is_stable_order() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("cc-proxy")?;
-    cmd.args(["models", "--full"]);
+    cmd.args(["models", "list", "--full"]);
     let output = cmd.output()?;
     let out = String::from_utf8(output.stdout)?;
     let codex_pos = out.find("codex:").unwrap_or(0);
@@ -579,6 +581,85 @@ fn usage_with_a_rejected_sign_in_says_how_to_fix_it_and_exits_two()
     Ok(())
 }
 
+/// Answers one `GET .../models` with an OpenAI-style list, like OpenRouter's.
+#[cfg(unix)]
+fn serve_model_list_once(ids: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let base_url = format!("http://{}/v1", listener.local_addr()?);
+    let body = serde_json::json!({
+        "data": ids.iter().map(|id| serde_json::json!({"id": id})).collect::<Vec<_>>()
+    })
+    .to_string();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0; 1024];
+        while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+            let read = stream.read(&mut chunk).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+        }
+        assert!(String::from_utf8_lossy(&request).starts_with("GET /v1/models "));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+             connection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    Ok(base_url)
+}
+
+#[cfg(unix)]
+#[test]
+fn models_refresh_fetches_and_saves_a_custom_providers_list()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost")
+            .args(args);
+        cmd
+    };
+    let base_url = serve_model_list_once(&["vendor/model-a", "vendor/model-b"])?;
+    run(&[
+        "provider",
+        "add",
+        "local",
+        &base_url,
+        "--model",
+        "placeholder",
+    ])
+    .assert()
+    .success();
+
+    run(&["models", "refresh", "local"])
+        .assert()
+        .success()
+        .stdout(contains("local lists 2 models now."));
+    run(&["models", "list", "local"])
+        .assert()
+        .success()
+        .stdout(contains("local/vendor/model-a"))
+        .stdout(contains("placeholder").not());
+
+    // A reseller's names start empty, and bare `models` needs a provider.
+    run(&["models", "show", "local"])
+        .assert()
+        .success()
+        .stdout(contains("opus    no model yet"));
+    run(&["models"])
+        .assert()
+        .failure()
+        .stderr(contains("No provider to use yet"));
+    Ok(())
+}
+
 #[test]
 fn custom_provider_add_auth_models_and_remove_round_trip() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -618,7 +699,7 @@ fn custom_provider_add_auth_models_and_remove_round_trip() -> Result<(), Box<dyn
         .stdout(contains("Format: openai"))
         .stdout(contains("https://openrouter.ai/api/v1"));
 
-    run(&["models"])
+    run(&["models", "list"])
         .assert()
         .success()
         .stdout(contains("anthropic:"))
@@ -629,7 +710,8 @@ fn custom_provider_add_auth_models_and_remove_round_trip() -> Result<(), Box<dyn
         .success()
         .stdout(contains(
             "openrouter: custom (openai, https://openrouter.ai/api/v1)",
-        ));
+        ))
+        .stdout(contains("`cc-proxy use <provider>` sends it through one"));
 
     run(&["provider", "remove", "openrouter"])
         .assert()

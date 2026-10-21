@@ -75,8 +75,8 @@ Claude Code asks for `opus`, `sonnet`, `haiku` and `fable`. cc-proxy gives each
 name a model from the provider you picked. To see them, or to change one:
 
 ```sh
-cc-proxy models map
-cc-proxy models map haiku gpt-6-luna
+cc-proxy models
+cc-proxy models set haiku gpt-6-luna
 cc-proxy models choose
 ```
 

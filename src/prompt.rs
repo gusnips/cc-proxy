@@ -113,7 +113,7 @@ pub fn choose(question: &str, options: &[String], default: usize) -> Result<usiz
     }
     if options.len() > MAX_SHOWN {
         println!(
-            "  ...and {} more. Type a number or a name; `cc-proxy models` lists them all.",
+            "  ...and {} more. Type a number or a name; `cc-proxy models list` shows them all.",
             options.len() - MAX_SHOWN
         );
     }

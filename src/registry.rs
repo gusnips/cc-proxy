@@ -309,7 +309,7 @@ impl Registry {
             parts.push(format!("{}: {}", provider, models.join(", ")));
         }
         format!(
-            "Supported: {}. Run `cc-proxy models` for the current catalog.",
+            "Supported: {}. Run `cc-proxy models list` for the current catalog.",
             parts.join("; ")
         )
     }

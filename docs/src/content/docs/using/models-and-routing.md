@@ -26,7 +26,7 @@ Claude Code asks for four model names: `fable`, `opus`, `sonnet` and `haiku`. It
 
 While routing is on, cc-proxy turns a tier into one model of the provider you picked with `cc-proxy start` or `cc-proxy use`. It looks in this order:
 
-1. Your choice, saved by `cc-proxy models choose` or `cc-proxy models map`.
+1. Your choice, saved by `cc-proxy models choose` or `cc-proxy models set`.
 2. A match it works out from the models the provider offers. A provider that resells other vendors' models (OpenCode Go, OpenCode Zen, and providers you add with `cc-proxy provider add`, such as OpenRouter) gets no match: you choose.
 3. Neither: an HTTP 400 that names `cc-proxy models choose`.
 
@@ -54,12 +54,13 @@ An explicit provider model ID skips this tier lookup. Codex's `codex.model` over
 ### See or change a name
 
 ```sh
+cc-proxy models                          # the four names on the current provider
+cc-proxy models show kimi                # another provider
 cc-proxy models choose                   # ask for each name, with search
 cc-proxy models choose opencode-zen      # another provider
-cc-proxy models map                      # the four names on the current provider
-cc-proxy models map opus gpt-6.1-sol     # choose one name directly
-cc-proxy models map opus --reset         # let cc-proxy pick again
-cc-proxy models map --provider kimi      # another provider
+cc-proxy models set opus gpt-6.1-sol     # choose one name directly
+cc-proxy models reset opus               # let cc-proxy pick again
+cc-proxy models refresh openrouter       # fetch a custom provider's live catalog
 ```
 
 `models choose` asks about each name in turn and lists the best fits first. Type part of a name to search the whole catalog: every word must match, so `claude opus` finds `openrouter/anthropic/claude-opus-4.1`. Type a number to pick from the list shown, or press Enter to keep the name as it is.
@@ -73,8 +74,8 @@ While routing is off, a Claude name gets an HTTP 400 that says so. That window s
 The model list changes faster than documentation. Ask the installed CLI:
 
 ```sh
-cc-proxy models
-cc-proxy models --full
+cc-proxy models list
+cc-proxy models list --full
 ```
 
 The compact command abbreviates Cursor's dynamic aliases. `--full` prints every alias discovered through the installed Cursor Agent catalog.

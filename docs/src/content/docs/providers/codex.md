@@ -28,7 +28,7 @@ To see how much of your 5-hour and weekly limits you have used, and when they re
 
 ## Models and service tiers
 
-Use `cc-proxy models` as the current catalog. Model access depends on your ChatGPT account. A model rejected by the subscription produces the upstream error verbatim.
+Use `cc-proxy models list` as the current catalog. Model access depends on your ChatGPT account. A model rejected by the subscription produces the upstream error verbatim.
 
 Claude-style names go to the newest Codex model of the matching family: `fable` to astra, `opus` to sol, `sonnet` to terra and `haiku` to luna. The name can carry any version, such as `claude-sonnet-5-5`, so a new Claude release needs no update. With the models built into cc-proxy today, that is `gpt-6-astra`, `gpt-6.1-sol`, `gpt-5.6-terra` and `gpt-6-luna`. A newer model in the Codex CLI cache takes over by itself. Set `codex.model` to pin one model instead.
 

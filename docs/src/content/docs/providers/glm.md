@@ -27,7 +27,7 @@ no environment key is set. The proxy does not implement a GLM login flow.
 
 ## Models
 
-Run `cc-proxy models` for the current catalog. GLM serves `glm-5.3` and
+Run `cc-proxy models list` for the current catalog. GLM serves `glm-5.3` and
 `glm-5.3-flash` under those bare IDs:
 
 ```sh

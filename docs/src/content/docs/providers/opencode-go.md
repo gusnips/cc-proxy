@@ -47,7 +47,7 @@ an expired refresh failure is returned rather than silently serving stale data.
 
 ## Models
 
-Run `cc-proxy models` for the statically registered catalog. Every
+Run `cc-proxy models list` for the statically registered catalog. Every
 registered model has a provider-qualified form. Bare IDs are also accepted when
 they do not belong to another provider:
 

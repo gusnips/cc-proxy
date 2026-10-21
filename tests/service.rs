@@ -367,21 +367,21 @@ fn picker_labels_follow_active_provider_maps_and_restore_the_original_picker() {
 
     sandbox
         .cmd()
-        .args(["models", "map", "opus", "grok-4.5"])
+        .args(["models", "set", "opus", "grok-4.5"])
         .assert()
         .success();
     assert_eq!(opus_label(&sandbox.settings()), "grok/grok-4.5");
     let active = std::fs::read(sandbox.settings_path()).unwrap();
     sandbox
         .cmd()
-        .args(["models", "map", "opus", "kimi-k2.6", "--provider", "kimi"])
+        .args(["models", "set", "opus", "kimi-k2.6", "--provider", "kimi"])
         .assert()
         .success();
     assert_eq!(std::fs::read(sandbox.settings_path()).unwrap(), active);
 
     sandbox
         .cmd()
-        .args(["models", "map", "opus", "--reset"])
+        .args(["models", "reset", "opus"])
         .assert()
         .success();
     assert_eq!(opus_label(&sandbox.settings()), "grok/grok-4.7");
@@ -390,7 +390,7 @@ fn picker_labels_follow_active_provider_maps_and_restore_the_original_picker() {
     assert_eq!(sandbox.pid(), pid);
     sandbox
         .cmd()
-        .args(["models", "map", "opus", "--reset"])
+        .args(["models", "reset", "opus"])
         .assert()
         .success();
     assert_eq!(opus_label(&sandbox.settings()), "kimi/k3");
@@ -403,7 +403,7 @@ fn picker_labels_follow_active_provider_maps_and_restore_the_original_picker() {
     let off = std::fs::read(sandbox.settings_path()).unwrap();
     sandbox
         .cmd()
-        .args(["models", "map", "opus", "grok-4.5", "--provider", "grok"])
+        .args(["models", "set", "opus", "grok-4.5", "--provider", "grok"])
         .assert()
         .success();
     assert_eq!(std::fs::read(sandbox.settings_path()).unwrap(), off);
@@ -489,12 +489,12 @@ fn use_takes_an_api_key_for_a_provider_that_signs_in_with_one() {
 }
 
 #[test]
-fn models_map_shows_chooses_and_resets_a_claude_name() {
+fn models_show_set_and_reset_a_claude_name() {
     let sandbox = Sandbox::new();
 
     sandbox
         .cmd()
-        .args(["models", "map", "--provider", "grok"])
+        .args(["models", "show", "grok"])
         .assert()
         .success()
         .stdout(contains("Claude names on Grok:"))
@@ -504,7 +504,7 @@ fn models_map_shows_chooses_and_resets_a_claude_name() {
 
     sandbox
         .cmd()
-        .args(["models", "map", "Opus", "grok-4.5", "--provider", "grok"])
+        .args(["models", "set", "Opus", "grok-4.5", "--provider", "grok"])
         .assert()
         .success()
         .stdout(contains("opus    grok-4.5 (your choice)"));
@@ -512,7 +512,7 @@ fn models_map_shows_chooses_and_resets_a_claude_name() {
 
     sandbox
         .cmd()
-        .args(["models", "map", "opus", "--reset", "--provider", "grok"])
+        .args(["models", "reset", "opus", "--provider", "grok"])
         .assert()
         .success()
         .stdout(contains("opus    grok-4.7 (picked by cc-proxy)"));
@@ -520,14 +520,14 @@ fn models_map_shows_chooses_and_resets_a_claude_name() {
 }
 
 #[test]
-fn models_map_names_what_is_wrong_with_what_you_typed() {
+fn models_set_names_what_is_wrong_with_what_you_typed() {
     let sandbox = Sandbox::new();
 
     sandbox
         .cmd()
         .args([
             "models",
-            "map",
+            "set",
             "opus",
             "no-such-model",
             "--provider",
@@ -538,16 +538,16 @@ fn models_map_names_what_is_wrong_with_what_you_typed() {
         .stderr(contains("doesn't serve a model called `no-such-model`"));
     sandbox
         .cmd()
-        .args(["models", "map", "gemini", "grok-4.5", "--provider", "grok"])
+        .args(["models", "set", "gemini", "grok-4.5", "--provider", "grok"])
         .assert()
         .failure()
         .stderr(contains("fable, opus, sonnet, haiku"));
     sandbox
         .cmd()
-        .args(["models", "map"])
+        .arg("models")
         .assert()
         .failure()
-        .stderr(contains("Name a provider with `--provider`"));
+        .stderr(contains("No provider to use yet"));
 }
 
 #[test]

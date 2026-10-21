@@ -32,14 +32,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Print version information
-    Version,
-    /// Old shell functions still call this. It removes the hook and says what to do next
-    #[command(hide = true, disable_help_flag = true)]
-    Claude {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<std::ffi::OsString>,
-    },
     /// Start the proxy as a background service and send Claude Code through it (default)
     #[command(alias = "serve")]
     Start {
@@ -56,13 +48,41 @@ enum Commands {
     },
     /// Switch where Claude Code goes: a provider, or `claude` for your own subscription
     Use {
-        /// codex, kimi or claude. Leave it out to pick from a list
+        /// A provider, or `claude`. Leave it out to pick from a list
         target: Option<String>,
     },
     /// Switch routing off and stop the background proxy service
     Stop,
     /// Show whether the proxy is running and where Claude Code goes
     Status,
+    /// List every provider and where Claude Code goes, or add and remove your own
+    Provider {
+        #[command(subcommand)]
+        command: Option<ProviderCommand>,
+    },
+    /// Sign in to providers, or see who is signed in (login, device, status, logout)
+    Auth {
+        #[command(subcommand)]
+        command: Option<cc_proxy::provider::AuthCommand>,
+    },
+    /// See or choose the model each Claude name uses, and list provider models
+    Models {
+        #[command(subcommand)]
+        command: Option<ModelsCommand>,
+    },
+    /// Show how much of your Codex, Kimi and OpenCode Go plans you have used
+    Usage {
+        /// Show only this provider; leave it out to see all of them
+        provider: Option<cc_proxy::usage::UsageProvider>,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach a read-only dashboard to a running proxy
+    Monitor {
+        #[arg(long)]
+        url: Option<reqwest::Url>,
+    },
     /// Restart the background proxy service
     Restart {
         #[arg(long)]
@@ -70,20 +90,10 @@ enum Commands {
     },
     /// Validate the config file and ask a running service to reload it
     Reload,
-    /// Attach a read-only dashboard to a running proxy
-    Monitor {
-        #[arg(long)]
-        url: Option<reqwest::Url>,
-    },
-    /// Open the monitor TUI with mock data and no proxy server
-    #[command(hide = true)]
-    Demo,
-    /// List supported provider models
-    Models {
-        #[arg(long)]
-        full: bool,
+    /// Manage the background proxy service (start, stop, status, restart, reload)
+    Service {
         #[command(subcommand)]
-        command: Option<ModelsCommand>,
+        command: Option<ServiceCommand>,
     },
     /// View or change config.json values
     Config {
@@ -99,29 +109,17 @@ enum Commands {
         #[arg(long)]
         version: Option<String>,
     },
-    /// Manage the background proxy service (start, stop, status, restart, reload)
-    Service {
-        #[command(subcommand)]
-        command: Option<ServiceCommand>,
+    /// Print version information
+    Version,
+    /// Old shell functions still call this. It removes the hook and says what to do next
+    #[command(hide = true, disable_help_flag = true)]
+    Claude {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
     },
-    /// Manage provider authentication (login, device, status, logout)
-    Auth {
-        #[command(subcommand)]
-        command: Option<cc_proxy::provider::AuthCommand>,
-    },
-    /// Add, remove, or list custom providers (OpenAI, Responses, or Anthropic compatible)
-    Provider {
-        #[command(subcommand)]
-        command: Option<ProviderCommand>,
-    },
-    /// Show how much of your Codex, Kimi and OpenCode Go plans you have used
-    Usage {
-        /// Show only this provider; leave it out to see all of them
-        provider: Option<cc_proxy::usage::UsageProvider>,
-        /// Print JSON instead of text
-        #[arg(long)]
-        json: bool,
-    },
+    /// Open the monitor TUI with mock data and no proxy server
+    #[command(hide = true)]
+    Demo,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -164,7 +162,8 @@ enum ProviderCommand {
         /// Wire protocol: openai (chat/completions), responses, or anthropic (messages)
         #[arg(long, value_enum, default_value_t = cc_proxy::config::CustomFormat::OpenAi)]
         format: cc_proxy::config::CustomFormat,
-        /// Model IDs this provider serves (repeat --model for multiple)
+        /// Model IDs this provider serves (repeat --model for multiple). Leave it out to ask the
+        /// endpoint, and `cc-proxy models refresh <name>` asks again later
         #[arg(long = "model", short = 'm')]
         models: Vec<String>,
         /// Environment variable that holds the API key
@@ -176,41 +175,51 @@ enum ProviderCommand {
         /// Name of the custom provider to remove
         name: String,
     },
-    /// List built-in and custom providers
+    /// List every provider, its sign-in state and where Claude Code goes
     List,
 }
 
 #[derive(Debug, Subcommand)]
 enum ModelsCommand {
-    /// List supported models (optionally filtered to one provider)
+    /// Show the model each Claude name (fable, opus, sonnet, haiku) uses
+    Show {
+        /// Provider to show. Defaults to the one Claude Code goes to now
+        provider: Option<String>,
+    },
+    /// List every model a provider serves, or every provider's models
     List {
         /// Provider to list models for
         provider: Option<String>,
+        /// Print every Cursor alias
         #[arg(long)]
         full: bool,
     },
-    /// Choose the model each Claude name (fable, opus, sonnet, haiku) uses, with search
+    /// Choose the model each Claude name uses, with search
     Choose {
-        /// Provider to configure. Defaults to the one Claude Code goes to now
+        /// Provider to change. Defaults to the one Claude Code goes to now
         provider: Option<String>,
     },
-    /// Refresh the model catalog for a provider and sync Claude Code's model picker
-    #[command(alias = "update")]
+    /// Set the model one Claude name uses
+    Set {
+        /// The Claude name: fable, opus, sonnet or haiku
+        name: String,
+        /// The model it should use
+        model: String,
+        /// Provider to change. Defaults to the one Claude Code goes to now
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Forget your choice for one Claude name, or for all four
+    Reset {
+        /// The Claude name to forget. All four when left out
+        name: Option<String>,
+        /// Provider to change. Defaults to the one Claude Code goes to now
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Fetch a provider's live model list: GitHub Copilot and providers you added
     Refresh {
         /// Provider to refresh. Defaults to the one Claude Code goes to now
-        provider: Option<String>,
-    },
-    /// Show or choose the model each Claude name (fable, opus, sonnet, haiku) uses
-    Map {
-        /// The Claude name to choose a model for
-        name: Option<String>,
-        /// The model it should use
-        model: Option<String>,
-        /// Forget your choice and let cc-proxy pick again
-        #[arg(long)]
-        reset: bool,
-        /// The provider to change. Defaults to the one Claude Code goes to now
-        #[arg(long)]
         provider: Option<String>,
     },
 }
@@ -311,46 +320,25 @@ fn run() -> Result<()> {
             tui::run_attached_monitor(|| monitor.snapshot(), url.to_string())?;
             Ok(())
         }
-        Commands::Models {
-            command:
-                Some(ModelsCommand::List {
-                    provider,
-                    full: cmd_full,
-                }),
-            full,
-        } => {
-            print_models(&Registry::new(), full || cmd_full, provider.as_deref());
-            Ok(())
-        }
-        Commands::Models {
-            command: Some(ModelsCommand::Choose { provider }),
-            ..
-        } => cc_proxy::models_map::run_choose(provider.as_deref()),
-        Commands::Models {
-            command: Some(ModelsCommand::Refresh { provider }),
-            ..
-        } => cc_proxy::models_map::run_refresh(provider.as_deref()),
-        Commands::Models {
-            command:
-                Some(ModelsCommand::Map {
+        Commands::Models { command } => {
+            use cc_proxy::models_map;
+            match command.unwrap_or(ModelsCommand::Show { provider: None }) {
+                ModelsCommand::Show { provider } => models_map::run_show(provider.as_deref()),
+                ModelsCommand::List { provider, full } => {
+                    print_models(&Registry::new(), full, provider.as_deref());
+                    Ok(())
+                }
+                ModelsCommand::Choose { provider } => models_map::run_choose(provider.as_deref()),
+                ModelsCommand::Set {
                     name,
                     model,
-                    reset,
                     provider,
-                }),
-            ..
-        } => cc_proxy::models_map::run(
-            name.as_deref(),
-            model.as_deref(),
-            reset,
-            provider.as_deref(),
-        ),
-        Commands::Models {
-            full,
-            command: None,
-        } => {
-            print_models(&Registry::new(), full, None);
-            Ok(())
+                } => models_map::run_set(&name, &model, provider.as_deref()),
+                ModelsCommand::Reset { name, provider } => {
+                    models_map::run_reset(name.as_deref(), provider.as_deref())
+                }
+                ModelsCommand::Refresh { provider } => models_map::run_refresh(provider.as_deref()),
+            }
         }
         Commands::Config { command } => match command {
             ConfigCommand::Get { key } => cc_proxy::config_keys::run_config_get(&key),
@@ -1069,7 +1057,7 @@ fn compact_cursor_list(models: &[String]) -> String {
         out.push_str("; or cursor:<model> for any model Cursor offers, e.g. cursor:gpt-5.5");
     } else {
         out.push_str(&format!(
-            "; {} cursor model aliases, e.g. cursor:gpt-5.5. Run `cc-proxy models --full` for all of them",
+            "; {} cursor model aliases, e.g. cursor:gpt-5.5. Run `cc-proxy models list --full` for all of them",
             dynamic.len()
         ));
     }

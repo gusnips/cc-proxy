@@ -41,7 +41,7 @@ If the proxy stops without a `stop` (a crash, a reboot, `kill`), the next `cc-pr
 
 ## Which model a Claude name gets
 
-Claude Code asks for `opus`, `sonnet`, `haiku` and `fable`, or a longer name such as `claude-opus-4-8`. cc-proxy turns each into a model of the provider you picked. See [Models and routing](/using/models-and-routing/) and `cc-proxy models map`.
+Claude Code asks for `opus`, `sonnet`, `haiku` and `fable`, or a longer name such as `claude-opus-4-8`. cc-proxy turns each into a model of the provider you picked. See [Models and routing](/using/models-and-routing/) and `cc-proxy models choose`.
 
 If your `settings.json` pins a model (`ANTHROPIC_MODEL` or one of the `ANTHROPIC_DEFAULT_*_MODEL` keys), Claude Code sends that exact name. A provider model goes to its provider; a Claude name still follows the tier mapping. `cc-proxy status` warns about pinned names.
 
