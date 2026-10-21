@@ -53,6 +53,21 @@ use uuid::Uuid;
 const CLAUDE_AUTO_REVIEW_SYSTEM_PREFIX: &str =
     "You are a security monitor for autonomous AI coding agents.";
 
+/// Removes Anthropic's server-side `advisor_*` tool entries from `tools`.
+/// Non-Anthropic providers cannot execute them and reject their missing
+/// `input_schema`, and API-key Anthropic accounts without the advisor
+/// entitlement reject the tag on the first attempt of every turn.
+fn strip_anthropic_advisor_tools(body: &mut crate::anthropic::schema::MessagesRequest) {
+    if let Some(Value::Array(tools)) = body.extra.get_mut("tools") {
+        tools.retain(|tool| {
+            !tool
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("advisor"))
+        });
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AutoReviewRoute {
     requested_model: String,
@@ -1629,6 +1644,7 @@ async fn dispatch_request(
         .get("anthropic-beta")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    strip_anthropic_advisor_tools(&mut body);
 
     if let Some(project) = project::name_from_request(
         body.extra.get("system"),

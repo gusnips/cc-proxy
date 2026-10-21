@@ -3,6 +3,15 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.10 (2026-10-20)
+
+- Fixed `Invalid schema for function 'advisor': schema must be a JSON Schema of
+  'type: "object"', got 'type: null'` on `opencode-zen` (such as
+  `deepseek-v4.1-flash-free`) and other providers. Anthropic server-side
+  `advisor_*` tools without `input_schema` are stripped at ingress and skipped
+  in tool translation, and function tool schemas without a root `type` default
+  to `"type": "object"`.
+
 ## v0.2.9 (2026-10-20)
 
 - Reading images with Claude Code's `Read` tool on `gemini` (and OpenCode's
