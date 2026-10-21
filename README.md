@@ -77,7 +77,7 @@ Sign in to the other providers the same way (`kimi`, `grok`, `cursor`,
 cc-proxy kimi auth login
 cc-proxy kimi auth status
 cc-proxy usage
-cc-proxy models
+cc-proxy models list
 ```
 
 `cc-proxy usage` shows how much of your Codex, Kimi and OpenCode Go plans
@@ -118,8 +118,8 @@ and model, such as `codex/gpt-6.1-sol`. The native model ID stays unchanged.
 See which one each name gets, or choose your own:
 
 ```sh
-cc-proxy models map
-cc-proxy models map haiku gpt-6-luna
+cc-proxy models
+cc-proxy models set haiku gpt-6-luna
 cc-proxy models choose
 ```
 
@@ -155,10 +155,10 @@ The opt-in Images API returns base64 image data and consumes the signed-in accou
 | OpenCode Go    | OpenCode Go subscription             | Non-conflicting IDs and `opencode-go/<model-id>`                         |
 | Cursor Agent   | Cursor account                       | Cursor aliases and `cursor:<model-id>` prefixes                          |
 | GLM            | z.ai API key                         | `glm-*` IDs (unlisted ones forward raw)                                  |
-| GitHub Copilot | GitHub account with a Copilot plan   | `copilot/<id>`; `cc-proxy models` lists yours                            |
+| GitHub Copilot | GitHub account with a Copilot plan   | `copilot/<id>`; `cc-proxy models list` lists yours                            |
 
-Run `cc-proxy models` for the current catalog or
-`cc-proxy models --full` for every dynamic Cursor alias.
+Run `cc-proxy models list` for the current catalog or
+`cc-proxy models list --full` for every dynamic Cursor alias.
 
 > [!WARNING]
 > The proxy accepts local requests without client authentication. It binds to

@@ -33,7 +33,7 @@ Legacy IDs such as `cursor`, `cursor-plan`, `cursor-ask`, `composer-2.5`, and `c
 The provider reads Cursor Agent's current model catalog at runtime. Use:
 
 ```sh
-cc-proxy models --full
+cc-proxy models list --full
 ```
 
 Unknown future IDs are accepted through `cursor:<raw-model>`.

@@ -290,7 +290,7 @@ static CONTEXT: LazyLock<Regex> = LazyLock::new(|| {
         r"|model_max_prompt_tokens_exceeded|prompt token count of \d+ exceeds the limit",
         // Scoped to what overflowed: a bare "exceeds the maximum" also covers
         // image counts and per-minute token rates, which compaction can't fix.
-        r"|exceeds? the (?:model'?s? )?maximum (?:input |prompt |context )?(?:tokens?|length|context)",
+        r"|exceeds? the (?:model'?s? )?maximum (?:number of )?(?:input |prompt |context )?(?:tokens?|length|context)",
     ))
 });
 
@@ -423,6 +423,11 @@ mod tests {
             (
                 400,
                 r#"{"error":{"message":"prompt token count of 270000 exceeds the limit of 128000","code":"model_max_prompt_tokens_exceeded"}}"#,
+                FailureKind::Context,
+            ),
+            (
+                400,
+                r#"{"error":{"message":"The input token count exceeds the maximum number of tokens allowed 1048576."}}"#,
                 FailureKind::Context,
             ),
             (

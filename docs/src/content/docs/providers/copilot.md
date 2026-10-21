@@ -28,7 +28,7 @@ Every Copilot model starts with `copilot/`, so a Copilot `gpt-5.5` never collide
 claude --model copilot/gpt-5.5
 ```
 
-`cc-proxy models` lists the models your account can run. The list is saved at sign-in. Until then, cc-proxy shows a short built-in list. Any other `copilot/<id>` is sent as written, and Copilot says if it does not know the id.
+`cc-proxy models list` lists the models your account can run. The list is saved at sign-in. Until then, cc-proxy shows a short built-in list. Any other `copilot/<id>` is sent as written, and Copilot says if it does not know the id.
 
 Models that only answer on Copilot's Responses API do not work here, because cc-proxy calls the chat endpoint.
 

@@ -3,6 +3,36 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.9 (2026-10-20)
+
+- Reading images with Claude Code's `Read` tool on `gemini` (and OpenCode's
+  Gemini models or `antigravity`) no longer overflows the 1,048,576-token window
+  or traps `/compact`. Image blocks inside `tool_result` now go out as Gemini
+  `inlineData` parts instead of having their base64 JSON serialized into
+  `functionResponse.response.result` as hundreds of thousands of text tokens.
+- Gemini's "The input token count exceeds the maximum number of tokens allowed"
+  400 is now classified as a context-length error and prefixed with
+  `prompt is too long:` so Claude Code triggers auto-compaction.
+- `cc-proxy models` is now split into single-purpose subcommands:
+  - `cc-proxy models [show] [provider]` shows which model each Claude name
+    (`fable`, `opus`, `sonnet`, `haiku`) uses.
+  - `cc-proxy models list [provider] [--full]` lists every model a provider
+    serves.
+  - `cc-proxy models choose [provider]` asks for each Claude name with search.
+  - `cc-proxy models set <name> <model> [--provider <provider>]` sets one name
+    directly.
+  - `cc-proxy models reset [name] [--provider <provider>]` clears one choice or
+    all four.
+  - `cc-proxy models refresh [provider]` fetches and saves the live `/models`
+    list for custom providers (such as OpenRouter) and GitHub Copilot.
+- `cc-proxy provider list` now marks the active provider and shows the commands
+  to switch, sign in, and pick models.
+- Commands that take a trailing `[provider]` (`start`, `use`, `auth login`,
+  `auth device`, `auth logout`, `provider remove`, `models show`, `models list`,
+  `models choose`, `models refresh`) and `models choose` itself now use an
+  interactive `↑`/`↓` arrow-key selector with live type-to-filter when run in a
+  terminal.
+
 ## v0.2.8 (2026-10-20)
 
 - `gemini` no longer fails with "...parameters.properties[batch].items:

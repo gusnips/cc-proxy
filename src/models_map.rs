@@ -1,6 +1,6 @@
-//! `cc-proxy models choose` and `cc-proxy models map`: see or change which
-//! model answers each of Claude Code's names (`fable`, `opus`, `sonnet`,
-//! `haiku`) on a provider.
+//! `cc-proxy models`: see or change which model answers each of Claude Code's
+//! names (`fable`, `opus`, `sonnet`, `haiku`) on a provider, and fetch a
+//! provider's live model list.
 
 use std::collections::HashSet;
 
@@ -12,41 +12,69 @@ use crate::route::routable_providers;
 use crate::tiers::{self, Basis, TIERS};
 use crate::{config, config_keys, ui};
 
-pub fn run(
-    tier: Option<&str>,
-    model: Option<&str>,
-    reset: bool,
-    provider: Option<&str>,
-) -> Result<()> {
+/// `cc-proxy models` and `cc-proxy models show`.
+pub fn run_show(provider: Option<&str>) -> Result<()> {
     let registry = Registry::new();
-    let provider = provider_arg(&registry, provider)?;
-    let tier = tier.map(tier_arg).transpose()?;
-    match (tier, model, reset) {
-        (Some(tier), Some(model), false) => set(&registry, provider, tier, model)?,
-        (Some(tier), None, false) => choose(&registry, provider, &[tier])?,
-        (tier, None, true) => reset_choice(provider, tier)?,
-        (None, None, false) => {}
-        _ => bail!(
-            "Use `cc-proxy models map <name> [model]` to choose, or `cc-proxy models map [name] \
-             --reset` to undo a choice."
-        ),
-    }
-    if (tier.is_some() || model.is_some() || reset) && config::route().target() == Some(provider) {
-        crate::route::refresh_model_labels();
-    }
+    let provider = pick_provider(
+        &registry,
+        provider,
+        "Which provider's models do you want to see?",
+        true,
+    )?;
     show(&registry, provider);
     Ok(())
 }
 
 pub fn run_choose(provider: Option<&str>) -> Result<()> {
     let registry = Registry::new();
-    let provider = provider_arg(&registry, provider)?;
+    let provider = pick_provider(
+        &registry,
+        provider,
+        "Which provider's models do you want to choose?",
+        true,
+    )?;
     choose(&registry, provider, &TIERS)?;
+    changed(&registry, provider);
+    Ok(())
+}
+
+pub fn run_set(tier: &str, model: &str, provider: Option<&str>) -> Result<()> {
+    let registry = Registry::new();
+    let provider = pick_provider(
+        &registry,
+        provider,
+        "Which provider should use this model?",
+        false,
+    )?;
+    set(&registry, provider, tier_arg(tier)?, model)?;
+    changed(&registry, provider);
+    Ok(())
+}
+
+pub fn run_reset(tier: Option<&str>, provider: Option<&str>) -> Result<()> {
+    let registry = Registry::new();
+    let provider = pick_provider(
+        &registry,
+        provider,
+        "Which provider's model choices do you want to reset?",
+        false,
+    )?;
+    let path = match tier {
+        Some(tier) => tiers::choice_key(provider, tier_arg(tier)?),
+        None => format!("route.tiers.{provider}"),
+    };
+    config_keys::remove_values([path.as_str()])?;
+    changed(&registry, provider);
+    Ok(())
+}
+
+/// After a change: Claude Code's labels follow it when Claude Code goes to
+/// `provider`, and the names are shown as they stand.
+fn changed(registry: &Registry, provider: &str) {
     if config::route().target() == Some(provider) {
         crate::route::refresh_model_labels();
     }
-    show(&registry, provider);
-    Ok(())
+    show(registry, provider);
 }
 
 /// Asks which `provider` model each of `tiers` uses, with search, because a
@@ -122,26 +150,34 @@ fn basis_label(basis: Basis) -> &'static str {
     }
 }
 
+/// Fetches the live model list of GitHub Copilot or a provider you added. The
+/// others list their models without asking the provider.
 pub fn run_refresh(provider: Option<&str>) -> Result<()> {
     let registry = Registry::new();
-    let provider = provider_arg(&registry, provider)?;
-    match provider {
-        "copilot" => {
-            let Some(auth) = crate::providers::copilot::auth::file_store().load()? else {
-                bail!("Copilot is not signed in. Run `cc-proxy auth login copilot` first.");
-            };
-            let ids = crate::providers::copilot::models::refresh(&auth)?;
-            println!("Refreshed {} Copilot models.", ids.len());
-        }
-        other => {
-            let models = registry.supported_models_for(other);
-            println!(
-                "{} has {} models available: {}",
-                ui::provider_name(other),
-                models.len(),
-                models.join(", ")
-            );
-        }
+    let provider = pick_provider(
+        &registry,
+        provider,
+        "Which provider's model list do you want to refresh?",
+        true,
+    )?;
+    let name = ui::provider_name(provider);
+    if provider == "copilot" {
+        let Some(auth) = crate::providers::copilot::auth::file_store().load()? else {
+            bail!("GitHub Copilot isn't signed in. Run `cc-proxy auth login copilot` first.");
+        };
+        let ids = crate::providers::copilot::models::refresh(&auth)?;
+        println!("{name} lists {} models now.", ids.len());
+    } else if config::custom_providers().contains_key(provider) {
+        let models = crate::providers::custom::refresh_models(provider)?;
+        println!(
+            "{name} lists {} models now. They're saved in config.json.",
+            models.len()
+        );
+    } else {
+        println!(
+            "There's nothing to fetch for {name}. `cc-proxy models list {provider}` shows its models."
+        );
+        return Ok(());
     }
     if config::route().target() == Some(provider) {
         crate::route::refresh_model_labels();
@@ -149,13 +185,41 @@ pub fn run_refresh(provider: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn provider_arg(registry: &Registry, asked: Option<&str>) -> Result<&'static str> {
-    let remembered = config::route().provider;
-    let asked = asked.map(str::to_ascii_lowercase).or(remembered);
-    let Some(asked) = asked else {
-        bail!("Name a provider with `--provider`, or run `cc-proxy start` to choose one first.");
-    };
+fn pick_provider(
+    registry: &Registry,
+    asked: Option<&str>,
+    question: &str,
+    ask_when_omitted: bool,
+) -> Result<&'static str> {
     let providers = routable_providers(registry);
+    let remembered = config::route().provider;
+    if let Some(asked) = asked {
+        let asked = asked.trim().to_ascii_lowercase();
+        return match providers.iter().find(|provider| **provider == asked) {
+            Some(&provider) => Ok(provider),
+            None => bail!(
+                "`{asked}` isn't a provider cc-proxy can route to. Use one of: {}.",
+                providers.join(", ")
+            ),
+        };
+    }
+    if crate::prompt::is_interactive() && (ask_when_omitted || remembered.is_none()) {
+        let labels: Vec<String> = providers
+            .iter()
+            .map(|id| format!("{} ({id})", ui::provider_name(id)))
+            .collect();
+        let default = providers
+            .iter()
+            .position(|provider| Some(*provider) == remembered.as_deref())
+            .unwrap_or(0);
+        let idx = crate::prompt::choose(question, &labels, default)?;
+        return Ok(providers[idx]);
+    }
+    let Some(asked) = remembered else {
+        bail!(
+            "No provider to use yet. Name one, or run `cc-proxy start` to choose where Claude Code goes."
+        );
+    };
     match providers.iter().find(|provider| **provider == asked) {
         Some(&provider) => Ok(provider),
         None => bail!(
@@ -179,20 +243,12 @@ fn tier_arg(asked: &str) -> Result<&'static str> {
 fn set(registry: &Registry, provider: &str, tier: &'static str, model: &str) -> Result<()> {
     if registry.provider_for_model(model).is_none() {
         bail!(
-            "cc-proxy doesn't serve a model called `{model}`. Run `cc-proxy models` to see the \
-             ones it does."
+            "cc-proxy doesn't serve a model called `{model}`. `cc-proxy models list {provider}` \
+             shows the ones it does."
         );
     }
     config_keys::write_value(&tiers::choice_key(provider, tier), model.into())?;
     Ok(())
-}
-
-fn reset_choice(provider: &str, tier: Option<&str>) -> Result<()> {
-    let path = match tier {
-        Some(tier) => tiers::choice_key(provider, tier),
-        None => format!("route.tiers.{provider}"),
-    };
-    config_keys::remove_values([path.as_str()])
 }
 
 fn show(registry: &Registry, provider: &str) {

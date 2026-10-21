@@ -103,16 +103,21 @@ Opens the monitor with deterministic simulated traffic. It does not bind a netwo
 ## `models`
 
 ```sh
-cc-proxy models [--full]
+cc-proxy models [show] [provider]
+cc-proxy models list [provider] [--full]
 cc-proxy models choose [provider]
-cc-proxy models map [name] [model] [--reset] [--provider <provider>]
+cc-proxy models set <name> <model> [--provider <provider>]
+cc-proxy models reset [name] [--provider <provider>]
+cc-proxy models refresh [provider]
 ```
 
-`models` prints supported IDs grouped by provider. The default output compacts Cursor's runtime catalog. `--full` prints every Cursor alias.
+`models` (or `models show`) shows which model each Claude name (`fable`, `opus`, `sonnet`, `haiku`) uses on a provider, and who decided it.
+
+`models list` prints supported IDs grouped by provider, or for one provider. The default output compacts Cursor's runtime catalog. `--full` prints every Cursor alias.
 
 `models choose` asks which model each Claude name uses, one name at a time. Type part of a name to search the provider's catalog (every word must match), a number to pick from the list shown, or press Enter to keep the name as it is. The provider defaults to the one Claude Code goes to now.
 
-`models map` shows which model each Claude name (`fable`, `opus`, `sonnet`, `haiku`) uses on a provider, and who decided it. With a name and a model, it saves your choice. With `--reset`, it forgets your choice for that name, or for all four names when you give no name. The provider defaults to the one Claude Code goes to now; `--provider` picks another. A model must be one cc-proxy serves. The change applies on the next request.
+`models set` sets one Claude name directly, and `models reset` forgets your choice for one name, or for all four when you give no name. `models refresh` fetches the live model list of GitHub Copilot or a provider you added with `cc-proxy provider add`.
 
 ## Provider authentication
 

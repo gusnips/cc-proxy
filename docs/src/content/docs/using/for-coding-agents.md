@@ -18,7 +18,7 @@ The installed CLI and running server are authoritative for the active build:
 
 ```sh
 cc-proxy models
-cc-proxy models --full
+cc-proxy models list --full
 curl -s http://127.0.0.1:18765/v1/models
 ```
 

@@ -86,7 +86,7 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 | ------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `route.on`                      | `false` | Whether Claude names are served. Only `start` and `use <provider>` turn it on. `stop` and `use claude` turn it off.                            |
 | `route.provider`                | unset   | The provider Claude Code goes to. It stays set while routing is off, so `start` can offer it again.                                            |
-| `route.tiers.<provider>.<name>` | unset   | The model you chose for a Claude name (`fable`, `opus`, `sonnet`, `haiku`). Written by `cc-proxy models choose`, `cc-proxy models map` and the questions `start` asks. |
+| `route.tiers.<provider>.<name>` | unset   | The model you chose for a Claude name (`fable`, `opus`, `sonnet`, `haiku`). Written by `cc-proxy models choose`, `cc-proxy models set` and the questions `start` asks. |
 
 A missing, unreadable or malformed `config.json` means routing is off. Nothing is routed by accident.
 

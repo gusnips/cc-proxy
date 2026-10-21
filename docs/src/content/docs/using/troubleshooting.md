@@ -61,14 +61,14 @@ Otherwise run:
 
 ```sh
 cc-proxy models
-cc-proxy models --full
+cc-proxy models list --full
 ```
 
 An unknown local ID returns a catalog in the error. A known ID can still be rejected upstream when the account, subscription, or region lacks access. Cursor's prefixed form, such as `cursor:gpt-5.5`, forces Cursor routing and avoids cross-provider collisions.
 
 ## Background requests fail
 
-Claude Code sends titles and other small background tasks to its `haiku` model, independently of the main model. Run `cc-proxy models map` to see which model `haiku` gets. If it is wrong, run `cc-proxy models map haiku <model>`.
+Claude Code sends titles and other small background tasks to its `haiku` model, independently of the main model. Run `cc-proxy models` to see which model `haiku` gets. If it is wrong, run `cc-proxy models set haiku <model>`.
 
 ## A tool runs twice
 
