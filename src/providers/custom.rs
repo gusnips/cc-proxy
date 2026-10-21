@@ -838,15 +838,26 @@ pub fn refresh_models(name: &str) -> Result<Vec<String>> {
     Ok(models)
 }
 
-pub fn run_provider_remove(name: &str) -> Result<()> {
-    let trimmed = name.trim().to_ascii_lowercase();
-    if BUILTIN_PROVIDER_NAMES.contains(&trimmed.as_str()) {
-        bail!("`{trimmed}` is a built-in provider and cannot be removed.");
+pub fn run_provider_remove(name: Option<&str>) -> Result<()> {
+    let chosen = match name {
+        Some(name) => name.trim().to_ascii_lowercase(),
+        None => {
+            let names: Vec<String> = config::custom_providers().into_keys().collect();
+            if names.is_empty() {
+                bail!("no custom providers are configured in config.json");
+            }
+            let idx =
+                crate::prompt::choose("Which custom provider do you want to remove?", &names, 0)?;
+            names[idx].clone()
+        }
+    };
+    if BUILTIN_PROVIDER_NAMES.contains(&chosen.as_str()) {
+        bail!("`{chosen}` is a built-in provider and cannot be removed.");
     }
-    if !config::remove_custom_provider(&trimmed)? {
-        bail!("provider `{trimmed}` is not configured in config.json");
+    if !config::remove_custom_provider(&chosen)? {
+        bail!("provider `{chosen}` is not configured in config.json");
     }
-    println!("Removed provider `{trimmed}`.");
+    println!("Removed provider `{chosen}`.");
     Ok(())
 }
 

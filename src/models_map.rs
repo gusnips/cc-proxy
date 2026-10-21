@@ -15,14 +15,24 @@ use crate::{config, config_keys, ui};
 /// `cc-proxy models` and `cc-proxy models show`.
 pub fn run_show(provider: Option<&str>) -> Result<()> {
     let registry = Registry::new();
-    let provider = provider_arg(&registry, provider)?;
+    let provider = pick_provider(
+        &registry,
+        provider,
+        "Which provider's models do you want to see?",
+        true,
+    )?;
     show(&registry, provider);
     Ok(())
 }
 
 pub fn run_choose(provider: Option<&str>) -> Result<()> {
     let registry = Registry::new();
-    let provider = provider_arg(&registry, provider)?;
+    let provider = pick_provider(
+        &registry,
+        provider,
+        "Which provider's models do you want to choose?",
+        true,
+    )?;
     choose(&registry, provider, &TIERS)?;
     changed(&registry, provider);
     Ok(())
@@ -30,7 +40,12 @@ pub fn run_choose(provider: Option<&str>) -> Result<()> {
 
 pub fn run_set(tier: &str, model: &str, provider: Option<&str>) -> Result<()> {
     let registry = Registry::new();
-    let provider = provider_arg(&registry, provider)?;
+    let provider = pick_provider(
+        &registry,
+        provider,
+        "Which provider should use this model?",
+        false,
+    )?;
     set(&registry, provider, tier_arg(tier)?, model)?;
     changed(&registry, provider);
     Ok(())
@@ -38,7 +53,12 @@ pub fn run_set(tier: &str, model: &str, provider: Option<&str>) -> Result<()> {
 
 pub fn run_reset(tier: Option<&str>, provider: Option<&str>) -> Result<()> {
     let registry = Registry::new();
-    let provider = provider_arg(&registry, provider)?;
+    let provider = pick_provider(
+        &registry,
+        provider,
+        "Which provider's model choices do you want to reset?",
+        false,
+    )?;
     let path = match tier {
         Some(tier) => tiers::choice_key(provider, tier_arg(tier)?),
         None => format!("route.tiers.{provider}"),
@@ -134,7 +154,12 @@ fn basis_label(basis: Basis) -> &'static str {
 /// others list their models without asking the provider.
 pub fn run_refresh(provider: Option<&str>) -> Result<()> {
     let registry = Registry::new();
-    let provider = provider_arg(&registry, provider)?;
+    let provider = pick_provider(
+        &registry,
+        provider,
+        "Which provider's model list do you want to refresh?",
+        true,
+    )?;
     let name = ui::provider_name(provider);
     if provider == "copilot" {
         let Some(auth) = crate::providers::copilot::auth::file_store().load()? else {
@@ -160,15 +185,41 @@ pub fn run_refresh(provider: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn provider_arg(registry: &Registry, asked: Option<&str>) -> Result<&'static str> {
+fn pick_provider(
+    registry: &Registry,
+    asked: Option<&str>,
+    question: &str,
+    ask_when_omitted: bool,
+) -> Result<&'static str> {
+    let providers = routable_providers(registry);
     let remembered = config::route().provider;
-    let asked = asked.map(str::to_ascii_lowercase).or(remembered);
-    let Some(asked) = asked else {
+    if let Some(asked) = asked {
+        let asked = asked.trim().to_ascii_lowercase();
+        return match providers.iter().find(|provider| **provider == asked) {
+            Some(&provider) => Ok(provider),
+            None => bail!(
+                "`{asked}` isn't a provider cc-proxy can route to. Use one of: {}.",
+                providers.join(", ")
+            ),
+        };
+    }
+    if crate::prompt::is_interactive() && (ask_when_omitted || remembered.is_none()) {
+        let labels: Vec<String> = providers
+            .iter()
+            .map(|id| format!("{} ({id})", ui::provider_name(id)))
+            .collect();
+        let default = providers
+            .iter()
+            .position(|provider| Some(*provider) == remembered.as_deref())
+            .unwrap_or(0);
+        let idx = crate::prompt::choose(question, &labels, default)?;
+        return Ok(providers[idx]);
+    }
+    let Some(asked) = remembered else {
         bail!(
             "No provider to use yet. Name one, or run `cc-proxy start` to choose where Claude Code goes."
         );
     };
-    let providers = routable_providers(registry);
     match providers.iter().find(|provider| **provider == asked) {
         Some(&provider) => Ok(provider),
         None => bail!(

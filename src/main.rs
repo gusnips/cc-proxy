@@ -172,8 +172,8 @@ enum ProviderCommand {
     },
     /// Remove a custom provider from config.json
     Remove {
-        /// Name of the custom provider to remove
-        name: String,
+        /// Name of the custom provider to remove. Leave it out to pick from a list
+        name: Option<String>,
     },
     /// List every provider, its sign-in state and where Claude Code goes
     List,
@@ -325,7 +325,25 @@ fn run() -> Result<()> {
             match command.unwrap_or(ModelsCommand::Show { provider: None }) {
                 ModelsCommand::Show { provider } => models_map::run_show(provider.as_deref()),
                 ModelsCommand::List { provider, full } => {
-                    print_models(&Registry::new(), full, provider.as_deref());
+                    let registry = Registry::new();
+                    let picked = if provider.is_none() && cc_proxy::prompt::is_interactive() {
+                        let providers = route::routable_providers(&registry);
+                        let mut options = vec!["All providers".to_string()];
+                        options.extend(
+                            providers
+                                .iter()
+                                .map(|id| format!("{} ({id})", ui::provider_name(id))),
+                        );
+                        let idx = cc_proxy::prompt::choose(
+                            "Which provider's models do you want to list?",
+                            &options,
+                            0,
+                        )?;
+                        idx.checked_sub(1).map(|i| providers[i].to_string())
+                    } else {
+                        provider
+                    };
+                    print_models(&registry, full, picked.as_deref());
                     Ok(())
                 }
                 ModelsCommand::Choose { provider } => models_map::run_choose(provider.as_deref()),
@@ -380,7 +398,7 @@ fn run() -> Result<()> {
                 api_key_env,
             ),
             ProviderCommand::Remove { name } => {
-                cc_proxy::providers::custom::run_provider_remove(&name)
+                cc_proxy::providers::custom::run_provider_remove(name.as_deref())
             }
             ProviderCommand::List => {
                 cc_proxy::providers::custom::run_provider_list(&Registry::new())
@@ -908,7 +926,12 @@ fn pick_auth_provider(registry: &Registry, asked: Option<&str>, question: &str) 
         .iter()
         .map(|id| format!("{} ({id})", ui::provider_name(id)))
         .collect();
-    let idx = cc_proxy::prompt::choose(question, &labels, 0)?;
+    let remembered = config::route().provider;
+    let default = providers
+        .iter()
+        .position(|id| Some(id.as_str()) == remembered.as_deref())
+        .unwrap_or(0);
+    let idx = cc_proxy::prompt::choose(question, &labels, default)?;
     Ok(providers[idx].clone())
 }
 

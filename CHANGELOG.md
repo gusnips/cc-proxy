@@ -27,6 +27,11 @@ description: Release notes for cc-proxy.
     list for custom providers (such as OpenRouter) and GitHub Copilot.
 - `cc-proxy provider list` now marks the active provider and shows the commands
   to switch, sign in, and pick models.
+- Commands that take a trailing `[provider]` (`start`, `use`, `auth login`,
+  `auth device`, `auth logout`, `provider remove`, `models show`, `models list`,
+  `models choose`, `models refresh`) and `models choose` itself now use an
+  interactive `↑`/`↓` arrow-key selector with live type-to-filter when run in a
+  terminal.
 
 ## v0.2.8 (2026-10-20)
 

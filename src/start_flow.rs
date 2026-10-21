@@ -131,6 +131,38 @@ fn pick_for_start(registry: &Registry) -> Result<Pick> {
     let remembered = config::route().provider;
     let claude_option = "Claude Code subscription, no routing".to_string();
 
+    if prompt::is_interactive() {
+        let mut options: Vec<String> = providers
+            .iter()
+            .map(|provider| {
+                let status = if is_signed_in(registry, provider) {
+                    "signed in"
+                } else {
+                    "not set up"
+                };
+                format!("{} ({provider}) · {status}", ui::provider_name(provider))
+            })
+            .collect();
+        options.push(claude_option);
+        let default = providers
+            .iter()
+            .position(|provider| Some(*provider) == remembered.as_deref())
+            .or_else(|| {
+                signed_in
+                    .first()
+                    .and_then(|first| providers.iter().position(|p| p == first))
+            })
+            .unwrap_or(0);
+        let answer = prompt::choose("Where should Claude Code go?", &options, default)?;
+        let Some(&provider) = providers.get(answer) else {
+            return Ok(Pick::Claude);
+        };
+        if !is_signed_in(registry, provider) {
+            sign_in(registry, provider)?;
+        }
+        return Ok(Pick::Provider(provider));
+    }
+
     match signed_in.as_slice() {
         [only] => {
             ui::print_note(
