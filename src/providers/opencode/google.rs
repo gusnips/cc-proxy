@@ -101,17 +101,12 @@ pub fn prepare_request(body: &MessagesRequest, schemas: ToolSchemas) -> anyhow::
                         .get(&tool_use_id)
                         .cloned()
                         .unwrap_or_else(|| tool_use_id.clone());
-                    let text = flatten_tool_result(&content);
-                    parts.push(json!({
-                        "functionResponse": {
-                            "id": tool_use_id,
-                            "name": name,
-                            "response": {
-                                "result": text,
-                                "is_error": is_error.unwrap_or(false)
-                            }
-                        }
-                    }));
+                    parts.extend(tool_result_parts(
+                        &tool_use_id,
+                        &name,
+                        &content,
+                        is_error.unwrap_or(false),
+                    ));
                 }
             }
         }
@@ -186,22 +181,67 @@ pub fn prepare_request(body: &MessagesRequest, schemas: ToolSchemas) -> anyhow::
     Ok(Value::Object(payload))
 }
 
-fn flatten_tool_result(content: &Value) -> String {
+/// Builds the `functionResponse` part and any sibling `inlineData` image parts
+/// for a tool result. Keeping base64 images out of `response.result` avoids
+/// turning a screenshot into hundreds of thousands of text tokens.
+fn tool_result_parts(tool_use_id: &str, name: &str, content: &Value, is_error: bool) -> Vec<Value> {
+    let mut texts = Vec::new();
+    let mut images = Vec::new();
     match content {
-        Value::Null => String::new(),
-        Value::String(s) => s.clone(),
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|item| {
-                item.get("text")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or_else(|| serde_json::to_string(item).ok())
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        other => serde_json::to_string(other).unwrap_or_default(),
+        Value::Null => {}
+        Value::String(s) => texts.push(s.clone()),
+        Value::Array(items) => {
+            for item in items {
+                if item.get("type").and_then(Value::as_str) == Some("image") {
+                    if let Some(source) = item.get("source") {
+                        let source_type = source
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("base64");
+                        let media_type = source
+                            .get("media_type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image/png");
+                        let data = source
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if source_type == "base64" && !data.is_empty() {
+                            images.push(json!({
+                                "inlineData": {
+                                    "mimeType": media_type,
+                                    "data": data
+                                }
+                            }));
+                        }
+                    }
+                    texts.push("[image]".to_string());
+                } else if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    texts.push(text.to_string());
+                } else if let Ok(serialized) = serde_json::to_string(item) {
+                    texts.push(serialized);
+                }
+            }
+        }
+        other => {
+            if let Ok(serialized) = serde_json::to_string(other) {
+                texts.push(serialized);
+            }
+        }
     }
+    let mut out = Vec::with_capacity(1 + images.len());
+    out.push(json!({
+        "functionResponse": {
+            "id": tool_use_id,
+            "name": name,
+            "response": {
+                "result": texts.join("\n"),
+                "is_error": is_error
+            }
+        }
+    }));
+    out.extend(images);
+    out
 }
 
 /// Keys whose value maps names to schemas.
@@ -1154,5 +1194,52 @@ mod tests {
             json!({"type": "array", "items": {"type": "string"}})
         );
         assert_eq!(properties["tags"]["items"], json!({"type": "integer"}));
+    }
+
+    #[test]
+    fn tool_result_images_become_inline_data_instead_of_base64_text() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gemini-4-argon",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "call_1", "name": "Read", "input": {"file_path": "shot.png"}}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": [
+                                {"type": "text", "text": "screenshot"},
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": "iVBORw0KGgo="
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+        let prepared = prepare_request(&req, ToolSchemas::JsonSchema).unwrap();
+        let parts = prepared["contents"][1]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[0]["functionResponse"]["response"]["result"],
+            "screenshot\n[image]"
+        );
+        assert_eq!(
+            parts[1],
+            json!({"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}})
+        );
     }
 }
