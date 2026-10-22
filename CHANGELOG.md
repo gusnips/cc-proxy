@@ -3,6 +3,17 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.11 (2026-10-22)
+
+- Fixed Sonnet requests routed to Gemini failing with a model-not-found error.
+  Gemini 3.1 Pro is now listed as `gemini-3.1-pro-preview`, the ID Google
+  serves. The existing preview filter keeps it out of automatic defaults:
+  Fable, Opus and Sonnet use Gemini 4 Argon; Haiku uses Gemini 3.8 Flash.
+- Gemini 3.1 Pro Preview, Gemini 4 Argon and Gemini 3.8 Flash now appear in
+  Claude Code's `/model` picker. You can still choose a preview model for any
+  Claude name with `cc-proxy models choose gemini`.
+- Corrected the Gemini 3 Flash model ID to `gemini-3-flash-preview`.
+
 ## v0.2.10 (2026-10-20)
 
 - Fixed `Invalid schema for function 'advisor': schema must be a JSON Schema of

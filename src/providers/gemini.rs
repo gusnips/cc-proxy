@@ -35,8 +35,8 @@ pub const GEMINI_MODELS: &[&str] = &[
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
-    "gemini-3.1-pro",
-    "gemini-3-flash",
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
 ];
@@ -187,7 +187,7 @@ impl Provider for GeminiProvider {
     fn catalog(&self) -> Vec<String> {
         vec![
             "gemini-4-argon".to_string(),
-            "gemini-3.1-pro".to_string(),
+            "gemini-3.1-pro-preview".to_string(),
             "gemini-3.8-flash".to_string(),
         ]
     }
@@ -341,3 +341,59 @@ impl CliHandlers for GeminiCli {
 }
 
 static GEMINI_CLI: GeminiCli = GeminiCli;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{registry::Registry, tiers};
+
+    #[test]
+    fn gemini_lists_and_forwards_the_real_preview_ids() {
+        let models = advertised_models();
+        for model in ["gemini-3.1-pro-preview", "gemini-3-flash-preview"] {
+            let qualified = format!("{MODEL_PREFIX}{model}");
+            assert!(models.contains(&model.to_string()));
+            assert!(models.contains(&qualified));
+            assert_eq!(resolve_model(model).as_deref(), Some(model));
+            assert_eq!(
+                resolve_model(&format!("{qualified}[1m]")).as_deref(),
+                Some(model)
+            );
+        }
+        for invalid in ["gemini-3.1-pro", "gemini-3-flash"] {
+            assert!(!models.contains(&invalid.to_string()));
+            assert!(!models.contains(&format!("{MODEL_PREFIX}{invalid}")));
+        }
+    }
+
+    #[test]
+    fn gemini_defaults_skip_previews_but_explicit_choices_keep_them() {
+        let registry = Registry::new();
+        let mut route = config::Route {
+            on: true,
+            provider: Some("gemini".into()),
+            ..config::Route::default()
+        };
+        for (tier, expected) in [
+            ("fable", "gemini-4-argon"),
+            ("opus", "gemini-4-argon"),
+            ("sonnet", "gemini-4-argon"),
+            ("haiku", "gemini-3.8-flash"),
+        ] {
+            assert_eq!(
+                tiers::resolve(&registry, &route, &format!("claude-{tier}-5-5")),
+                Ok(expected.to_string())
+            );
+        }
+        let preview = "gemini/gemini-3.1-pro-preview";
+        route
+            .tiers
+            .entry("gemini".into())
+            .or_default()
+            .insert("sonnet".into(), preview.into());
+        assert_eq!(
+            tiers::resolve(&registry, &route, "sonnet"),
+            Ok(preview.into())
+        );
+    }
+}
