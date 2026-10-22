@@ -411,10 +411,16 @@ pub fn resolve(raw: &str) -> Option<ResolvedModel> {
             endpoint: known.endpoint,
         });
     }
-    prefixed.map(|_| ResolvedModel {
-        id: id.to_string(),
-        endpoint: infer_endpoint(id),
-    })
+    if prefixed.is_some()
+        || super::super::model_catalog::load("opencode")
+            .is_some_and(|saved| saved.iter().any(|m| m == id))
+    {
+        return Some(ResolvedModel {
+            id: id.to_string(),
+            endpoint: infer_endpoint(id),
+        });
+    }
+    None
 }
 
 /// Wire-protocol fallback for model IDs outside the registered catalog.
@@ -458,26 +464,47 @@ pub fn resolve_zen(raw: &str) -> Option<ResolvedModel> {
 }
 
 pub fn advertised_zen_models() -> Vec<String> {
-    let mut result: Vec<String> = ZEN_MODELS
-        .iter()
-        .map(|model| format!("{ZEN_MODEL_PREFIX}{}", model.id))
-        .collect();
-    result.sort_unstable();
-    result
+    let ids = super::super::model_catalog::load("opencode-zen").unwrap_or_else(|| {
+        ZEN_MODELS
+            .iter()
+            .map(|model| model.id.to_string())
+            .collect()
+    });
+    ids.into_iter()
+        .map(|id| format!("{ZEN_MODEL_PREFIX}{id}"))
+        .collect()
 }
 
 pub fn advertised_models() -> Vec<String> {
-    // Every catalog entry is advertised bare and provider-qualified. Bare IDs
-    // that collide with another provider's catalog are filtered by
-    // `Registry::supported_models_for`, which owns the conflict policy, so
-    // this list needs no exclusion table and stays correct across refreshes.
-    let mut result = Vec::with_capacity(MODELS.len() * 2);
-    for model in MODELS {
-        result.push(model.id.to_string());
-        result.push(format!("{MODEL_PREFIX}{}", model.id));
-    }
-    result.sort_unstable();
-    result
+    // The registry keeps conflicting bare IDs with their native provider.
+    let ids = super::super::model_catalog::load("opencode")
+        .unwrap_or_else(|| MODELS.iter().map(|model| model.id.to_string()).collect());
+    ids.into_iter()
+        .flat_map(|id| [format!("{MODEL_PREFIX}{id}"), id])
+        .collect()
+}
+
+pub fn refresh_models(zen: bool) -> anyhow::Result<Vec<String>> {
+    let (provider, base_url, api_key) = if zen {
+        (
+            "opencode-zen",
+            crate::config::opencode_zen_base_url(),
+            crate::config::opencode_zen_api_key(),
+        )
+    } else {
+        (
+            "opencode",
+            crate::config::opencode_base_url(),
+            crate::config::opencode_api_key(),
+        )
+    };
+    let ids = super::super::model_catalog::fetch_openai(
+        &base_url,
+        api_key.as_deref(),
+        std::time::Duration::from_secs(30),
+    )?;
+    super::super::model_catalog::save(provider, &ids)?;
+    Ok(ids)
 }
 
 #[cfg(test)]

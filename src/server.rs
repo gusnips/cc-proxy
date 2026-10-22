@@ -451,12 +451,10 @@ fn claude_model_entries(registry: &Registry, route: &crate::config::Route) -> Ve
         .collect()
 }
 
-/// Anthropic-shaped model listing so Claude Code's gateway model discovery
-/// (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) finds the proxy's models.
-/// Claude Code only adds entries whose id starts with `claude` or `anthropic`,
-/// so while routing is on, one `claude-<tier>` entry per tier leads the list
-/// and is what its `/model` picker shows. Raw provider ids follow, for other
-/// Anthropic-compatible clients.
+/// Anthropic-shaped model listing for gateway discovery. Current Claude Code
+/// keeps IDs containing `claude` or `anthropic`; older versions required a
+/// prefix. Our replacement `modelPicker` lists provider IDs explicitly, since
+/// it hides discovery results. Raw IDs also serve other compatible clients.
 async fn handler_models(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ModelsQuery>,

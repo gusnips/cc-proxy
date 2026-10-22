@@ -217,9 +217,9 @@ enum ModelsCommand {
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Fetch a provider's live model list: GitHub Copilot and providers you added
+    /// Fetch a provider's live model list (or `all` to refresh every provider)
     Refresh {
-        /// Provider to refresh. Defaults to the one Claude Code goes to now
+        /// Provider to refresh, or `all`. Defaults to picking from a list
         provider: Option<String>,
     },
 }

@@ -1,12 +1,4 @@
-use crate::{
-    anthropic::{json_error, schema::MessagesRequest},
-    provider::{CliHandlers, Provider, RequestContext},
-    providers::codex::translate::model_allowlist::advertised_models,
-    tiers::TIERS,
-};
-use anyhow::{Result, anyhow};
-use async_trait::async_trait;
-use axum::{http::StatusCode, response::Response};
+use crate::{provider::Provider, tiers::TIERS};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
@@ -31,7 +23,6 @@ pub(crate) const GLM_MODELS: &[&str] =
     &["glm-5.3", "glm-5.3-flash", "glm-5.3-highspeed", "glm-5.2"];
 
 pub struct Registry {
-    models: BTreeMap<String, Vec<String>>,
     handlers: BTreeMap<String, Arc<dyn Provider>>,
 }
 
@@ -43,67 +34,52 @@ impl Default for Registry {
 
 impl Registry {
     pub fn new() -> Self {
-        let mut models: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        models.insert("codex".into(), advertised_models());
-        models.insert(
-            "kimi".into(),
-            KIMI_MODELS.iter().map(|m| (*m).to_string()).collect(),
-        );
-        models.insert("cursor".into(), build_cursor_models());
-        models.insert(
-            "grok".into(),
-            GROK_MODELS
-                .iter()
-                .map(|model| (*model).to_string())
-                .collect(),
-        );
-        models.insert(
-            "opencode".into(),
-            crate::providers::opencode::advertised_models(),
-        );
-        models.insert(
-            "opencode-zen".into(),
-            crate::providers::opencode::advertised_zen_models(),
-        );
-        models.insert(
-            "glm".into(),
-            GLM_MODELS.iter().map(|m| (*m).to_string()).collect(),
-        );
-        models.insert(
-            "copilot".into(),
-            crate::providers::copilot::advertised_models(),
-        );
-        let anthropic = Arc::new(crate::providers::custom::CustomProvider::new_anthropic());
-        models.insert("anthropic".into(), anthropic.supported_models());
-        models.insert(
-            "gemini".into(),
-            crate::providers::gemini::advertised_models(),
-        );
-        models.insert(
-            "antigravity".into(),
-            crate::providers::antigravity::advertised_models(),
-        );
-
-        let mut handlers = BTreeMap::new();
-        for (name, entries) in &models {
-            let handler: Arc<dyn Provider> = match name.as_str() {
-                "codex" => Arc::new(crate::providers::codex::CodexProvider::new()),
-                "kimi" => Arc::new(crate::providers::kimi::KimiProvider::new()),
-                "cursor" => Arc::new(crate::providers::cursor::CursorProvider::new()),
-                "grok" => Arc::new(crate::providers::grok::GrokProvider::new()),
-                "opencode" => Arc::new(crate::providers::opencode::OpenCodeProvider::new()),
-                "opencode-zen" => Arc::new(crate::providers::opencode::OpenCodeProvider::new_zen()),
-                "glm" => Arc::new(crate::providers::glm::GlmProvider::new()),
-                "copilot" => Arc::new(crate::providers::copilot::CopilotProvider::new()),
-                "anthropic" => anthropic.clone(),
-                "gemini" => Arc::new(crate::providers::gemini::GeminiProvider::new()),
-                "antigravity" => {
-                    Arc::new(crate::providers::antigravity::AntigravityProvider::new())
-                }
-                _ => Arc::new(PlaceholderProvider::new(name, entries.clone())),
-            };
-            handlers.insert(name.clone(), handler);
-        }
+        let mut handlers: BTreeMap<String, Arc<dyn Provider>> = BTreeMap::from([
+            (
+                "codex".into(),
+                Arc::new(crate::providers::codex::CodexProvider::new()) as Arc<dyn Provider>,
+            ),
+            (
+                "kimi".into(),
+                Arc::new(crate::providers::kimi::KimiProvider::new()),
+            ),
+            (
+                "cursor".into(),
+                Arc::new(crate::providers::cursor::CursorProvider::new()),
+            ),
+            (
+                "grok".into(),
+                Arc::new(crate::providers::grok::GrokProvider::new()),
+            ),
+            (
+                "opencode".into(),
+                Arc::new(crate::providers::opencode::OpenCodeProvider::new()),
+            ),
+            (
+                "opencode-zen".into(),
+                Arc::new(crate::providers::opencode::OpenCodeProvider::new_zen()),
+            ),
+            (
+                "glm".into(),
+                Arc::new(crate::providers::glm::GlmProvider::new()),
+            ),
+            (
+                "copilot".into(),
+                Arc::new(crate::providers::copilot::CopilotProvider::new()),
+            ),
+            (
+                "anthropic".into(),
+                Arc::new(crate::providers::custom::CustomProvider::new_anthropic()),
+            ),
+            (
+                "gemini".into(),
+                Arc::new(crate::providers::gemini::GeminiProvider::new()),
+            ),
+            (
+                "antigravity".into(),
+                Arc::new(crate::providers::antigravity::AntigravityProvider::new()),
+            ),
+        ]);
 
         for (name, cfg) in crate::config::custom_providers() {
             let key = name.trim().to_ascii_lowercase();
@@ -113,22 +89,19 @@ impl Registry {
             let provider = Arc::new(crate::providers::custom::CustomProvider::from_config(
                 &key, cfg,
             ));
-            models.insert(key.clone(), provider.supported_models());
             handlers.insert(key, provider);
         }
 
-        Self { models, handlers }
+        Self { handlers }
     }
 
     pub fn from_providers(providers: impl IntoIterator<Item = Arc<dyn Provider>>) -> Self {
-        let mut models = BTreeMap::new();
         let mut handlers = BTreeMap::new();
         for provider in providers {
             let name = provider.name().to_string();
-            models.insert(name.clone(), provider.supported_models());
             handlers.insert(name, provider);
         }
-        Self { models, handlers }
+        Self { handlers }
     }
 
     pub fn list_provider_names(&self) -> Vec<String> {
@@ -147,7 +120,11 @@ impl Registry {
     }
 
     pub fn supported_models_for(&self, provider: &str) -> Vec<String> {
-        let models = self.models.get(provider).cloned().unwrap_or_default();
+        let models = self
+            .handlers
+            .get(provider)
+            .map(|handler| handler.supported_models())
+            .unwrap_or_default();
         self.routable(provider, models)
     }
 
@@ -170,11 +147,11 @@ impl Registry {
             // OpenCode Go version. Filtering here instead of in the
             // advertisement keeps the conflict policy automatic across
             // catalog refreshes.
-            let claimed: HashSet<&str> = self
-                .models
+            let claimed: HashSet<String> = self
+                .handlers
                 .iter()
                 .filter(|(name, _)| name.as_str() != "opencode")
-                .flat_map(|(_, entries)| entries.iter().map(String::as_str))
+                .flat_map(|(_, handler)| handler.supported_models())
                 .collect();
             models.retain(|model| {
                 model.starts_with(crate::providers::opencode::model::MODEL_PREFIX)
@@ -247,15 +224,16 @@ impl Registry {
         for name in [
             "codex", "kimi", "cursor", "grok", "glm", "gemini", "opencode",
         ] {
-            if self
-                .models
-                .get(name)
-                .is_some_and(|entries| entries.iter().any(|candidate| candidate == &normalized))
-            {
+            if self.handlers.get(name).is_some_and(|handler| {
+                handler
+                    .supported_models()
+                    .iter()
+                    .any(|candidate| candidate == &normalized)
+            }) {
                 return self.handlers.get(name).cloned();
             }
         }
-        for (name, entries) in &self.models {
+        for (name, handler) in &self.handlers {
             if ![
                 "codex",
                 "kimi",
@@ -270,7 +248,10 @@ impl Registry {
                 "anthropic",
             ]
             .contains(&name.as_str())
-                && entries.iter().any(|candidate| candidate == &normalized)
+                && handler
+                    .supported_models()
+                    .iter()
+                    .any(|candidate| candidate == &normalized)
             {
                 return self.handlers.get(name).cloned();
             }
@@ -352,112 +333,6 @@ pub fn is_cursor_model(model: &str) -> bool {
     CURSOR_PREFIXES
         .iter()
         .any(|prefix| model.starts_with(prefix))
-}
-
-struct PlaceholderProvider {
-    name: &'static str,
-    models: Vec<String>,
-}
-
-impl PlaceholderProvider {
-    fn new(name: &str, models: Vec<String>) -> Self {
-        let name = match name {
-            "codex" => "codex",
-            "kimi" => "kimi",
-            "cursor" => "cursor",
-            "grok" => "grok",
-            _ => "codex",
-        };
-        Self { name, models }
-    }
-}
-
-#[async_trait]
-impl Provider for PlaceholderProvider {
-    fn name(&self) -> &'static str {
-        self.name
-    }
-
-    fn supported_models(&self) -> Vec<String> {
-        self.models.clone()
-    }
-
-    fn cli(&self) -> &dyn CliHandlers {
-        match self.name {
-            "codex" => &CODEX_CLI,
-            "kimi" => &KIMI_CLI,
-            "cursor" => &CURSOR_CLI,
-            "grok" => &GROK_CLI,
-            _ => &CODEX_CLI,
-        }
-    }
-
-    async fn handle_messages(&self, _body: MessagesRequest, ctx: RequestContext) -> Response {
-        placeholder_provider_response("messages", &ctx.provider)
-    }
-
-    async fn handle_count_tokens(&self, _body: MessagesRequest, ctx: RequestContext) -> Response {
-        placeholder_provider_response("count_tokens", &ctx.provider)
-    }
-}
-
-fn placeholder_provider_response(route: &str, provider: &str) -> Response {
-    let _ = route;
-    json_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "unsupported_provider_error",
-        format!("provider '{}' is not yet implemented", provider),
-    )
-}
-
-#[derive(Clone, Copy)]
-struct PlaceholderCli {
-    provider: &'static str,
-}
-
-impl CliHandlers for PlaceholderCli {
-    fn auth_state(&self) -> crate::provider::AuthState {
-        crate::provider::AuthState::Missing
-    }
-
-    fn login(&self) -> Result<()> {
-        Err(anyhow!("{}: browser login not supported", self.provider))
-    }
-
-    fn device(&self) -> Result<()> {
-        Err(anyhow!("{}: device login not supported", self.provider))
-    }
-
-    fn status(&self) -> Result<()> {
-        use serde_json::Value;
-        let path = crate::paths::provider_auth_file(self.provider);
-        let legacy = crate::paths::provider_legacy_auth_file(self.provider);
-        if crate::auth::load_auth_file_with_legacy::<Value>(&path, &legacy).is_some() {
-            Ok(())
-        } else {
-            Err(anyhow!("Not authenticated"))
-        }
-    }
-
-    fn logout(&self) -> Result<()> {
-        let path = crate::paths::provider_auth_file(self.provider);
-        let legacy = crate::paths::provider_legacy_auth_file(self.provider);
-        let _ = crate::auth::delete_auth_file(&path, &legacy);
-        Ok(())
-    }
-}
-
-const CODEX_CLI: PlaceholderCli = PlaceholderCli { provider: "codex" };
-const KIMI_CLI: PlaceholderCli = PlaceholderCli { provider: "kimi" };
-const CURSOR_CLI: PlaceholderCli = PlaceholderCli { provider: "cursor" };
-const GROK_CLI: PlaceholderCli = PlaceholderCli { provider: "grok" };
-fn build_cursor_models() -> Vec<String> {
-    let mut out: Vec<String> = CURSOR_LEGACY_MODELS
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    out.sort_unstable();
-    out
 }
 
 #[cfg(test)]
