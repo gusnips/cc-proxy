@@ -34,6 +34,7 @@ use crate::providers::kimi::count_tokens;
 use crate::providers::opencode::{
     capture_buffered_upstream, google, sse_response, update_buffered_usage,
 };
+use crate::providers::translate_shared::read_effort;
 use crate::providers::upstream_error;
 use crate::registry::normalize_incoming_model;
 
@@ -71,23 +72,21 @@ const CLI_USER_AGENT: &str =
 const REJECTED_CLAUDE_SDK_PARAGRAPH: &str =
     "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
-pub const ANTIGRAVITY_MODELS: &[&str] = &[
-    "gemini-4-argon",
-    "gemini-4-argon-high",
+/// Fallback wire models used before `:fetchAvailableModels` has been saved.
+pub const ANTIGRAVITY_FALLBACK_MODELS: &[&str] = &[
     "gemini-4-argon-medium",
+    "gemini-4-argon-high",
     "gemini-4-argon-low",
-    "gemini-3.8-flash",
     "gemini-3.8-flash-high",
     "gemini-3.8-flash-medium",
     "gemini-3.8-flash-low",
-    "gemini-3.7-flash",
-    "gemini-3.1-pro",
-    "gemini-pro-agent",
-    "gemini-3.1-pro-low",
-    "claude-opus-5-5",
-    "claude-sonnet-5-5",
-    "claude-sonnet-4-6",
-    "claude-opus-4-6-thinking",
+    "claude-opus-5-5-low",
+    "claude-opus-5-5-medium",
+    "claude-opus-5-5-high",
+    "claude-sonnet-5-5-low",
+    "claude-sonnet-5-5-medium",
+    "claude-sonnet-5-5-high",
+    "gpt-oss-120b-medium",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,38 +135,255 @@ fn client_secret() -> String {
 }
 
 fn user_agent_for_wire_model(wire_model: &str) -> &'static str {
-    if wire_model.starts_with("gemini-4-argon") {
+    if wire_model.starts_with("gemini-") && wire_model.split('-').any(|word| word == "argon") {
         CLI_USER_AGENT
     } else {
         IDE_USER_AGENT
     }
 }
 
-pub fn advertised_models() -> Vec<String> {
-    let mut out: Vec<String> = ANTIGRAVITY_MODELS
-        .iter()
-        .map(|m| format!("{MODEL_PREFIX}{m}"))
-        .collect();
-    out.sort_unstable();
+fn wire_models() -> Vec<String> {
+    super::model_catalog::load("antigravity").unwrap_or_else(|| {
+        ANTIGRAVITY_FALLBACK_MODELS
+            .iter()
+            .map(|model| (*model).to_string())
+            .collect()
+    })
+}
+
+/// Collapses `-low` / `-medium` / `-high` wire families into their base model
+/// id (`gemini-4-argon`, `claude-opus-5-5`) when all three tiers exist.
+fn collapsed_models(wire_ids: &[String]) -> Vec<String> {
+    let set: std::collections::HashSet<&str> = wire_ids.iter().map(String::as_str).collect();
+    let mut out = Vec::new();
+    for id in wire_ids {
+        let base = ["low", "medium", "high"]
+            .into_iter()
+            .find_map(|tier| id.strip_suffix(&format!("-{tier}")));
+        let candidate = match base {
+            Some(stem)
+                if ["low", "medium", "high"]
+                    .into_iter()
+                    .all(|tier| set.contains(format!("{stem}-{tier}").as_str())) =>
+            {
+                stem.to_string()
+            }
+            _ => id.clone(),
+        };
+        if !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    }
     out
 }
 
-pub fn resolve_wire_model(raw: &str) -> Option<String> {
-    let normalized = normalize_incoming_model(raw);
-    let stripped = normalized.strip_prefix(MODEL_PREFIX)?;
-    if stripped.is_empty() {
-        return None;
-    }
-    let wire = match stripped {
-        "gemini-4-argon" => "gemini-4-argon-high",
-        "gemini-3.8-flash" => "gemini-3.8-flash-medium",
-        "gemini-3.7-flash" => "gemini-3.7-flash-tiered",
-        "gemini-3.1-pro" => "gemini-pro-agent",
-        "claude-opus-5-5" => "claude-opus-5-5-high",
-        "claude-sonnet-5-5" => "claude-sonnet-5-5-high",
-        other => other,
+pub fn advertised_models() -> Vec<String> {
+    let wire = wire_models();
+    let mut out: Vec<String> = collapsed_models(&wire)
+        .into_iter()
+        .chain(wire)
+        .map(|m| format!("{MODEL_PREFIX}{m}"))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+pub fn catalog_models() -> Vec<String> {
+    let mut out: Vec<String> = collapsed_models(&wire_models())
+        .into_iter()
+        .map(|m| format!("{MODEL_PREFIX}{m}"))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Parses `:fetchAvailableModels` JSON (`agentModelSorts[].groups[].modelIds`)
+/// into the ordered list of agent wire model IDs.
+fn parse_available_models(body: &Value) -> Vec<String> {
+    let Some(models) = body.get("models").and_then(Value::as_object) else {
+        return Vec::new();
     };
-    Some(wire.to_string())
+    let Some(sorts) = body.get("agentModelSorts").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for sort in sorts {
+        let Some(groups) = sort.get("groups").and_then(Value::as_array) else {
+            continue;
+        };
+        for group in groups {
+            let Some(ids) = group.get("modelIds").and_then(Value::as_array) else {
+                continue;
+            };
+            for id in ids.iter().filter_map(Value::as_str) {
+                if !id.is_empty()
+                    && models.contains_key(id)
+                    && !out.iter().any(|existing| existing == id)
+                {
+                    out.push(id.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn save_refreshed_auth(
+    stored: StoredAntigravityAuth,
+    payload: &Value,
+) -> Option<StoredAntigravityAuth> {
+    let access = payload["access_token"]
+        .as_str()
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let refresh = payload["refresh_token"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| stored.refresh.clone());
+    let expires_in = payload["expires_in"].as_u64().unwrap_or(3600);
+    let updated = StoredAntigravityAuth {
+        access,
+        refresh,
+        expires: (now_ms() + expires_in * 1000).saturating_sub(REFRESH_SKEW_MS),
+        project_id: stored.project_id,
+        email: stored.email,
+        plan: stored.plan,
+    };
+    let _ = file_store().save(updated.clone());
+    Some(updated)
+}
+
+fn ensure_valid_auth_blocking(
+    client: &reqwest::blocking::Client,
+    stored: StoredAntigravityAuth,
+) -> Result<StoredAntigravityAuth> {
+    if stored.expires > now_ms() {
+        return Ok(stored);
+    }
+    let payload: Value = client
+        .post(TOKEN_ENDPOINT)
+        .header("Accept", "application/json")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", &client_id()),
+            ("client_secret", &client_secret()),
+            ("refresh_token", &stored.refresh),
+        ])
+        .send()
+        .context("Antigravity token refresh failed")?
+        .error_for_status()
+        .context("Antigravity OAuth session expired or was revoked. Run `cc-proxy auth login antigravity`.")?
+        .json()
+        .context("Invalid Antigravity token refresh response")?;
+    save_refreshed_auth(stored, &payload)
+        .ok_or_else(|| anyhow::anyhow!("Antigravity token refresh response missing access_token"))
+}
+
+/// Queries Antigravity's `:fetchAvailableModels` endpoint and saves the live
+/// agent wire model list to `antigravity/models.json`.
+pub fn refresh_models(stored: &StoredAntigravityAuth) -> Result<Vec<String>> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let auth = ensure_valid_auth_blocking(&client, stored.clone())?;
+    let mut last_err = None;
+    for base in [DAILY_API, PROD_API] {
+        let resp = client
+            .post(format!("{base}/{API_VERSION}:fetchAvailableModels"))
+            .header("Authorization", format!("Bearer {}", auth.access))
+            .header("Content-Type", "application/json")
+            .header("User-Agent", CLI_USER_AGENT)
+            .json(&json!({ "project": auth.project_id }))
+            .send();
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let body: Value = r
+                    .json()
+                    .context("Antigravity model list response was not JSON")?;
+                let wire_ids = parse_available_models(&body);
+                if wire_ids.is_empty() {
+                    bail!("Antigravity returned no agent models for this account");
+                }
+                super::model_catalog::save("antigravity", &wire_ids)?;
+                return Ok(collapsed_models(&wire_ids));
+            }
+            Ok(r) => {
+                last_err = Some(anyhow::anyhow!(
+                    "Antigravity refused the model list request ({})",
+                    r.status()
+                ));
+            }
+            Err(e) => {
+                last_err = Some(anyhow::Error::from(e));
+            }
+        }
+    }
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("Couldn't reach Antigravity for its model list")))
+}
+
+fn resolve_wire_model(body: &MessagesRequest) -> Result<String, ProviderError> {
+    let requested = body.model.as_deref().unwrap_or_default();
+    let effort = read_effort(body).map_err(|error| {
+        ProviderError::new(
+            StatusCode::BAD_REQUEST,
+            ProviderErrorKind::InvalidRequest,
+            error.to_string(),
+        )
+    })?;
+    wire_model(requested, effort, &wire_models()).ok_or_else(|| {
+        ProviderError::new(
+            StatusCode::BAD_REQUEST,
+            ProviderErrorKind::InvalidRequest,
+            format!("Invalid Antigravity model: {requested}. Use `antigravity/<model>` from `cc-proxy models list antigravity`."),
+        )
+    })
+}
+
+/// Effort suffixes come from discovery, never from guessing a model's name.
+fn wire_model(raw: &str, effort: Option<&str>, known: &[String]) -> Option<String> {
+    let normalized = normalize_incoming_model(raw);
+    let id = normalized
+        .strip_prefix(MODEL_PREFIX)
+        .filter(|id| !id.is_empty())?;
+    let default = if id.split('-').any(|word| word == "flash") {
+        "medium"
+    } else {
+        "high"
+    };
+    let tier = match effort {
+        Some("none" | "low") => "low",
+        Some("medium") => "medium",
+        Some("high" | "xhigh" | "max") => "high",
+        _ => default,
+    };
+    let base = id
+        .rsplit_once('-')
+        .filter(|(_, suffix)| matches!(*suffix, "low" | "medium" | "high"))
+        .map(|(base, _)| base);
+    if let Some(base) = base {
+        if effort.is_some() {
+            let candidate = format!("{base}-{tier}");
+            if known.contains(&candidate) {
+                return Some(candidate);
+            }
+        }
+        return Some(id.to_string());
+    }
+    if known.iter().any(|model| model == id) {
+        return Some(id.to_string());
+    }
+    for suffix in [tier, default, "medium", "low", "high"] {
+        let candidate = format!("{id}-{suffix}");
+        if known.contains(&candidate) {
+            return Some(candidate);
+        }
+    }
+    Some(id.to_string())
 }
 
 fn antigravity_session_id(session_id: Option<&str>) -> String {
@@ -336,33 +552,13 @@ async fn load_valid_auth() -> Result<StoredAntigravityAuth, ProviderError> {
         )
     })?;
 
-    let access = payload["access_token"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ProviderError::new(
-                StatusCode::BAD_GATEWAY,
-                ProviderErrorKind::Api,
-                "Antigravity token refresh response missing access_token",
-            )
-        })?
-        .to_string();
-    let refresh = payload["refresh_token"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| stored.refresh.clone());
-    let expires_in = payload["expires_in"].as_u64().unwrap_or(3600);
-    let updated = StoredAntigravityAuth {
-        access,
-        refresh,
-        expires: (now_ms() + expires_in * 1000).saturating_sub(REFRESH_SKEW_MS),
-        project_id: stored.project_id,
-        email: stored.email,
-        plan: stored.plan,
-    };
-    let _ = file_store().save(updated.clone());
-    Ok(updated)
+    save_refreshed_auth(stored, &payload).ok_or_else(|| {
+        ProviderError::new(
+            StatusCode::BAD_GATEWAY,
+            ProviderErrorKind::Api,
+            "Antigravity token refresh response missing access_token",
+        )
+    })
 }
 
 fn build_antigravity_envelope(
@@ -510,12 +706,9 @@ impl AntigravityProvider {
         ctx: RequestContext,
     ) -> Response {
         let requested = body.model.as_deref().unwrap_or_default();
-        let Some(wire_model) = resolve_wire_model(requested) else {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!("Unsupported Antigravity model: {requested}"),
-            );
+        let wire_model = match resolve_wire_model(&body) {
+            Ok(model) => model,
+            Err(error) => return error.response(),
         };
         let auth = match load_valid_auth().await {
             Ok(auth) => auth,
@@ -588,11 +781,7 @@ impl Provider for AntigravityProvider {
     }
 
     fn catalog(&self) -> Vec<String> {
-        vec![
-            "antigravity/gemini-4-argon".to_string(),
-            "antigravity/gemini-3.1-pro".to_string(),
-            "antigravity/gemini-3.8-flash".to_string(),
-        ]
+        catalog_models()
     }
 
     fn cli(&self) -> &dyn CliHandlers {
@@ -610,13 +799,9 @@ impl Provider for AntigravityProvider {
     }
 
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
-        let requested = body.model.as_deref().unwrap_or_default();
-        let Some(wire_model) = resolve_wire_model(requested) else {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!("Unsupported Antigravity model: {requested}"),
-            );
+        let wire_model = match resolve_wire_model(&body) {
+            Ok(model) => model,
+            Err(error) => return error.response(),
         };
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &wire_model);
@@ -641,13 +826,7 @@ impl Provider for AntigravityProvider {
     ) -> Result<Generation, ProviderError> {
         body.stream = true;
         let requested = body.model.as_deref().unwrap_or_default();
-        let wire_model = resolve_wire_model(requested).ok_or_else(|| {
-            ProviderError::new(
-                StatusCode::BAD_REQUEST,
-                ProviderErrorKind::InvalidRequest,
-                format!("Unsupported Antigravity model: {requested}"),
-            )
-        })?;
+        let wire_model = resolve_wire_model(&body)?;
         let auth = load_valid_auth().await?;
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &wire_model);
@@ -809,7 +988,13 @@ impl CliHandlers for AntigravityCli {
             email: email.clone(),
             plan,
         };
-        file_store().save(stored)?;
+        file_store().save(stored.clone())?;
+        println!("Fetching Antigravity's model list...");
+        if let Err(error) = refresh_models(&stored) {
+            eprintln!(
+                "Sign-in is saved, but the model list could not be refreshed: {error:#}. Retry with `cc-proxy models refresh antigravity`."
+            );
+        }
         if let Some(email) = email {
             println!("Signed in to Antigravity as {email} (project: {project_id}).");
         } else {
@@ -839,9 +1024,208 @@ impl CliHandlers for AntigravityCli {
 
     fn logout(&self) -> Result<()> {
         file_store().clear()?;
+        let _ = std::fs::remove_file(super::model_catalog::cache_file("antigravity"));
         println!("Antigravity stored auth cleared.");
         Ok(())
     }
 }
 
 static ANTIGRAVITY_CLI: AntigravityCli = AntigravityCli;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_and_collapse_available_models_matches_cca_response() {
+        let body = json!({
+            "models": {
+                "gemini-4-argon-low": {},
+                "gemini-4-argon-medium": {},
+                "gemini-4-argon-high": {},
+                "gemini-3.8-flash-low": {},
+                "gemini-3.8-flash-medium": {},
+                "gemini-3.8-flash-high": {},
+                "claude-opus-5-5-low": {},
+                "claude-opus-5-5-medium": {},
+                "claude-opus-5-5-high": {},
+                "claude-sonnet-5-5-low": {},
+                "claude-sonnet-5-5-medium": {},
+                "claude-sonnet-5-5-high": {},
+                "gpt-oss-120b-medium": {},
+                "tab_flash_lite_preview": {}
+            },
+            "agentModelSorts": [{
+                "displayName": "Recommended",
+                "groups": [{
+                    "modelIds": [
+                        "gemini-4-argon-medium",
+                        "gemini-4-argon-high",
+                        "gemini-4-argon-low",
+                        "gemini-3.8-flash-high",
+                        "gemini-3.8-flash-medium",
+                        "gemini-3.8-flash-low",
+                        "claude-opus-5-5-low",
+                        "claude-opus-5-5-medium",
+                        "claude-opus-5-5-high",
+                        "claude-sonnet-5-5-low",
+                        "claude-sonnet-5-5-medium",
+                        "claude-sonnet-5-5-high",
+                        "gpt-oss-120b-medium"
+                    ]
+                }]
+            }]
+        });
+        let wire = parse_available_models(&body);
+        assert_eq!(
+            collapsed_models(&wire),
+            [
+                "gemini-4-argon",
+                "gemini-3.8-flash",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "gpt-oss-120b-medium"
+            ]
+        );
+    }
+
+    #[test]
+    fn discovered_families_resolve_without_inventing_effort_variants() {
+        let known = [
+            "future-9-low",
+            "future-9-medium",
+            "future-9-high",
+            "only-medium",
+            "plain",
+        ]
+        .map(str::to_string);
+        assert_eq!(
+            wire_model("antigravity/future-9[1m]", Some("max"), &known).as_deref(),
+            Some("future-9-high")
+        );
+        assert_eq!(
+            wire_model("antigravity/only-medium", Some("max"), &known).as_deref(),
+            Some("only-medium")
+        );
+        assert_eq!(
+            wire_model("antigravity/plain", Some("high"), &known).as_deref(),
+            Some("plain")
+        );
+        assert_eq!(
+            wire_model("antigravity/claude-future", Some("high"), &known).as_deref(),
+            Some("claude-future")
+        );
+        assert_eq!(wire_model("antigravity/", None, &known), None);
+        assert_eq!(wire_model("gemini-9", None, &known), None);
+        assert_eq!(
+            collapsed_models(&["partial-low".into(), "partial-medium".into()]),
+            ["partial-low", "partial-medium"]
+        );
+        assert_eq!(
+            user_agent_for_wire_model("gemini-9-argon-high"),
+            CLI_USER_AGENT
+        );
+        assert_eq!(
+            user_agent_for_wire_model("gemini-9-flash-medium"),
+            IDE_USER_AGENT
+        );
+        assert!(parse_available_models(&json!({"models": {"tab": {}}})).is_empty());
+    }
+
+    #[test]
+    fn resolve_wire_model_maps_effort_including_xhigh_and_max_to_high() {
+        for (model, effort, expected) in [
+            ("antigravity/claude-opus-5-5", None, "claude-opus-5-5-high"),
+            (
+                "antigravity/claude-opus-5-5",
+                Some("none"),
+                "claude-opus-5-5-low",
+            ),
+            (
+                "antigravity/claude-opus-5-5",
+                Some("low"),
+                "claude-opus-5-5-low",
+            ),
+            (
+                "antigravity/claude-opus-5-5",
+                Some("medium"),
+                "claude-opus-5-5-medium",
+            ),
+            (
+                "antigravity/claude-opus-5-5",
+                Some("high"),
+                "claude-opus-5-5-high",
+            ),
+            (
+                "antigravity/claude-opus-5-5",
+                Some("xhigh"),
+                "claude-opus-5-5-high",
+            ),
+            (
+                "antigravity/claude-opus-5-5",
+                Some("max"),
+                "claude-opus-5-5-high",
+            ),
+            ("antigravity/gemini-4-argon", None, "gemini-4-argon-high"),
+            (
+                "antigravity/gemini-4-argon",
+                Some("low"),
+                "gemini-4-argon-low",
+            ),
+            (
+                "antigravity/gemini-4-argon",
+                Some("medium"),
+                "gemini-4-argon-medium",
+            ),
+            (
+                "antigravity/gemini-4-argon",
+                Some("xhigh"),
+                "gemini-4-argon-high",
+            ),
+            (
+                "antigravity/gemini-3.8-flash",
+                None,
+                "gemini-3.8-flash-medium",
+            ),
+            (
+                "antigravity/gemini-3.8-flash",
+                Some("low"),
+                "gemini-3.8-flash-low",
+            ),
+            (
+                "antigravity/gemini-3.8-flash",
+                Some("max"),
+                "gemini-3.8-flash-high",
+            ),
+            (
+                "antigravity/gpt-oss-120b-medium",
+                None,
+                "gpt-oss-120b-medium",
+            ),
+            (
+                "antigravity/claude-sonnet-5-5-low",
+                None,
+                "claude-sonnet-5-5-low",
+            ),
+            (
+                "antigravity/claude-sonnet-5-5-low",
+                Some("max"),
+                "claude-sonnet-5-5-high",
+            ),
+        ] {
+            assert_eq!(
+                wire_model(
+                    model,
+                    effort,
+                    &ANTIGRAVITY_FALLBACK_MODELS
+                        .iter()
+                        .map(|model| (*model).to_string())
+                        .collect::<Vec<_>>()
+                )
+                .as_deref(),
+                Some(expected),
+                "{model} ({effort:?})"
+            );
+        }
+    }
+}

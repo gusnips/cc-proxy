@@ -168,6 +168,35 @@ fn best(pool: &[&Parsed<'_>]) -> Option<Guess> {
     })
 }
 
+fn antigravity_pool<'a, 'b>(parsed: &'b [Parsed<'a>], tier: &str) -> Vec<&'b Parsed<'a>> {
+    let is_claude = |model: &Parsed<'_>| model.stem.split_whitespace().any(|w| w == "claude");
+    let is_gemini = |model: &Parsed<'_>| model.stem.split_whitespace().any(|w| w == "gemini");
+    let primary: Vec<_> = match tier {
+        "fable" => parsed
+            .iter()
+            .filter(|m| is_claude(m) && m.tiers.contains("opus"))
+            .collect(),
+        "opus" => parsed
+            .iter()
+            .filter(|m| is_claude(m) && m.tiers.contains("sonnet"))
+            .collect(),
+        "sonnet" => parsed
+            .iter()
+            .filter(|m| is_gemini(m) && (m.tiers.contains("opus") || m.tiers.contains("sonnet")))
+            .collect(),
+        "haiku" => parsed
+            .iter()
+            .filter(|m| is_gemini(m) && m.tiers.contains("haiku"))
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !primary.is_empty() {
+        primary
+    } else {
+        pool(parsed, tier)
+    }
+}
+
 /// The model for each tier, worked out from `models`. A tier is missing when
 /// there is nothing to pick from.
 pub fn derive(models: &[String]) -> BTreeMap<&'static str, Guess> {
@@ -188,7 +217,15 @@ pub fn for_provider(registry: &Registry, provider: &str) -> BTreeMap<&'static st
     {
         return BTreeMap::new();
     }
-    derive(&registry.catalog_for(provider))
+    let models = registry.catalog_for(provider);
+    if provider == "antigravity" {
+        let parsed: Vec<Parsed> = models.iter().filter_map(|id| parse(id)).collect();
+        return TIERS
+            .into_iter()
+            .filter_map(|tier| Some((tier, best(&antigravity_pool(&parsed, tier))?)))
+            .collect();
+    }
+    derive(&models)
 }
 
 /// The config.json key that holds the user's choice for `tier` on `provider`.
@@ -266,7 +303,11 @@ pub fn describe(provider: &str, mappings: &[Mapping]) -> Vec<String> {
 pub fn ranked(registry: &Registry, provider: &str, tier: &str) -> Vec<String> {
     let models = registry.catalog_for(provider);
     let parsed: Vec<Parsed> = models.iter().filter_map(|id| parse(id)).collect();
-    let mut candidates = pool(&parsed, tier);
+    let mut candidates = if provider == "antigravity" {
+        antigravity_pool(&parsed, tier)
+    } else {
+        pool(&parsed, tier)
+    };
     candidates.sort_by(|a, b| {
         b.version
             .cmp(&a.version)

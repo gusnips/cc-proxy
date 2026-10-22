@@ -3,6 +3,23 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.12 (2026-10-22)
+
+- Antigravity now discovers the models your account can use from Cloud Code
+  Assist (`:fetchAvailableModels`), saves them to `antigravity/models.json`, and
+  collapses `-low`, `-medium` and `-high` families into one picker row per
+  model. Its Claude Opus and Claude Sonnet models now appear in
+  `cc-proxy models choose antigravity` and Claude Code's `/model` picker.
+- Antigravity's automatic Claude-name defaults now map `fable` to Claude Opus,
+  `opus` to Claude Sonnet, `sonnet` to Gemini Argon (or Pro) and `haiku` to
+  Gemini Flash. Request `output_config.effort` selects the matching Antigravity
+  variant (`none` and `low` use `low`, `medium` uses `medium`, and `high`,
+  `xhigh` and `max` use `high`).
+- `cc-proxy models refresh [provider|all]` now refreshes Antigravity, GitHub
+  Copilot, Gemini, OpenCode Go, OpenCode Zen and custom providers. A running
+  proxy reads refreshed catalogs without a restart, and failed refreshes keep
+  the previous saved list.
+
 ## v0.2.11 (2026-10-22)
 
 - Fixed Sonnet requests routed to Gemini failing with a model-not-found error.
@@ -17,7 +34,7 @@ description: Release notes for cc-proxy.
 ## v0.2.10 (2026-10-20)
 
 - Fixed `Invalid schema for function 'advisor': schema must be a JSON Schema of
-  'type: "object"', got 'type: null'` on `opencode-zen` (such as
+'type: "object"', got 'type: null'` on `opencode-zen` (such as
   `deepseek-v4.1-flash-free`) and other providers. Anthropic server-side
   `advisor_*` tools without `input_schema` are stripped at ingress and skipped
   in tool translation, and function tool schemas without a root `type` default

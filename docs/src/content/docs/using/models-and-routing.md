@@ -69,16 +69,45 @@ Each line says who decided: `your choice`, `picked by cc-proxy`, or `a guess, no
 
 While routing is off, a Claude name gets an HTTP 400 that says so. That window still points at the proxy. Restart it, or run `cc-proxy start`.
 
-## Prefer the live catalog
+## Refresh model lists
 
-The model list changes faster than documentation. Ask the installed CLI:
+```sh
+cc-proxy models refresh antigravity
+```
+
+This asks Antigravity which models your account can use, saves the list and updates Claude Code's picker. It does not restart the proxy.
+
+Use `cc-proxy models refresh all` to refresh Antigravity, GitHub Copilot, Gemini, OpenCode Go, OpenCode Zen and providers you added. Providers that need sign-in are skipped until you sign in. Each failed refresh keeps its saved list; the command continues with the others and exits with an error if any refresh failed.
+
+Successful refreshes replace the saved list, so retired models disappear. The built-in lists are fallbacks until a live list has been saved. Your chosen tier mappings stay unchanged. Automatic defaults use the refreshed catalog on the next request.
+
+Codex reads the Codex CLI's local model cache automatically. Cursor, Grok, Kimi, GLM and direct Anthropic do not have live discovery in cc-proxy yet. The command reports these limits rather than claiming to refresh them.
+
+### Antigravity defaults and effort
+
+Antigravity uses the newest available model in each family:
+
+| Claude name | Antigravity family  | Current example                 |
+| ----------- | ------------------- | ------------------------------- |
+| `fable`     | Claude Opus         | `antigravity/claude-opus-5-5`   |
+| `opus`      | Claude Sonnet       | `antigravity/claude-sonnet-5-5` |
+| `sonnet`    | Gemini Argon or Pro | `antigravity/gemini-4-argon`    |
+| `haiku`     | Gemini Flash        | `antigravity/gemini-3.8-flash`  |
+
+Your choices from `models choose` or `models set` still win. Antigravity refreshes its list at sign-in, or when you run `models refresh antigravity`.
+
+When discovery lists a model's `-low`, `-medium` and `-high` variants, the picker shows one base ID. The request's `output_config.effort` selects the variant: `none` and `low` use `low`, `medium` uses `medium`, and `high`, `xhigh` and `max` use `high`. Here, `none` means Antigravity's lowest effort, not thinking off. Without an effort, Flash uses `medium` and other families use `high`, when available. A model with only one variant keeps that variant. A request effort can override an explicit suffix only when the requested variant exists.
+
+## Prefer the current catalog
+
+Ask the installed CLI:
 
 ```sh
 cc-proxy models list
 cc-proxy models list --full
 ```
 
-The compact command abbreviates Cursor's dynamic aliases. `--full` prints every alias discovered through the installed Cursor Agent catalog.
+The compact command shortens Cursor's alias list. `--full` prints every advertised alias.
 
 The HTTP equivalent is:
 
@@ -112,7 +141,11 @@ If you pin a model in `settings.json` (`ANTHROPIC_MODEL` or an `ANTHROPIC_DEFAUL
 
 ## Gateway model discovery
 
-`cc-proxy start` turns on `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` in `settings.json` (unless you set it yourself). While routing is on, `/v1/models` starts with `claude-fable`, `claude-opus`, `claude-sonnet` and `claude-haiku`. Their display names show the provider and model, for example `codex/gpt-6.1-sol`.
+`cc-proxy start` turns on `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` in `settings.json` (unless you set it yourself). This lets Claude Code fetch `/v1/models` from the proxy at startup. Current Claude Code keeps discovered IDs containing `claude` or `anthropic`; it filters out other IDs such as `gemini-…`.
+
+cc-proxy also sets `modelPicker.replaceBuiltInOptions: true`, which hides discovery results in favor of its explicit picker rows. Gemini, Antigravity and reseller catalogs with at most 100 models get direct rows alongside the four mapped Claude names. Refreshing a provider updates those rows from the same catalog used by `models choose`. The env var alone cannot fetch a provider's upstream catalog or add a model missing from these rows.
+
+See [Claude Code's model discovery rules](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery).
 
 For Claude Code itself, cc-proxy writes native `modelPicker` labels. Its header, `/model` picker and status-line `model.display_name` then show the model answering your requests. Status lines pick up the label on their next refresh. A picker row's description says which Claude tier it uses. Labels follow provider switches, model choices and resets. An existing session gets its label when its next regular request reaches the proxy. No restart is needed.
 

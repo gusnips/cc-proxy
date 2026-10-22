@@ -108,7 +108,7 @@ cc-proxy models list [provider] [--full]
 cc-proxy models choose [provider]
 cc-proxy models set <name> <model> [--provider <provider>]
 cc-proxy models reset [name] [--provider <provider>]
-cc-proxy models refresh [provider]
+cc-proxy models refresh [provider|all]
 ```
 
 `models` (or `models show`) shows which model each Claude name (`fable`, `opus`, `sonnet`, `haiku`) uses on a provider, and who decided it.
@@ -117,7 +117,9 @@ cc-proxy models refresh [provider]
 
 `models choose` asks which model each Claude name uses, one name at a time. Type part of a name to search the provider's catalog (every word must match), a number to pick from the list shown, or press Enter to keep the name as it is. The provider defaults to the one Claude Code goes to now.
 
-`models set` sets one Claude name directly, and `models reset` forgets your choice for one name, or for all four when you give no name. `models refresh` fetches the live model list of GitHub Copilot or a provider you added with `cc-proxy provider add`.
+`models set` sets one Claude name directly, and `models reset` forgets your choice for one name, or for all four when you give no name.
+
+`models refresh` fetches live lists for Antigravity, GitHub Copilot, Gemini, OpenCode Go, OpenCode Zen and providers you added. Use `models refresh all` to refresh them together. Failures keep the saved list and do not stop the other refreshes. Providers without live discovery are reported as skipped. See [Refresh model lists](/using/models-and-routing/#refresh-model-lists).
 
 ## Provider authentication
 
