@@ -254,7 +254,7 @@ pub fn translate_stream_bytes(
     message_id: &str,
     model: &str,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    translate_stream_bytes_with_traffic(upstream, message_id, model, 0, None)
+    translate_stream_bytes_with_traffic(upstream, message_id, model, 0, None, None)
 }
 
 pub fn translate_stream_bytes_with_traffic(
@@ -263,8 +263,9 @@ pub fn translate_stream_bytes_with_traffic(
     model: &str,
     estimated_input_tokens: u64,
     traffic: Option<&TrafficCapture>,
+    account: Option<&str>,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    let events = match reduce_upstream_bytes(upstream) {
+    let events = match reduce_upstream_bytes(upstream, account) {
         Ok(events) => events,
         Err(err) => {
             write_reducer_error_capture(traffic, &err);
@@ -522,8 +523,15 @@ mod tests {
             ),
         );
         let out = String::from_utf8(
-            translate_stream_bytes_with_traffic(upstream.as_bytes(), "msg_1", "gpt-5.5", 321, None)
-                .unwrap(),
+            translate_stream_bytes_with_traffic(
+                upstream.as_bytes(),
+                "msg_1",
+                "gpt-5.5",
+                321,
+                None,
+                Some("account-a"),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert!(out.contains("message_start"));
@@ -590,7 +598,15 @@ mod tests {
                 })
             ),
         );
-        let result = translate_stream_bytes(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap();
+        let result = translate_stream_bytes_with_traffic(
+            upstream.as_bytes(),
+            "msg_1",
+            "gpt-5.5",
+            0,
+            None,
+            Some("account-a"),
+        )
+        .unwrap();
         let out = String::from_utf8(result).unwrap();
         assert!(out.contains("server_tool_use"), "missing server_tool_use");
         assert!(
@@ -643,7 +659,15 @@ mod tests {
             ),
         );
         let out = String::from_utf8(
-            translate_stream_bytes(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap(),
+            translate_stream_bytes_with_traffic(
+                upstream.as_bytes(),
+                "msg_1",
+                "gpt-5.5",
+                0,
+                None,
+                Some("account-a"),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert!(out.contains("\"type\":\"thinking\""));
@@ -706,7 +730,15 @@ mod tests {
             ),
         );
         let out = String::from_utf8(
-            translate_stream_bytes(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap(),
+            translate_stream_bytes_with_traffic(
+                upstream.as_bytes(),
+                "msg_1",
+                "gpt-5.5",
+                0,
+                None,
+                Some("account-a"),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert!(!out.contains("\"type\":\"thinking\""));
@@ -742,7 +774,15 @@ mod tests {
             ),
         );
         let out = String::from_utf8(
-            translate_stream_bytes(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap(),
+            translate_stream_bytes_with_traffic(
+                upstream.as_bytes(),
+                "msg_1",
+                "gpt-5.5",
+                0,
+                None,
+                Some("account-a"),
+            )
+            .unwrap(),
         )
         .unwrap();
         let thinking_delta = out.find(r#""type":"thinking_delta""#).unwrap();
@@ -753,6 +793,6 @@ mod tests {
             .unwrap();
         assert!(thinking_delta < signature_delta);
         assert!(signature_delta < thinking_stop);
-        assert!(out.contains("ccp:codex:v1:"));
+        assert!(out.contains("ccp:codex:v2:account-a:"));
     }
 }

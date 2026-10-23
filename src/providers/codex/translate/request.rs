@@ -2906,8 +2906,11 @@ mod tests {
             id: "rs_1".to_string(),
             encrypted_content: "opaque".to_string(),
         };
-        let signature =
-            super::super::reasoning_signature::encode_reasoning_signature(&replay).unwrap();
+        let signature = super::super::reasoning_signature::encode_reasoning_signature(
+            &replay,
+            Some("account-a"),
+        )
+        .unwrap();
         let req: MessagesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",
             "messages": [

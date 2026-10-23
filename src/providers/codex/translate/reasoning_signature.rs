@@ -1,7 +1,8 @@
 use base64::Engine;
 use serde_json::Value;
 
-const PREFIX: &str = "ccp:codex:v1:";
+const PREFIX: &str = "ccp:codex:v2:";
+const MAX_ACCOUNT_BYTES: usize = 64;
 const MAX_ID_BYTES: usize = 4 * 1024;
 const MAX_ENCRYPTED_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 
@@ -12,7 +13,7 @@ const MAX_ENCRYPTED_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 /// traffic captures redact the whole value. Keeping the check beside the
 /// encoder keeps the format definition in one place.
 pub(crate) fn is_proxy_reasoning_signature(signature: &str) -> bool {
-    signature.starts_with(PREFIX)
+    signature.starts_with("ccp:codex:")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,27 +39,53 @@ impl PendingReasoning {
     }
 
     pub fn replay(&self) -> Option<ReasoningReplay> {
-        Some(ReasoningReplay {
+        let replay = ReasoningReplay {
             id: self.id.clone()?,
             encrypted_content: self.encrypted_content.clone()?,
-        })
+        };
+        replay.is_valid().then_some(replay)
     }
 }
 
-pub fn encode_reasoning_signature(replay: &ReasoningReplay) -> Option<String> {
-    if !valid_reasoning_id(&replay.id)
-        || replay.encrypted_content.is_empty()
-        || replay.encrypted_content.len() > MAX_ENCRYPTED_CONTENT_BYTES
-    {
+impl ReasoningReplay {
+    fn is_valid(&self) -> bool {
+        valid_reasoning_id(&self.id)
+            && !self.encrypted_content.is_empty()
+            && self.encrypted_content.len() <= MAX_ENCRYPTED_CONTENT_BYTES
+    }
+}
+
+pub fn encode_reasoning_signature(
+    replay: &ReasoningReplay,
+    account: Option<&str>,
+) -> Option<String> {
+    let account = account.filter(|account| valid_account(account))?;
+    if !replay.is_valid() {
         return None;
     }
     let encoded_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(replay.id.as_bytes());
-    Some(format!("{PREFIX}{encoded_id}:{}", replay.encrypted_content))
+    Some(format!(
+        "{PREFIX}{account}:{encoded_id}:{}",
+        replay.encrypted_content
+    ))
+}
+
+pub(crate) fn signature_account(signature: &str) -> Option<&str> {
+    let (account, _) = signature.strip_prefix(PREFIX)?.split_once(':')?;
+    valid_account(account).then_some(account)
+}
+
+fn valid_account(account: &str) -> bool {
+    account.len() <= MAX_ACCOUNT_BYTES && valid_reasoning_id(account)
 }
 
 pub fn decode_reasoning_signature(signature: &str) -> Option<ReasoningReplay> {
     let payload = signature.strip_prefix(PREFIX)?;
     if payload.is_empty() || payload.len() > max_payload_len() {
+        return None;
+    }
+    let (account, payload) = payload.split_once(':')?;
+    if !valid_account(account) {
         return None;
     }
     let (encoded_id, encrypted_content) = payload.split_once(':')?;
@@ -95,7 +122,7 @@ fn encoded_id_len_limit() -> usize {
 }
 
 fn max_payload_len() -> usize {
-    encoded_id_len_limit() + 1 + MAX_ENCRYPTED_CONTENT_BYTES
+    MAX_ACCOUNT_BYTES + 1 + encoded_id_len_limit() + 1 + MAX_ENCRYPTED_CONTENT_BYTES
 }
 
 fn non_empty_string(value: Option<&Value>) -> Option<&str> {
@@ -113,7 +140,7 @@ mod tests {
             id: "rs_1".to_string(),
             encrypted_content: "gAAAAopaque".to_string(),
         };
-        let signature = encode_reasoning_signature(&replay).unwrap();
+        let signature = encode_reasoning_signature(&replay, Some("account-a")).unwrap();
         assert!(signature.starts_with(PREFIX));
         assert!(signature.ends_with(":gAAAAopaque"));
         assert_eq!(decode_reasoning_signature(&signature), Some(replay));
@@ -123,10 +150,13 @@ mod tests {
     fn composite_ids_are_not_encoded_or_replayed_from_existing_signatures() {
         let id = "rs_6adb18e156be73a92dc249a9:rs_01a167d93049718084aceff8309d5b7a";
         assert!(
-            encode_reasoning_signature(&ReasoningReplay {
-                id: id.into(),
-                encrypted_content: "opaque".into(),
-            })
+            encode_reasoning_signature(
+                &ReasoningReplay {
+                    id: id.into(),
+                    encrypted_content: "opaque".into(),
+                },
+                Some("account-a")
+            )
             .is_none()
         );
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(id);
@@ -134,7 +164,7 @@ mod tests {
             "model":"gpt-5.6-sol",
             "messages":[{"role":"assistant","content":[{
                 "type":"thinking","thinking":"visible summary",
-                "signature":format!("{PREFIX}{encoded}:opaque")
+                "signature":format!("{PREFIX}account-a:{encoded}:opaque")
             }]}]
         }))
         .unwrap();
@@ -161,10 +191,14 @@ mod tests {
                 id: id.into(),
                 encrypted_content: "opaque".into(),
             };
-            assert!(encode_reasoning_signature(&replay).is_none(), "{id:?}");
+            assert!(
+                encode_reasoning_signature(&replay, Some("account-a")).is_none(),
+                "{id:?}"
+            );
             let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(id);
             assert!(
-                decode_reasoning_signature(&format!("{PREFIX}{encoded}:opaque")).is_none(),
+                decode_reasoning_signature(&format!("{PREFIX}account-a:{encoded}:opaque"))
+                    .is_none(),
                 "{id:?}"
             );
         }
@@ -196,7 +230,7 @@ mod tests {
     #[test]
     fn oversized_signature_is_ignored_without_decoding() {
         let signature = format!(
-            "{PREFIX}cnNfMQ:{}",
+            "{PREFIX}account-a:cnNfMQ:{}",
             "A".repeat(MAX_ENCRYPTED_CONTENT_BYTES + 1)
         );
         assert_eq!(decode_reasoning_signature(&signature), None);

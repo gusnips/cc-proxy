@@ -119,6 +119,22 @@ pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
 #[allow(clippy::result_large_err)]
 fn shape_native_request(body: &mut Value) -> Result<NativeResolved, Response> {
     let requested = validate_native_request_model(body)?;
+    if body
+        .get("previous_response_id")
+        .is_some_and(|value| !value.is_null())
+        || body
+            .get("conversation")
+            .is_some_and(|value| !value.is_null())
+        || body.get("input").is_some_and(has_unverified_replay)
+    {
+        return Err(openai_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "Native Codex history does not identify its saved login. Send the full text and tool history without previous_response_id, conversation, item references or encrypted content.",
+            None,
+            Some("unverified_account_history"),
+        ));
+    }
     let object = body
         .as_object_mut()
         .expect("validated native Responses body must be an object");
@@ -149,6 +165,22 @@ fn shape_native_request(body: &mut Value) -> Result<NativeResolved, Response> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
     })
+}
+
+// Native Responses has no account-bound signature envelope. Do not infer an
+// opaque item's owner from whichever login happens to be current.
+fn has_unverified_replay(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(has_unverified_replay),
+        Value::Object(object) => {
+            object.get("type").and_then(Value::as_str) == Some("item_reference")
+                || object
+                    .get("encrypted_content")
+                    .is_some_and(|value| !value.is_null())
+                || object.values().any(has_unverified_replay)
+        }
+        _ => false,
+    }
 }
 
 fn has_native_hosted_web_search(object: &Map<String, Value>) -> bool {
@@ -680,6 +712,31 @@ mod tests {
         assert_eq!(observer.captured_events.len(), MAX_STREAM_CAPTURE_EVENTS);
         assert_eq!(observer.captured_events_truncated, 10);
         observer.finished = true;
+    }
+
+    #[test]
+    fn native_replay_without_account_provenance_is_rejected() {
+        for replay in [
+            json!({"previous_response_id":"response-from-account-a"}),
+            json!({"conversation":"conversation-from-account-a"}),
+            json!({"input":[{"type":"reasoning","encrypted_content":"from-account-a"}]}),
+            json!({"input":[{"type":"compaction","encrypted_content":"from-account-a"}]}),
+            json!({"input":[{"type":"item_reference","id":"item-from-account-a"}]}),
+        ] {
+            let mut body = json!({"model":"gpt-5.4","input":[]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(replay.as_object().unwrap().clone());
+            assert_eq!(
+                shape_native_request(&mut body).err().unwrap().status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let mut portable = json!({"model":"gpt-5.4","previous_response_id":null,"input":[
+            {"role":"assistant","content":[{"type":"output_text","text":"portable answer"}]},
+            {"type":"function_call_output","call_id":"call-a","output":"portable result"}
+        ]});
+        assert!(shape_native_request(&mut portable).is_ok());
     }
 
     #[test]

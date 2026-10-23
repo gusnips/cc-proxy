@@ -135,33 +135,18 @@ impl CodexProvider {
         }
     }
 
-    fn pin_session_account(
-        &self,
-        ctx: &RequestContext,
-        portable: bool,
-        allow_untracked_opaque: bool,
-    ) -> Result<String, ()> {
+    fn pin_session_account(&self, ctx: &RequestContext) -> String {
         let account = ctx.account.as_deref().unwrap_or("missing");
         let Some(session) = &ctx.session_id else {
-            return if portable || allow_untracked_opaque {
-                Ok(account.to_string())
-            } else {
-                Err(())
-            };
+            return account.to_string();
         };
         let mut accounts = self
             .session_accounts
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if !portable && !allow_untracked_opaque && !accounts.contains_key(session) {
-            return Err(());
-        }
         if let Some(current) = accounts.get(session) {
             if current.id == account {
-                return Ok(current.namespace.clone());
-            }
-            if !portable {
-                return Err(());
+                return current.namespace.clone();
             }
             let key = state_session_key(Some(&current.namespace), session);
             compaction::clear_compactions_with_prefix(&format!("{key}:"));
@@ -184,12 +169,42 @@ impl CodexProvider {
                 namespace: namespace.clone(),
             },
         );
-        Ok(namespace)
+        namespace
     }
 }
 
-/// Opaque replay blobs have no saved-account provenance in the client format.
-/// Keep the original 429 rather than send them to another sign-in.
+/// Client-held replay must name the immutable login that produced it. Session
+/// identity and the number of saved accounts are not evidence of ownership.
+fn history_matches_account(body: &MessagesRequest, account: Option<&str>) -> bool {
+    use translate::reasoning_signature::{
+        decode_reasoning_signature, is_proxy_reasoning_signature, signature_account,
+    };
+    body.messages
+        .iter()
+        .filter_map(|message| message.content.as_array())
+        .flatten()
+        .all(|block| {
+            if block
+                .get("encrypted_content")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+            {
+                return false;
+            }
+            let Some(signature) = block
+                .get("signature")
+                .and_then(serde_json::Value::as_str)
+                .filter(|signature| is_proxy_reasoning_signature(signature))
+            else {
+                return true;
+            };
+            account.is_some()
+                && signature_account(signature) == account
+                && decode_reasoning_signature(signature).is_some()
+        })
+}
+
+/// Opaque replay blobs stay on their originating account.
 pub(crate) fn can_rotate(body: &MessagesRequest) -> bool {
     !body
         .messages
@@ -233,21 +248,14 @@ impl CodexProvider {
             Ok(client) => client,
             Err(error) => return map_codex_error_to_response(&error),
         };
-        let portable = can_rotate(&body);
-        let allow_untracked_opaque = portable
-            || crate::accounts::Accounts::new("codex")
-                .list()
-                .is_ok_and(|accounts| accounts.len() <= 1);
-        let namespace = match self.pin_session_account(&ctx, portable, allow_untracked_opaque) {
-            Ok(namespace) => namespace,
-            Err(()) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    "The saved account for this conversation's encrypted Codex history cannot be verified. Switch back to the account that started it, or start a new conversation. After a proxy restart with several saved accounts, start a new conversation.",
-                );
-            }
-        };
+        if !history_matches_account(&body, ctx.account.as_deref()) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "This encrypted Codex history belongs to another saved login, or was made before account tracking. Switch back to the original saved account, or start a new conversation.",
+            );
+        }
+        let namespace = self.pin_session_account(&ctx);
         let state_owner = conversation_identity
             .as_ref()
             .cloned()
@@ -639,6 +647,7 @@ impl CodexProvider {
                 model,
                 estimated_input_tokens,
                 ctx.traffic.as_deref(),
+                ctx.account.as_deref(),
             ) {
                 Ok(b) => b,
                 Err(e) => {
@@ -681,6 +690,7 @@ impl CodexProvider {
                 &message_id,
                 model,
                 ctx.traffic.as_deref(),
+                ctx.account.as_deref(),
             ) {
                 Ok(json) => {
                     if let Some(monitor) = ctx.monitor.as_ref() {
@@ -1202,7 +1212,8 @@ async fn live_stream_response_once(
         message_id,
         model.to_string(),
         estimated_input_tokens,
-    );
+    )
+    .with_account(ctx.account.as_deref());
     let mut upstream_sse_body = Vec::new();
     // Keep protocol framing private until real output makes a transparent retry unsafe.
     // Every branch that consumes pending_chunk returns, so it is never flushed twice.
@@ -1850,7 +1861,7 @@ fn empty_buffered_completion_error() -> client::CodexError {
 fn is_empty_codex_success_completion(upstream_sse: &[u8]) -> bool {
     use self::translate::reducer::{ReducerEvent, TERM_COMPLETED, TERM_DONE};
 
-    let Ok(events) = self::translate::reducer::reduce_upstream_bytes(upstream_sse) else {
+    let Ok(events) = self::translate::reducer::reduce_upstream_bytes(upstream_sse, None) else {
         return false;
     };
     let mut saw_success_terminal = false;
@@ -2294,17 +2305,45 @@ mod tests {
     }
 
     #[test]
-    fn untracked_opaque_history_is_refused_with_multiple_saved_accounts() {
+    fn signatures_keep_their_account_across_siblings_replacement_and_restart() {
+        use translate::reasoning_signature::{ReasoningReplay, encode_reasoning_signature};
+        let replay = ReasoningReplay {
+            id: "rs_a".into(),
+            encrypted_content: "from-a".into(),
+        };
+        let signature = encode_reasoning_signature(&replay, Some("account-a")).unwrap();
+        let body = request_with_tail(serde_json::json!([
+            {"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":signature}]}
+        ]));
         let provider = CodexProvider::new();
-        let mut ctx = live_test_context("first-seen-opaque");
-        ctx.account = Some("account-a".into());
-        assert!(provider.pin_session_account(&ctx, false, false).is_err());
-        assert!(provider.pin_session_account(&ctx, false, false).is_err());
-        assert!(provider.pin_session_account(&ctx, false, true).is_ok());
-        let fresh = CodexProvider::new();
-        ctx.session_id = None;
-        assert!(fresh.pin_session_account(&ctx, false, false).is_err());
-        assert!(fresh.pin_session_account(&ctx, true, false).is_ok());
+        let mut main = live_test_context("shared-session");
+        main.account = Some("account-a".into());
+        provider.pin_session_account(&main);
+        assert!(history_matches_account(&body, main.account.as_deref()));
+        let mut sibling = main.clone();
+        sibling.account = Some("account-b".into());
+        provider.pin_session_account(&sibling);
+        assert!(!history_matches_account(&body, sibling.account.as_deref()));
+        // A portable sibling cannot rebind the main conversation's old signature.
+        main.account = Some("account-b".into());
+        assert!(!history_matches_account(&body, main.account.as_deref()));
+        // A restart or removal of the old login does not erase the signature's issuer.
+        let restarted = CodexProvider::new();
+        restarted.pin_session_account(&main);
+        main.session_id = None;
+        assert!(!history_matches_account(&body, main.account.as_deref()));
+        main.account = Some("account-a".into());
+        assert!(history_matches_account(&body, main.account.as_deref()));
+        assert!(!history_matches_account(&body, None));
+        for block in [
+            serde_json::json!({"type":"thinking","signature":"ccp:codex:v1:cnNfYQ:old"}),
+            serde_json::json!({"type":"reasoning","encrypted_content":"unknown"}),
+            serde_json::json!({"type":"compaction","encrypted_content":"unknown"}),
+        ] {
+            let unverified =
+                request_with_tail(serde_json::json!([{"role":"assistant","content":[block]}]));
+            assert!(!history_matches_account(&unverified, Some("account-a")));
+        }
     }
 
     #[test]
@@ -2341,7 +2380,7 @@ mod tests {
         let provider = CodexProvider::new();
         let mut ctx = live_test_context("account-isolation");
         ctx.account = Some("sign-in-a".to_string());
-        let namespace_a = provider.pin_session_account(&ctx, true, false).unwrap();
+        let namespace_a = provider.pin_session_account(&ctx);
         let owner_a = account_conversation_identity(
             Some(&namespace_a),
             ConversationIdentity::Main("account-isolation".into()),
@@ -2384,9 +2423,7 @@ mod tests {
         assert!(compaction_session_id(None).is_none());
 
         ctx.account = Some("sign-in-b".into());
-        assert!(provider.pin_session_account(&ctx, false, false).is_err());
-        assert!(provider.pin_session_account(&ctx, false, false).is_err());
-        let namespace_b = provider.pin_session_account(&ctx, true, false).unwrap();
+        let namespace_b = provider.pin_session_account(&ctx);
         let owner_b = account_conversation_identity(
             Some(&namespace_b),
             ConversationIdentity::Main("account-isolation".into()),
@@ -2399,7 +2436,7 @@ mod tests {
         assert!(apply_compaction_replay(Some(&key_b), &next).is_none());
 
         ctx.account = Some("sign-in-a".into());
-        let returned_namespace = provider.pin_session_account(&ctx, true, false).unwrap();
+        let returned_namespace = provider.pin_session_account(&ctx);
         assert_ne!(namespace_a, returned_namespace);
         let returned_owner = account_conversation_identity(
             Some(&returned_namespace),

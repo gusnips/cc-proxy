@@ -141,6 +141,7 @@ struct LiveThinking {
 pub struct LiveStreamTranslator {
     message_id: String,
     model: String,
+    account: Option<String>,
     message_started: bool,
     blocks_by_output_index: HashMap<usize, LiveBlock>,
     item_id_to_output_index: HashMap<String, usize>,
@@ -177,6 +178,7 @@ impl LiveStreamTranslator {
         Self {
             message_id: message_id.into(),
             model: model.into(),
+            account: None,
             message_started: false,
             blocks_by_output_index: HashMap::new(),
             item_id_to_output_index: HashMap::new(),
@@ -195,6 +197,11 @@ impl LiveStreamTranslator {
             finished: false,
             rate_limits: None,
         }
+    }
+
+    pub fn with_account(mut self, account: Option<&str>) -> Self {
+        self.account = account.map(str::to_string);
+        self
     }
 
     pub fn accept(
@@ -1258,7 +1265,7 @@ impl LiveStreamTranslator {
         else {
             return;
         };
-        let Some(signature) = encode_reasoning_signature(&replay) else {
+        let Some(signature) = encode_reasoning_signature(&replay, self.account.as_deref()) else {
             return;
         };
         self.semantic_output_started = true;
@@ -1305,7 +1312,9 @@ impl LiveStreamTranslator {
             .remove(&thinking.output_index)
             .and_then(|pending| pending.replay());
         if config::codex_reasoning_signatures_enabled()
-            && let Some(signature) = replay.as_ref().and_then(encode_reasoning_signature)
+            && let Some(signature) = replay
+                .as_ref()
+                .and_then(|replay| encode_reasoning_signature(replay, self.account.as_deref()))
         {
             self.emit(
                 traffic,
@@ -1449,7 +1458,8 @@ mod tests {
     use serde_json::json;
 
     fn render(events: Vec<serde_json::Value>) -> String {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let mut out = Vec::new();
         for event in events {
             out.extend(translator.accept(&event, None).unwrap());
@@ -1459,7 +1469,8 @@ mod tests {
 
     #[test]
     fn emits_text_delta_before_terminal_event() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let out = translator
             .accept(
                 &json!({
@@ -1561,7 +1572,8 @@ mod tests {
 
     #[test]
     fn terminal_only_completion_remains_non_semantic() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let out = translator
             .accept(
                 &json!({
@@ -1579,7 +1591,8 @@ mod tests {
 
     #[test]
     fn incomplete_max_output_tokens_is_a_max_tokens_message_stop() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.6-luna");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.6-luna").with_account(Some("account-a"));
         let out = translator
             .accept(
                 &json!({
@@ -1603,7 +1616,8 @@ mod tests {
 
     #[test]
     fn incomplete_content_filter_is_a_refusal_message_stop() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let out = translator
             .accept(
                 &json!({
@@ -1626,7 +1640,8 @@ mod tests {
     #[test]
     fn incomplete_without_a_known_reason_stays_an_error() {
         for incomplete_details in [json!({"reason":"unknown"}), json!({})] {
-            let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.6-luna");
+            let mut translator =
+                LiveStreamTranslator::new("msg_1", "gpt-5.6-luna").with_account(Some("account-a"));
             let error = translator
                 .accept(
                     &json!({
@@ -1645,7 +1660,8 @@ mod tests {
 
     #[test]
     fn structural_tool_start_is_not_semantic_until_arguments_arrive() {
-        let mut tool = LiveStreamTranslator::new("msg_tool", "gpt-5.5");
+        let mut tool =
+            LiveStreamTranslator::new("msg_tool", "gpt-5.5").with_account(Some("account-a"));
         tool.accept(
             &json!({
                 "type": "response.output_item.added",
@@ -1667,7 +1683,8 @@ mod tests {
         .unwrap();
         assert!(tool.has_semantic_output());
 
-        let mut thinking = LiveStreamTranslator::new("msg_thinking", "gpt-5.5");
+        let mut thinking =
+            LiveStreamTranslator::new("msg_thinking", "gpt-5.5").with_account(Some("account-a"));
         thinking
             .accept(
                 &json!({
@@ -1680,7 +1697,8 @@ mod tests {
             .unwrap();
         assert!(thinking.has_semantic_output());
 
-        let mut web_search = LiveStreamTranslator::new("msg_search", "gpt-5.5");
+        let mut web_search =
+            LiveStreamTranslator::new("msg_search", "gpt-5.5").with_account(Some("account-a"));
         web_search
             .accept(
                 &json!({
@@ -1711,7 +1729,8 @@ mod tests {
 
     #[test]
     fn standalone_function_done_does_not_close_a_different_open_tool() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let mut rendered = Vec::new();
         for event in [
             json!({
@@ -1795,7 +1814,8 @@ mod tests {
                 "arguments must be a JSON object",
             ),
         ] {
-            let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+            let mut translator =
+                LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
             let error = translator
                 .accept(
                     &json!({"type":"response.output_item.done","item":item}),
@@ -1813,7 +1833,8 @@ mod tests {
 
     #[test]
     fn completed_function_call_rejects_oversized_arguments_before_emission() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let error = translator
             .accept(
                 &json!({
@@ -1838,7 +1859,8 @@ mod tests {
 
     #[test]
     fn completed_function_call_normalizes_blank_arguments_before_emission() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let out = translator
             .accept(
                 &json!({
@@ -1862,7 +1884,8 @@ mod tests {
 
     #[test]
     fn matched_completed_function_call_propagates_invalid_authoritative_arguments() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         translator
             .accept(
                 &json!({
@@ -1896,7 +1919,8 @@ mod tests {
 
     #[test]
     fn opencode_style_added_then_done_function_call_remains_valid() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.6-luna");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.6-luna").with_account(Some("account-a"));
         let added = translator
             .accept(
                 &json!({
@@ -1939,7 +1963,8 @@ mod tests {
     #[test]
     fn authoritative_done_and_completed_arguments_replace_buffered_deltas_once() {
         for terminal_only in [false, true] {
-            let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+            let mut translator =
+                LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
             let item = json!({"type":"function_call","call_id":"authoritative","name":"Read","arguments":"{\"file_path\":\"/final\"}"});
             let mut out = Vec::new();
             for event in [
@@ -2000,7 +2025,8 @@ mod tests {
 
     #[test]
     fn repairs_whitespace_stalled_read_args_as_tool_use_finish() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let mut out = Vec::new();
         out.extend(
             translator
@@ -2035,7 +2061,8 @@ mod tests {
 
     #[test]
     fn websocket_compat_can_finish_after_closed_completed_tool_call() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let mut out = Vec::new();
         for event in [
             json!({
@@ -2126,7 +2153,8 @@ mod tests {
 
     #[test]
     fn rate_limit_event_is_progress_telemetry() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let out = translator
             .accept(
                 &json!({
@@ -2158,7 +2186,8 @@ mod tests {
 
     #[test]
     fn progress_events_start_message_and_emit_pings() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let first = String::from_utf8(
             translator
                 .accept(&json!({"type": "response.created"}), None)
@@ -2175,7 +2204,8 @@ mod tests {
 
     #[test]
     fn arguments_done_rejects_oversized_buffer_before_retaining_it() {
-        let mut translator = LiveStreamTranslator::new("msg_limit", "gpt-5.6-sol");
+        let mut translator =
+            LiveStreamTranslator::new("msg_limit", "gpt-5.6-sol").with_account(Some("account-a"));
         translator.accept(&json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"read-limit","name":"Read"}}), None).unwrap();
         let error = translator.accept(&json!({"type":"response.function_call_arguments.done","output_index":0,"arguments":"x".repeat(BUFFERED_TOOL_MAX_ARGS_BYTES + 1)}), None).unwrap_err();
         assert_eq!(error, "Buffered Read tool arguments exceeded safe limits");
@@ -2186,7 +2216,8 @@ mod tests {
 
     #[test]
     fn thinking_reconnect_preserves_signatures_and_monotonic_block_indices() {
-        let mut translator = LiveStreamTranslator::new("message", "gpt-5.6-sol");
+        let mut translator =
+            LiveStreamTranslator::new("message", "gpt-5.6-sol").with_account(Some("account-a"));
         let mut out = Vec::new();
         for (id, encrypted) in [("rs_first", "opaque_first"), ("rs_second", "opaque_second")] {
             out.extend(translator.accept(&json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":id,"encrypted_content":encrypted}}), None).unwrap());
@@ -2246,7 +2277,8 @@ mod tests {
             json!({"type":"function_call","call_id":"call","name":"Bash"}),
             json!({"type":"web_search_call","id":"search"}),
         ] {
-            let mut translator = LiveStreamTranslator::new("message", "gpt-5.6-sol");
+            let mut translator =
+                LiveStreamTranslator::new("message", "gpt-5.6-sol").with_account(Some("account-a"));
             translator
                 .accept(
                     &json!({"type":"response.output_item.added","output_index":0,"item":item}),
@@ -2255,7 +2287,8 @@ mod tests {
                 .unwrap();
             assert!(!translator.can_reconnect());
         }
-        let mut translator = LiveStreamTranslator::new("message", "gpt-5.6-sol");
+        let mut translator =
+            LiveStreamTranslator::new("message", "gpt-5.6-sol").with_account(Some("account-a"));
         translator.accept(&json!({"type":"response.output_item.done","item":{"type":"web_search_call","id":"search","action":{"query":"test"}}}), None).unwrap();
         assert!(
             !translator.can_reconnect(),
@@ -2294,12 +2327,13 @@ mod tests {
             .unwrap();
         assert!(thinking_delta < signature_delta);
         assert!(signature_delta < thinking_stop);
-        assert!(out.contains("ccp:codex:v1:"));
+        assert!(out.contains("ccp:codex:v2:account-a:"));
     }
 
     #[test]
     fn signature_only_reasoning_is_semantic_output() {
-        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut translator =
+            LiveStreamTranslator::new("msg_1", "gpt-5.5").with_account(Some("account-a"));
         let mut out = Vec::new();
         for event in [
             json!({
