@@ -259,28 +259,48 @@ fn get_dotted<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_j
     Some(current)
 }
 
-fn set_dotted(root: &mut serde_json::Value, path: &str, value: serde_json::Value) {
-    let mut parts: Vec<&str> = path.split('.').collect();
-    let Some(last) = parts.pop() else {
-        return;
-    };
-    let mut current = root;
-    for part in parts {
-        if !current.is_object() {
-            *current = serde_json::json!({});
-        }
-        current = match current {
-            serde_json::Value::Object(map) => map
-                .entry(part.to_string())
-                .or_insert(serde_json::Value::Null),
-            _ => unreachable!("ensured object above"),
+/// Set one dotted key. A missing or null step becomes an object. A step that
+/// holds anything else (a string, a list) is the user's own data: it stays as
+/// it is and the caller gets an error that names it.
+fn set_dotted(root: &mut serde_json::Value, path: &str, value: serde_json::Value) -> Result<()> {
+    set_under(root, path, path, value)
+}
+
+/// `rest` is the part of `full_path` still to walk from `node`.
+fn set_under(
+    node: &mut serde_json::Value,
+    rest: &str,
+    full_path: &str,
+    value: serde_json::Value,
+) -> Result<()> {
+    if node.is_null() {
+        *node = serde_json::json!({});
+    }
+    let Some(map) = node.as_object_mut() else {
+        let walked = full_path
+            .strip_suffix(rest)
+            .map_or("", |walked| walked.trim_end_matches('.'));
+        let holder = if walked.is_empty() {
+            "config.json".to_string()
+        } else {
+            format!("`{walked}` in config.json")
         };
-    }
-    if !current.is_object() {
-        *current = serde_json::json!({});
-    }
-    if let serde_json::Value::Object(map) = current {
-        map.insert(last.to_string(), value);
+        anyhow::bail!(
+            "{holder} isn't a JSON object, so `{full_path}` can't be saved. \
+             Fix it with `cc-proxy config edit`, then try again."
+        );
+    };
+    match rest.split_once('.') {
+        None => {
+            map.insert(rest.to_string(), value);
+            Ok(())
+        }
+        Some((head, rest)) => {
+            let child = map
+                .entry(head.to_string())
+                .or_insert(serde_json::Value::Null);
+            set_under(child, rest, full_path, value)
+        }
     }
 }
 
@@ -353,7 +373,11 @@ fn display_value(key: &ConfigKey, file: Option<String>) -> String {
 
 fn read_file() -> Result<serde_json::Value> {
     let dir = paths::config_dir();
-    if dir.join("config.json").exists() {
+    let current = dir.join("config.json");
+    if current
+        .try_exists()
+        .with_context(|| format!("can't check for {}", current.display()))?
+    {
         return config::read_config_json_at(&dir);
     }
     // No current file yet: honor a pre-fork config so reads see the same
@@ -425,11 +449,8 @@ pub(crate) fn write_values<'a>(
     values: impl IntoIterator<Item = (&'a str, serde_json::Value)>,
 ) -> Result<std::path::PathBuf> {
     let mut root = read_file()?;
-    if !root.is_object() {
-        root = serde_json::json!({});
-    }
     for (path, value) in values {
-        set_dotted(&mut root, path, value);
+        set_dotted(&mut root, path, value)?;
     }
     config::write_config_json_at(&paths::config_dir(), &root)
 }
@@ -495,7 +516,7 @@ mod tests {
             get_dotted(&root, "opencode.apiKey").and_then(scalar_text),
             None
         );
-        set_dotted(&mut root, "opencode.apiKey", serde_json::json!("k"));
+        set_dotted(&mut root, "opencode.apiKey", serde_json::json!("k")).unwrap();
         assert_eq!(
             get_dotted(&root, "opencode.apiKey").and_then(scalar_text),
             Some("k".to_string())
@@ -504,13 +525,34 @@ mod tests {
             get_dotted(&root, "port").and_then(scalar_text),
             Some("1".to_string())
         );
-        // Non-object intermediate values are replaced, not merged into.
-        let mut root = serde_json::json!({"log": "nope"});
-        set_dotted(&mut root, "log.verbose", serde_json::json!(true));
+        // A null step is as good as a missing one.
+        let mut root = serde_json::json!({"log": null});
+        set_dotted(&mut root, "log.verbose", serde_json::json!(true)).unwrap();
         assert_eq!(
             get_dotted(&root, "log.verbose").and_then(scalar_text),
             Some("true".to_string())
         );
+    }
+
+    #[test]
+    fn setting_a_key_never_overwrites_a_value_that_is_not_an_object() {
+        let mut root = serde_json::json!({"log": "nope", "port": 1});
+        let error = set_dotted(&mut root, "log.verbose", serde_json::json!(true))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`log` in config.json"), "{error}");
+        assert!(error.contains("`log.verbose`"), "{error}");
+        assert_eq!(root, serde_json::json!({"log": "nope", "port": 1}));
+
+        let mut root = serde_json::json!(["not", "an", "object"]);
+        let error = set_dotted(&mut root, "port", serde_json::json!(2))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("config.json isn't a JSON object"),
+            "{error}"
+        );
+        assert_eq!(root, serde_json::json!(["not", "an", "object"]));
     }
 
     #[test]

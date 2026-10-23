@@ -687,67 +687,39 @@ fn claude_settings_opencode_key(env: &HashMap<String, String>) -> Option<(String
 /// when no current file exists yet, so saving a key never shadows the rest
 /// of a pre-fork setup. Returns the file written.
 pub fn save_opencode_api_key(key: &str) -> anyhow::Result<PathBuf> {
-    let dir = paths::config_dir();
-    let mut root = if dir.join("config.json").exists() {
-        match read_config_json_at(&dir) {
-            Ok(root) if root.is_object() => root,
-            _ => serde_json::json!({}),
-        }
-    } else {
-        let legacy = paths::legacy_config_dir(&paths::DirResolverEnv::default());
-        let merged = if legacy != dir {
-            read_config_json_at(&legacy).unwrap_or_else(|_| serde_json::json!({}))
-        } else {
-            serde_json::json!({})
-        };
-        if merged.is_object() {
-            merged
-        } else {
-            serde_json::json!({})
-        }
-    };
-    root["opencode"]["apiKey"] = serde_json::Value::String(key.to_string());
-    write_config_json_at(&dir, &root)
+    crate::config_keys::write_value(
+        "opencode.apiKey",
+        serde_json::Value::String(key.to_string()),
+    )
 }
 
 /// Remove `opencode.apiKey` from config.json. Returns true when a key was
 /// present. Environment-provided keys are untouched by design.
 pub fn clear_opencode_api_key() -> anyhow::Result<bool> {
-    let dir = paths::config_dir();
-    let root = match read_config_json_at(&dir) {
-        Ok(root) => root,
-        Err(_) => return Ok(false),
-    };
-    let mut root = match root {
-        serde_json::Value::Object(_) => root,
-        _ => return Ok(false),
-    };
-    let removed = root
-        .get("opencode")
-        .and_then(|opencode| opencode.get("apiKey"))
+    let had = read_file_config(&paths::config_dir())
+        .and_then(|f| f.opencode)
+        .and_then(|c| c.api_key)
         .is_some();
-    if removed
-        && let Some(opencode) = root.get_mut("opencode")
-        && let Some(map) = opencode.as_object_mut()
-    {
-        map.remove("apiKey");
-        if map.is_empty() {
-            root.as_object_mut().map(|root| root.remove("opencode"));
-        }
-        write_config_json_at(&dir, &root)?;
+    if had {
+        crate::config_keys::remove_values(["opencode.apiKey"])?;
     }
-    Ok(removed)
+    Ok(had)
 }
 
 /// Read a config directory's config.json as an untyped document.
-/// A missing file reads as an empty object; a corrupt file is an error
-/// naming the path.
+/// A missing file reads as an empty object. A file that can't be read or
+/// parsed is an error naming the path: reading it as empty would let the
+/// next save overwrite what the user wrote.
 pub(crate) fn read_config_json_at(dir: &Path) -> anyhow::Result<serde_json::Value> {
     let path = dir.join("config.json");
     match std::fs::read_to_string(&path) {
         Ok(raw) => serde_json::from_str(&raw)
             .map_err(|err| anyhow::anyhow!("invalid config at {}: {err}", path.display())),
-        Err(_) => Ok(serde_json::json!({})),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::json!({})),
+        Err(err) => Err(anyhow::anyhow!(
+            "can't read config at {}: {err}",
+            path.display()
+        )),
     }
 }
 
@@ -1822,6 +1794,27 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(root.get("opencode").is_none());
         assert!(!clear_opencode_api_key().unwrap());
+    }
+
+    #[test]
+    fn saving_a_key_never_overwrites_a_config_it_cannot_read() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set("CCP_CONFIG_DIR", dir.path());
+        let file = dir.path().join("config.json");
+
+        let hand_edited = r#"{"port": 18766, "route": {"on": tru"#;
+        std::fs::write(&file, hand_edited).unwrap();
+        let error = save_opencode_api_key("saved-key").unwrap_err().to_string();
+        assert!(error.contains("invalid config"), "{error}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), hand_edited);
+
+        // A config.json that is a directory is unreadable, not empty.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let error = save_opencode_api_key("saved-key").unwrap_err().to_string();
+        assert!(error.contains("can't read config"), "{error}");
+        assert!(file.is_dir());
     }
 
     #[test]
