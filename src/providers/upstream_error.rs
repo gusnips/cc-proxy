@@ -538,6 +538,16 @@ mod tests {
     }
 
     #[test]
+    fn opencode_zen_free_limit_is_quota_without_retry() {
+        let body = r#"{"error":{"message":"Server is temporarily limiting requests (not your usage limit) · Free usage limit reached. Subscribe to OpenCode Go to keep going: https://opencode.ai/go"}}"#;
+        for status in [400, 429] {
+            let failure = from_http(status, body, None, "OpenCode Go");
+            assert_eq!(failure.status, StatusCode::TOO_MANY_REQUESTS, "{status}");
+            assert_eq!(failure.should_retry, Some(false), "{status}");
+        }
+    }
+
+    #[test]
     fn in_band_errors_keep_their_kind() {
         let quota = from_stream(
             &json!({"type":"rate_limit_error","message":"insufficient balance"}),
