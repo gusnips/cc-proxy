@@ -271,7 +271,7 @@ fn kimi_auth_status_reads_stored_auth() -> Result<(), Box<dyn std::error::Error>
     let mut cmd = Command::cargo_bin("cc-proxy")?;
     cmd.args(["auth", "status", "kimi"]);
     cmd.env("CCP_CONFIG_DIR", temp.path());
-    cmd.assert().success().stdout(contains("User: u"));
+    cmd.assert().success().stdout(contains("signed in as u"));
 
     let mut cmd = Command::cargo_bin("cc-proxy")?;
     cmd.arg("auth");
@@ -326,6 +326,69 @@ fn opencode_auth_login_stores_key_from_stdin() -> Result<(), Box<dyn std::error:
     let raw = std::fs::read_to_string(temp.path().join("config/config.json"))?;
     assert!(raw.contains("\"apiKey\""));
     assert!(raw.contains("login-key"));
+    Ok(())
+}
+
+#[test]
+fn top_level_login_and_logout_use_the_auth_handlers() -> Result<(), Box<dyn std::error::Error>> {
+    for login in [vec!["login", "opencode"], vec!["auth", "login", "opencode"]] {
+        let temp = TempDir::new()?;
+        let mut cmd = Command::cargo_bin("cc-proxy")?;
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.args(login).write_stdin("fake-key\n").assert().success();
+        let mut cmd = Command::cargo_bin("cc-proxy")?;
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.args(["logout", "opencode"]).assert().success();
+        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+            temp.path().join("config/config.json"),
+        )?)?;
+        assert!(config.pointer("/opencode/apiKey").is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn saved_accounts_can_be_switched_and_removed_without_signing_in()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let config = temp.path().join("config/codex");
+    std::fs::create_dir_all(config.join("accounts"))?;
+    let a = uuid::Uuid::new_v4().to_string();
+    let b = uuid::Uuid::new_v4().to_string();
+    let index = serde_json::json!({"current":"home", "accounts":[
+        {"id":a,"name":"home","identity":"acct-home"},
+        {"id":b,"name":"work","identity":"acct-work"}
+    ]});
+    std::fs::write(config.join("accounts.json"), index.to_string())?;
+    for (id, identity) in [(&a, "acct-home"), (&b, "acct-work")] {
+        std::fs::write(config.join("accounts").join(format!("{id}.json")), serde_json::json!({
+            "access":"do-not-print-me","refresh":"do-not-print-me","expires":4102444800000_u64,"accountId":identity
+        }).to_string())?;
+    }
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.env("XDG_STATE_HOME", temp.path().join("state"));
+        cmd.args(args).assert()
+    };
+    run(&["auth", "status", "codex"])
+        .success()
+        .stdout(contains("2 accounts"))
+        .stdout(contains("do-not-print-me").not());
+    run(&["login", "codex"])
+        .failure()
+        .stderr(contains("auth add codex"))
+        .stderr(contains("--replace"));
+    run(&["auth", "use", "codex", "work"])
+        .success()
+        .stdout(contains("now uses `work`"));
+    run(&["logout", "codex", "work"])
+        .success()
+        .stdout(contains("now uses `home`"));
+    assert!(!config.join("accounts").join(format!("{b}.json")).exists());
+    assert!(config.join("accounts").join(format!("{a}.json")).exists());
+    run(&["logout", "codex", "--all"]).success();
+    run(&["auth", "status", "codex"]).failure().code(1);
     Ok(())
 }
 

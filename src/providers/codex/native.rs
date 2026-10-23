@@ -18,14 +18,14 @@ use crate::traffic::{
     MAX_STREAM_CAPTURE_FRAME_BYTES,
 };
 
-use super::client::{CodexError, CodexHttpClient};
+use super::client::{CodexClients, CodexError};
 use super::translate::model_allowlist::{
     allowed_models_display, assert_routable_model, full_lane_web_search_model,
     resolve_model_request_with_config_override, service_tier_for_model, uses_responses_lite,
 };
 
 pub struct CodexNativeBackend {
-    client: Arc<CodexHttpClient>,
+    clients: CodexClients,
 }
 
 impl Default for CodexNativeBackend {
@@ -37,22 +37,25 @@ impl Default for CodexNativeBackend {
 impl CodexNativeBackend {
     pub fn new() -> Self {
         Self {
-            client: Arc::new(CodexHttpClient::new()),
+            clients: CodexClients::new(),
         }
     }
 
-    pub async fn handle(&self, mut body: Value, ctx: RequestContext) -> Response {
+    pub async fn handle(&self, mut body: Value, mut ctx: RequestContext) -> Response {
         let resolved = match shape_native_request(&mut body) {
             Ok(resolved) => resolved,
             Err(response) => return response,
+        };
+        let client = match self.clients.get(&mut ctx) {
+            Ok(client) => client,
+            Err(error) => return local_codex_error(error),
         };
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved.model);
             monitor.upstream_started(&ctx.req_id);
         }
 
-        let upstream = match self
-            .client
+        let upstream = match client
             .post_native_responses(&body, &ctx, resolved.use_responses_lite, resolved.stream)
             .await
         {
@@ -60,7 +63,7 @@ impl CodexNativeBackend {
             Err(error) => return local_codex_error(error),
         };
 
-        passthrough_response(upstream, ctx, self.client.body_idle_timeout_ms())
+        passthrough_response(upstream, ctx, client.body_idle_timeout_ms())
     }
 }
 
@@ -610,6 +613,7 @@ mod tests {
             session_id: None,
             session_seq: None,
             provider: "codex".into(),
+            account: None,
             traffic: None,
             monitor: None,
         }

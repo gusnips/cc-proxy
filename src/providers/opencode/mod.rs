@@ -896,6 +896,7 @@ mod tests {
 
     fn context() -> RequestContext {
         RequestContext {
+            account: None,
             req_id: "req_test".to_string(),
             provider: "opencode".to_string(),
             session_id: None,

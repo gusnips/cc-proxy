@@ -15,9 +15,10 @@ use cc_proxy::providers::codex::continuation::{
 };
 use cc_proxy::providers::codex::translate::request::ResponsesRequest;
 use cc_proxy::providers::codex::websocket::{
-    CodexWebSocketEventReceiver, invalidate_codex_websocket_pool_key,
+    CodexWebSocketEventReceiver, invalidate_codex_websocket_pool_owner,
     invalidate_codex_websocket_pool_turn,
 };
+use cc_proxy::request_identity::ConversationIdentity;
 
 fn baseline_continuation_forms(session_id: Option<&str>, body: &ResponsesRequest) {
     let candidate = continuation_candidate(session_id, body, true);
@@ -37,7 +38,9 @@ fn baseline_continuation_forms(session_id: Option<&str>, body: &ResponsesRequest
 }
 
 fn baseline_pool_invalidation_forms() {
-    invalidate_codex_websocket_pool_key("compat-session");
+    invalidate_codex_websocket_pool_owner(&ConversationIdentity::Main(
+        "compat-session".to_string(),
+    ));
     invalidate_codex_websocket_pool_turn("compat-session", Some(1));
 }
 

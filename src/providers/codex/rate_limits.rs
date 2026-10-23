@@ -15,6 +15,7 @@
 //! that arrives before any telemetry has — an early error, the first request of
 //! a run that failed upstream — carries the previous snapshot, or none.
 
+use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
 use axum::response::Response;
@@ -34,8 +35,10 @@ const WINDOW_SUFFIXES: [&str; 6] = [
 /// Whole header names that describe the subscription rather than a window.
 const PLAN_HEADERS: [&str; 2] = ["x-codex-plan-type", "x-codex-active-limit"];
 
-static SNAPSHOT: LazyLock<RwLock<Vec<(HeaderName, HeaderValue)>>> =
-    LazyLock::new(|| RwLock::new(Vec::new()));
+type Snapshot = Vec<(HeaderName, HeaderValue)>;
+
+static SNAPSHOTS: LazyLock<RwLock<HashMap<String, Snapshot>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// True for a header that reports quota rather than protocol state. Codex sends
 /// several limit families (`x-codex-*`, `x-codex-<limit id>-*`) and a few opaque
@@ -92,22 +95,31 @@ pub fn event_headers(payload: &Value) -> Vec<(HeaderName, HeaderValue)> {
 /// Keeps a snapshot as the newest one. An empty snapshot is ignored: a response
 /// that carried no telemetry says nothing about the quota, so the previous
 /// answer stands.
-pub fn record(headers: Vec<(HeaderName, HeaderValue)>) {
+pub fn record(account: Option<&str>, headers: Vec<(HeaderName, HeaderValue)>) {
+    let Some(account) = account else {
+        return;
+    };
     if headers.is_empty() {
         return;
     }
-    if let Ok(mut snapshot) = SNAPSHOT.write() {
-        *snapshot = headers;
+    if let Ok(mut snapshots) = SNAPSHOTS.write() {
+        snapshots.insert(account.to_string(), headers);
     }
 }
 
-/// Adds the newest snapshot to an outgoing response, leaving any header the
-/// response already set alone.
-pub fn stamp(target: &mut HeaderMap) {
-    let Ok(snapshot) = SNAPSHOT.read() else {
+/// Adds this account's newest snapshot to an outgoing response, leaving any
+/// header the response already set alone.
+pub fn stamp(account: Option<&str>, target: &mut HeaderMap) {
+    let Some(account) = account else {
         return;
     };
-    for (name, value) in snapshot.iter() {
+    let Ok(snapshots) = SNAPSHOTS.read() else {
+        return;
+    };
+    let Some(snapshot) = snapshots.get(account) else {
+        return;
+    };
+    for (name, value) in snapshot {
         if !target.contains_key(name) {
             target.insert(name.clone(), value.clone());
         }
@@ -115,8 +127,8 @@ pub fn stamp(target: &mut HeaderMap) {
 }
 
 /// Stamps an outgoing Codex response, whatever shape it took.
-pub fn stamp_response(mut response: Response) -> Response {
-    stamp(response.headers_mut());
+pub fn stamp_response(account: Option<&str>, mut response: Response) -> Response {
+    stamp(account, response.headers_mut());
     response
 }
 
@@ -263,19 +275,21 @@ mod tests {
         assert!(event_headers(&payload).is_empty());
     }
 
-    // The snapshot is one process-wide value, so tests that touch it record the
-    // same one: they run in parallel, and each `record` replaces the last.
+    // Snapshot tests use one account and the same value so parallel writes agree.
     fn record_sample() {
-        record(vec![
-            (
-                HeaderName::from_static("x-codex-primary-used-percent"),
-                HeaderValue::from_static("42"),
-            ),
-            (
-                HeaderName::from_static("x-codex-primary-window-minutes"),
-                HeaderValue::from_static("10080"),
-            ),
-        ]);
+        record(
+            Some("sample"),
+            vec![
+                (
+                    HeaderName::from_static("x-codex-primary-used-percent"),
+                    HeaderValue::from_static("42"),
+                ),
+                (
+                    HeaderName::from_static("x-codex-primary-window-minutes"),
+                    HeaderValue::from_static("10080"),
+                ),
+            ],
+        );
     }
 
     #[test]
@@ -283,7 +297,7 @@ mod tests {
         record_sample();
 
         let mut response = HeaderMap::new();
-        stamp(&mut response);
+        stamp(Some("sample"), &mut response);
 
         assert_eq!(
             response
@@ -293,6 +307,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn snapshots_never_cross_saved_accounts_or_unpinned_requests() {
+        for (account, used) in [("quota-account-a", "99"), ("quota-account-b", "3")] {
+            record(
+                Some(account),
+                telemetry_headers(&header_map(&[("x-codex-primary-used-percent", used)])),
+            );
+        }
+        for (account, expected) in [
+            (Some("quota-account-a"), Some("99")),
+            (Some("quota-account-b"), Some("3")),
+            (Some("quota-account-new"), None),
+            (None, None),
+        ] {
+            let mut headers = HeaderMap::new();
+            stamp(account, &mut headers);
+            assert_eq!(
+                headers
+                    .get("x-codex-primary-used-percent")
+                    .and_then(|value| value.to_str().ok()),
+                expected,
+            );
+        }
+    }
+
     // A streaming response is stamped on its head, before any of the body is
     // written, so a client reading headers never has to wait for the stream.
     #[test]
@@ -300,6 +339,7 @@ mod tests {
         record_sample();
 
         let response = stamp_response(
+            Some("sample"),
             Response::builder()
                 .header("content-type", "text/event-stream")
                 .body(axum::body::Body::from("event: message_start\n"))

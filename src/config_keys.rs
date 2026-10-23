@@ -76,6 +76,13 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "listener address",
     },
     ConfigKey {
+        path: "auth.autoRotate",
+        kind: ConfigKind::Bool,
+        env: &[],
+        default: Some("false"),
+        blurb: "switch saved accounts when one reaches a limit with a retry time",
+    },
+    ConfigKey {
         path: "autoReviewModel",
         kind: ConfigKind::Str,
         env: &["CCP_AUTO_REVIEW_MODEL"],

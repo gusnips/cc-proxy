@@ -9,15 +9,53 @@ use bytes::Bytes;
 use clap::Subcommand;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, clap::Args)]
+pub struct LoginArgs {
+    /// Provider to sign in to. Leave it out to pick from a list
+    pub provider: Option<String>,
+    /// Sign in using a device code instead of opening a browser
+    #[arg(long)]
+    pub device: bool,
+    /// Sign in again to an account you already saved, instead of asking
+    #[arg(long)]
+    pub replace: bool,
+    /// With --replace: the account to sign in to again. Default: the one in use
+    #[arg(long, requires = "replace")]
+    pub account: Option<String>,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct LogoutArgs {
+    /// Provider to sign out of. Leave it out to pick from a list
+    pub provider: Option<String>,
+    /// Account to sign out of. Leave it out when the provider has one
+    pub account: Option<String>,
+    /// Sign out of every account the provider has
+    #[arg(long, conflicts_with = "account")]
+    pub all: bool,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 pub enum AuthCommand {
     /// Sign in to a provider
-    Login {
-        /// Provider to sign in to. Leave it out to pick from a list
+    Login(LoginArgs),
+    /// Save one more account for a provider
+    Add {
+        /// Provider to add an account to. Leave it out to pick from a list
         provider: Option<String>,
+        /// A short name for the account, such as `work`
+        #[arg(long)]
+        name: Option<String>,
         /// Sign in using a device code instead of opening a browser
         #[arg(long)]
         device: bool,
+    },
+    /// Choose which saved account a provider uses
+    Use {
+        /// Provider to switch. Leave it out to pick from a list
+        provider: Option<String>,
+        /// Account to use. Leave it out to pick from a list
+        account: Option<String>,
     },
     /// Sign in using a device code
     Device {
@@ -30,10 +68,7 @@ pub enum AuthCommand {
         provider: Option<String>,
     },
     /// Delete stored authentication credentials
-    Logout {
-        /// Provider to sign out of. Leave it out to pick from a list
-        provider: Option<String>,
-    },
+    Logout(LogoutArgs),
 }
 
 #[async_trait]
@@ -116,6 +151,7 @@ pub struct ProviderError {
     /// Sent as `x-should-retry`. `Some(false)` stops a client's retry loop for
     /// a failure no backoff can fix, such as a spent balance.
     pub should_retry: Option<bool>,
+    pub(crate) rotation_hint: Option<crate::rotation::RotationHint>,
 }
 
 impl ProviderError {
@@ -128,6 +164,7 @@ impl ProviderError {
             param: None,
             code: None,
             should_retry: None,
+            rotation_hint: None,
         }
     }
 
@@ -155,6 +192,9 @@ impl ProviderError {
         }
         if self.should_retry == Some(false) {
             headers.insert("x-should-retry", http::HeaderValue::from_static("false"));
+        }
+        if let Some(hint) = self.rotation_hint {
+            response.extensions_mut().insert(hint);
         }
         response
     }
@@ -229,6 +269,11 @@ pub trait CliHandlers: Send + Sync {
     fn device(&self) -> Result<()>;
     fn status(&self) -> Result<()>;
     fn logout(&self) -> Result<()>;
+
+    /// Set for a provider that can keep more than one login. The others keep one.
+    fn accounts(&self) -> Option<&dyn crate::accounts::AccountSupport> {
+        None
+    }
 }
 
 pub fn intern_provider_name(name: &str) -> &'static str {
@@ -250,6 +295,8 @@ pub struct RequestContext {
     pub session_id: Option<String>,
     pub session_seq: Option<u64>,
     pub provider: String,
+    /// Saved account ID, fixed for this attempt. None uses the current account.
+    pub account: Option<String>,
     pub traffic: Option<Arc<TrafficCapture>>,
     pub monitor: Option<MonitorHandle>,
 }

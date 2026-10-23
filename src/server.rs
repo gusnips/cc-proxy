@@ -706,6 +706,7 @@ async fn handler_transcription(State(state): State<Arc<AppState>>, req: Request<
         }
     };
     let context = RequestContext {
+        account: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: None,
@@ -881,6 +882,7 @@ async fn dispatch_image_request(
         monitor.provider_selected(&req_id, "codex", &model, None);
     }
     let context = RequestContext {
+        account: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: None,
@@ -1144,6 +1146,7 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
         }
     }
     let context = RequestContext {
+        account: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: current.map(|session| session.seq),
@@ -1371,6 +1374,7 @@ async fn handler_chat_completions(
         }
     }
     let context = RequestContext {
+        account: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: current.map(|session| session.seq),
@@ -1870,6 +1874,7 @@ async fn dispatch_request(
     }
 
     let context = RequestContext {
+        account: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: current.map(|s| s.seq),
@@ -1881,17 +1886,17 @@ async fn dispatch_request(
     let response = if count_tokens {
         provider.handle_count_tokens(body, context).await
     } else {
-        provider
-            .handle_messages_with_conversation_identity(
-                body,
-                context,
-                if auto_review_route.is_some() {
-                    None
-                } else {
-                    conversation_identity
-                },
-            )
-            .await
+        crate::rotation::execute(
+            provider.as_ref(),
+            body,
+            context,
+            if auto_review_route.is_some() {
+                None
+            } else {
+                conversation_identity
+            },
+        )
+        .await
     };
     log_request_completed(
         &log,

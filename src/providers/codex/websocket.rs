@@ -207,6 +207,7 @@ impl WebSocketProxyConfig {
         Self::new(None, None, None, None)
     }
 
+    #[cfg(test)]
     pub(super) fn uses_proxy_for(&self, websocket_url: &str) -> bool {
         let Ok(http_url) = to_http_upgrade_url(websocket_url) else {
             return true;
@@ -399,8 +400,7 @@ pub fn invalidate_codex_websocket_pool_owner(owner: &ConversationIdentity) {
     guard.remove(owner);
 }
 
-#[deprecated(note = "use typed conversation ownership internally")]
-pub fn invalidate_codex_websocket_pool_key(session_id: &str) {
+pub(crate) fn invalidate_codex_websocket_pool_session(session_id: &str) {
     let mut guard = WS_POOL.lock().unwrap();
     guard.retain(|owner, _| match owner {
         ConversationIdentity::Main(owner_session_id)
@@ -3925,6 +3925,7 @@ mod tests {
             }
         });
         let context = RequestContext {
+            account: None,
             req_id: "terminal-order-request".to_string(),
             session_id: Some("header-session-is-not-pool-owner".to_string()),
             session_seq: None,
@@ -4105,7 +4106,7 @@ mod tests {
             );
         }
 
-        invalidate_codex_websocket_pool_key(session_id);
+        invalidate_codex_websocket_pool_session(session_id);
 
         let pool = WS_POOL.lock().unwrap();
         assert!(!pool.contains_key(&main));

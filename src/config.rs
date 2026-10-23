@@ -60,6 +60,7 @@ struct FileConfig {
     #[serde(rename = "autoReviewEffort")]
     pub auto_review_effort: Option<String>,
     pub log: Option<FileLog>,
+    pub auth: Option<AuthConfig>,
     pub kimi: Option<KimiConfig>,
     pub codex: Option<CodexConfig>,
     pub cursor: Option<CursorConfig>,
@@ -72,6 +73,12 @@ struct FileConfig {
     pub gemini: Option<OpenCodeConfig>,
     pub providers: Option<BTreeMap<String, CustomProviderConfig>>,
     pub route: Option<RouteConfig>,
+}
+
+#[derive(Deserialize)]
+struct AuthConfig {
+    #[serde(rename = "autoRotate")]
+    auto_rotate: Option<bool>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -285,6 +292,13 @@ pub fn port() -> u16 {
 
 pub fn bind_address() -> String {
     load_config().bind_address
+}
+
+/// Read on each request, so changing this never needs a proxy restart.
+pub fn auth_auto_rotate() -> bool {
+    read_file_config(&paths::config_dir())
+        .and_then(|file| file.auth?.auto_rotate)
+        .unwrap_or(false)
 }
 
 pub fn log_verbose() -> bool {
@@ -1660,6 +1674,8 @@ mod tests {
     /// `paths::config_dir()` would fall back to the real config file.
     fn isolated_env(config: &tempfile::TempDir) -> Vec<EnvGuard> {
         let mut guards = vec![
+            EnvGuard::set("HOME", config.path()),
+            EnvGuard::set("USERPROFILE", config.path()),
             EnvGuard::unset("CCP_BIND_ADDRESS"),
             EnvGuard::unset("CCP_CODEX_TRANSPORT"),
             EnvGuard::unset("CCP_LOG_VERBOSE"),
@@ -1688,6 +1704,24 @@ mod tests {
             "CCP_CONFIG_DIR".to_string(),
             config.path().to_string_lossy().into_owned(),
         )])
+    }
+
+    #[test]
+    fn auto_rotate_defaults_off_and_reads_file_changes_without_restart() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _env = isolated_env(&config);
+        assert!(!auth_auto_rotate());
+        let path = config.path().join("config.json");
+        for (json, expected) in [
+            (r#"{"auth":{"autoRotate":true}}"#, true),
+            (r#"{"auth":{"autoRotate":false}}"#, false),
+            (r#"{"auth":{}}"#, false),
+            (r#"{"auth":{"autoRotate":"true"}}"#, false),
+        ] {
+            fs::write(&path, json).unwrap();
+            assert_eq!(auth_auto_rotate(), expected, "{json}");
+        }
     }
 
     #[test]

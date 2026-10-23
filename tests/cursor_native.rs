@@ -873,6 +873,7 @@ async fn cursor_provider_handle_messages_returns_anthropic_json() {
     .unwrap();
 
     let ctx = RequestContext {
+        account: None,
         req_id: "test-req".into(),
         session_id: None,
         session_seq: None,
@@ -1314,6 +1315,7 @@ async fn cursor_tool_result_reaches_cursor_on_the_next_request() {
     }
 
     let ctx = RequestContext {
+        account: None,
         req_id: "test-req".into(),
         session_id: Some("session-tool-result".into()),
         session_seq: None,
@@ -1453,6 +1455,7 @@ async fn cursor_stream_that_closes_mid_answer_is_an_error() {
             }))
             .unwrap(),
             RequestContext {
+                account: None,
                 req_id: "test-req".into(),
                 session_id: None,
                 session_seq: None,

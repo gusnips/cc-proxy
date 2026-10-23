@@ -284,7 +284,8 @@ async fn fetch(
 }
 
 async fn codex(client: &reqwest::Client) -> Result<Option<PlanUsage>, Failure> {
-    let manager = CodexAuthManager::new(codex_tokens::file_store());
+    let manager =
+        CodexAuthManager::new(codex_tokens::file_store().map_err(|_| Failure::SignInUnusable)?);
     if manager
         .store
         .load_auth()

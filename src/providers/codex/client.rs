@@ -12,7 +12,9 @@ use crate::traffic::TrafficCapture;
 
 use super::auth::constants::{CODEX_API_ENDPOINT, ORIGINATOR, RESPONSES_LITE_ORIGINATOR};
 use super::auth::manager::CodexAuthManager;
-use super::auth::token_store::{DefaultCodexAuthStore, StoredAuth, file_store};
+#[cfg(test)]
+use super::auth::token_store::account_store;
+use super::auth::token_store::{CodexTokenStore, DefaultCodexAuthStore, StoredAuth};
 pub use super::events::{CodexLimitWindow, CodexUsageLimit};
 use super::search::{SearchRequest, SearchResponse};
 use super::translate::request::ResponsesRequest;
@@ -37,7 +39,13 @@ pub struct CodexError {
 /// normal retry ladder" (file unset, unreadable, stale, malformed, or windows not full):
 /// every uncertainty falls open to today's behavior.
 pub(crate) fn quota_wall_error() -> Option<CodexError> {
-    quota_wall_error_from_file(&crate::config::codex_quota_state_file()?)
+    let path = crate::config::codex_quota_state_file()?;
+    // The external sampler does not identify its account. A shared reading
+    // cannot decide another saved sign-in's quota, even with rotation off.
+    if crate::accounts::Accounts::new("codex").list().ok()?.len() > 1 {
+        return None;
+    }
+    quota_wall_error_from_file(&path)
 }
 
 pub(crate) fn quota_wall_error_from_file(path: &std::path::Path) -> Option<CodexError> {
@@ -780,16 +788,6 @@ fn websocket_http_client(proxy_environment: &ProxyEnvironment) -> reqwest::Clien
         .expect("failed to create Codex WebSocket HTTP client")
 }
 
-fn custom_client_auto_http_fallback_enabled(
-    base_url: &str,
-    proxy_config: &super::websocket::WebSocketProxyConfig,
-) -> bool {
-    let Ok(websocket_url) = super::websocket::to_websocket_url(base_url) else {
-        return false;
-    };
-    !proxy_config.uses_proxy_for(&websocket_url)
-}
-
 #[cfg(test)]
 fn test_native_http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -815,21 +813,92 @@ pub struct CodexHttpClient {
     native_client: reqwest::Client,
     websocket_client: reqwest::Client,
     websocket_proxy_config: super::websocket::WebSocketProxyConfig,
-    auto_http_fallback_enabled: bool,
     auth_manager: CodexAuthManager<DefaultCodexAuthStore>,
     base_url: String,
     header_timeout_ms: u64,
     body_idle_timeout_ms: u64,
 }
 
-impl Default for CodexHttpClient {
+/// The client for each saved Codex account, made when a request first needs it.
+/// A client signs in with one account's login, so a request never uses
+/// another account's token.
+pub struct CodexClients {
+    by_account: std::sync::Mutex<std::collections::HashMap<String, Arc<CodexHttpClient>>>,
+    /// Tests: every request gets this client.
+    #[cfg(test)]
+    fixed: Option<Arc<CodexHttpClient>>,
+}
+
+impl Default for CodexClients {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl CodexHttpClient {
+impl CodexClients {
     pub fn new() -> Self {
+        Self {
+            by_account: Default::default(),
+            #[cfg(test)]
+            fixed: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn fixed(client: Arc<CodexHttpClient>) -> Self {
+        Self {
+            fixed: Some(client),
+            ..Self::new()
+        }
+    }
+
+    /// Pins the attempt to one saved sign-in before choosing its client or state.
+    pub fn get(&self, ctx: &mut RequestContext) -> Result<Arc<CodexHttpClient>, CodexError> {
+        #[cfg(test)]
+        if let Some(client) = &self.fixed {
+            ctx.account.get_or_insert_with(|| "test".to_string());
+            return Ok(client.clone());
+        }
+        let accounts =
+            crate::accounts::Accounts::open("codex", &super::CODEX_CLI).map_err(auth_error)?;
+        self.get_for_accounts(ctx, &accounts)
+    }
+
+    fn get_for_accounts(
+        &self,
+        ctx: &mut RequestContext,
+        accounts: &crate::accounts::Accounts,
+    ) -> Result<Arc<CodexHttpClient>, CodexError> {
+        if ctx.account.is_none() {
+            ctx.account = Some(
+                accounts
+                    .current()
+                    .map_err(auth_error)?
+                    .map_or_else(|| "missing".to_string(), |account| account.id),
+            );
+        }
+        let id = ctx.account.as_ref().expect("account was pinned");
+        let saved = accounts.list().map_err(auth_error)?;
+        if id != "missing" && !saved.iter().any(|account| &account.id == id) {
+            return Err(auth_error(anyhow::anyhow!(
+                "This Codex account was signed out or replaced. Retry the request to use the current account."
+            )));
+        }
+        let mut by_account = self.by_account.lock().unwrap_or_else(|e| e.into_inner());
+        by_account.retain(|id, _| saved.iter().any(|account| &account.id == id));
+        Ok(by_account
+            .entry(id.clone())
+            .or_insert_with_key(|id| {
+                Arc::new(CodexHttpClient::with_auth(CodexTokenStore::new(
+                    accounts.store(id),
+                )))
+            })
+            .clone())
+    }
+}
+
+impl CodexHttpClient {
+    fn with_auth(store: CodexTokenStore<DefaultCodexAuthStore>) -> Self {
         let timeout_ms = config::codex_header_timeout_ms();
         let proxy_environment = ProxyEnvironment::from_env();
         Self {
@@ -840,32 +909,9 @@ impl CodexHttpClient {
             native_client: native_http_client(&proxy_environment),
             websocket_client: websocket_http_client(&proxy_environment),
             websocket_proxy_config: proxy_environment.websocket_proxy_config(),
-            auto_http_fallback_enabled: true,
-            auth_manager: CodexAuthManager::new(file_store()),
+            auth_manager: CodexAuthManager::new(store),
             base_url: config::codex_base_url(CODEX_API_ENDPOINT),
             header_timeout_ms: timeout_ms,
-            body_idle_timeout_ms: HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS,
-        }
-    }
-
-    pub fn new_with_client(
-        client: reqwest::Client,
-        auth_manager: CodexAuthManager<DefaultCodexAuthStore>,
-        base_url: String,
-    ) -> Self {
-        let proxy_environment = ProxyEnvironment::from_env();
-        let websocket_proxy_config = proxy_environment.websocket_proxy_config();
-        let auto_http_fallback_enabled =
-            custom_client_auto_http_fallback_enabled(&base_url, &websocket_proxy_config);
-        Self {
-            native_client: native_http_client(&proxy_environment),
-            websocket_client: websocket_http_client(&proxy_environment),
-            websocket_proxy_config,
-            auto_http_fallback_enabled,
-            client,
-            auth_manager,
-            base_url,
-            header_timeout_ms: config::codex_header_timeout_ms(),
             body_idle_timeout_ms: HTTP_RESPONSE_BODY_IDLE_TIMEOUT_MS,
         }
     }
@@ -881,9 +927,8 @@ impl CodexHttpClient {
             native_client: test_native_http_client(),
             websocket_client: test_websocket_http_client(),
             websocket_proxy_config: super::websocket::WebSocketProxyConfig::direct(),
-            auto_http_fallback_enabled: true,
             client,
-            auth_manager: CodexAuthManager::new(file_store()),
+            auth_manager: CodexAuthManager::new(account_store(&uuid::Uuid::new_v4().to_string())),
             base_url,
             header_timeout_ms,
             body_idle_timeout_ms,
@@ -929,7 +974,7 @@ impl CodexHttpClient {
                     .auth_manager
                     .force_refresh(&auth.access)
                     .await
-                    .map_err(auth_refresh_error)?;
+                    .map_err(auth_error)?;
                 continue;
             }
             return Ok(response);
@@ -1033,7 +1078,7 @@ impl CodexHttpClient {
                     .auth_manager
                     .force_refresh(&auth.access)
                     .await
-                    .map_err(auth_refresh_error)?;
+                    .map_err(auth_error)?;
                 continue;
             }
             return Ok(response);
@@ -1123,7 +1168,7 @@ impl CodexHttpClient {
                     .auth_manager
                     .force_refresh(&auth.access)
                     .await
-                    .map_err(auth_refresh_error)?;
+                    .map_err(auth_error)?;
                 continue;
             }
 
@@ -1232,7 +1277,7 @@ impl CodexHttpClient {
                     .auth_manager
                     .force_refresh(&auth.access)
                     .await
-                    .map_err(auth_refresh_error)?;
+                    .map_err(auth_error)?;
                 continue;
             }
             if should_retry_status(response.status) && retries < MAX_BUFFERED_TRANSPORT_RETRIES {
@@ -1366,7 +1411,7 @@ impl CodexHttpClient {
                     .auth_manager
                     .force_refresh(&auth.access)
                     .await
-                    .map_err(auth_refresh_error)?;
+                    .map_err(auth_error)?;
                 continue;
             }
 
@@ -1700,6 +1745,7 @@ impl CodexHttpClient {
                                     .send(Err(codex_usage_limit_error(
                                         limit,
                                         CodexErrorOrigin::Http,
+                                        &response_headers,
                                     )))
                                     .await;
                                 return;
@@ -1988,10 +2034,7 @@ impl CodexHttpClient {
                                 // replacement transport or connection.
                                 Err(err)
                             }
-                            Err(err)
-                                if self.auto_http_fallback_enabled
-                                    && should_fallback_to_http(&err) =>
-                            {
+                            Err(err) if should_fallback_to_http(&err) => {
                                 // Fall back to HTTP only if WebSocket failed before sending
                                 let body_json =
                                     serde_json::to_string(body).map_err(|e| CodexError {
@@ -2043,6 +2086,13 @@ impl CodexHttpClient {
                 }
             }
 
+            if let Ok(response) = &result {
+                for event in parse_sse_events(&response.body) {
+                    if let Ok(payload) = serde_json::from_str(&event.data) {
+                        super::record_rate_limit_telemetry(ctx.account.as_deref(), &payload);
+                    }
+                }
+            }
             if let Ok(response) = &result
                 && let Some(limit) =
                     super::events::usage_limit_from_response(&response.body, &response.headers)
@@ -2051,7 +2101,7 @@ impl CodexHttpClient {
                     ActualTransport::Http => CodexErrorOrigin::BufferedHttp,
                     ActualTransport::WebSocket => CodexErrorOrigin::BufferedWebSocket,
                 };
-                return Err(codex_usage_limit_error(limit, origin));
+                return Err(codex_usage_limit_error(limit, origin, &response.headers));
             }
 
             let result = result.and_then(|response| {
@@ -2242,7 +2292,7 @@ impl CodexHttpClient {
                                 auth
                             },
                             Err(refresh_err) => {
-                                if tx.send(Err(auth_refresh_error(refresh_err))).await.is_err() {
+                                if tx.send(Err(auth_error(refresh_err))).await.is_err() {
                                     abort_abandoned_live_continuation(
                                         continuation.as_ref(),
                                         &socket_id_publisher,
@@ -2336,7 +2386,7 @@ impl CodexHttpClient {
                             auth
                         }
                         Err(refresh_err) => {
-                            if tx.send(Err(auth_refresh_error(refresh_err))).await.is_err() {
+                            if tx.send(Err(auth_error(refresh_err))).await.is_err() {
                                 if let Some(reservation) = continuation.as_ref() {
                                     super::websocket::invalidate_codex_websocket_pool_socket(
                                         reservation,
@@ -2515,7 +2565,10 @@ impl CodexHttpClient {
                 }
             })?;
 
-        super::rate_limits::record(super::rate_limits::telemetry_headers(resp.headers()));
+        super::rate_limits::record(
+            ctx.account.as_deref(),
+            super::rate_limits::telemetry_headers(resp.headers()),
+        );
 
         Ok((resp, started_at))
     }
@@ -2527,7 +2580,10 @@ impl CodexHttpClient {
         ctx: &RequestContext,
     ) -> Result<CodexResponse, CodexError> {
         let status = resp.status().as_u16();
-        super::rate_limits::record(super::rate_limits::telemetry_headers(resp.headers()));
+        super::rate_limits::record(
+            ctx.account.as_deref(),
+            super::rate_limits::telemetry_headers(resp.headers()),
+        );
         let headers: Vec<(String, String)> = resp
             .headers()
             .iter()
@@ -3064,12 +3120,19 @@ fn codex_event_failure_error(failure: super::events::CodexEventFailure) -> Codex
     }
 }
 
-fn codex_usage_limit_error(limit: CodexUsageLimit, origin: CodexErrorOrigin) -> CodexError {
+fn codex_usage_limit_error(
+    limit: CodexUsageLimit,
+    origin: CodexErrorOrigin,
+    headers: &[(String, String)],
+) -> CodexError {
     CodexError {
         status: 429,
         message: limit.message.clone(),
         detail: Some(limit.message.clone()),
-        retry_after: None,
+        retry_after: headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+            .map(|(_, value)| value.clone()),
         usage_limit: Some(Box::new(limit)),
         origin,
     }
@@ -3291,7 +3354,7 @@ fn summarize_json_request_size(body: &serde_json::Value, body_json: &str) -> ser
     })
 }
 
-fn auth_refresh_error(err: anyhow::Error) -> CodexError {
+fn auth_error(err: anyhow::Error) -> CodexError {
     CodexError {
         status: 401,
         message: "Unauthorized".to_string(),
@@ -3558,25 +3621,58 @@ mod tests {
     }
 
     #[test]
-    fn custom_client_auto_fallback_tracks_effective_proxy_route() {
-        let proxy = "http://proxy.example:8080";
-        let proxied =
-            super::super::websocket::WebSocketProxyConfig::new(None, Some(proxy), None, None);
-        assert!(!custom_client_auto_http_fallback_enabled(
-            "https://codex.invalid/responses",
-            &proxied
-        ));
+    fn clients_reuse_only_the_same_saved_account_id() {
+        let clients = CodexClients::new();
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = crate::accounts::Accounts::in_dir("codex", dir.path().join("codex"));
+        for name in ["first", "second"] {
+            accounts
+                .install(
+                    name,
+                    None,
+                    &serde_json::to_value(http_test_auth()).unwrap(),
+                    None,
+                )
+                .unwrap();
+        }
+        let first_id = accounts.require("first").unwrap().id;
+        let second_id = accounts.require("second").unwrap().id;
+        let mut ctx = http_test_context();
+        let first = clients.get_for_accounts(&mut ctx, &accounts).unwrap();
+        assert_eq!(ctx.account.as_deref(), Some(first_id.as_str()));
+        accounts.set_current("second").unwrap();
+        let first_again = clients.get_for_accounts(&mut ctx, &accounts).unwrap();
+        ctx.account = None;
+        let second = clients.get_for_accounts(&mut ctx, &accounts).unwrap();
+        assert_eq!(ctx.account.as_deref(), Some(second_id.as_str()));
 
-        let bypassed = super::super::websocket::WebSocketProxyConfig::new(
-            None,
-            Some(proxy),
-            None,
-            Some("codex.invalid"),
+        assert!(Arc::ptr_eq(&first, &first_again));
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            first.auth_manager().store.auth_path(),
+            accounts.file(&first_id).to_string_lossy()
         );
-        assert!(custom_client_auto_http_fallback_enabled(
-            "https://codex.invalid/responses",
-            &bypassed
-        ));
+        assert_eq!(
+            second.auth_manager().store.auth_path(),
+            accounts.file(&second_id).to_string_lossy()
+        );
+        accounts.remove("first").unwrap();
+        ctx.account = Some(first_id);
+        assert!(clients.get_for_accounts(&mut ctx, &accounts).is_err());
+        assert!(first.auth_manager().store.load_auth().unwrap().is_none());
+    }
+
+    #[test]
+    fn fixed_clients_bypass_account_selection() {
+        let client = Arc::new(http_test_client("http://127.0.0.1:1/responses".into(), 100));
+        let clients = CodexClients::fixed(client.clone());
+
+        let mut ctx = http_test_context();
+        assert!(Arc::ptr_eq(&client, &clients.get(&mut ctx).unwrap()));
+        assert_eq!(ctx.account.as_deref(), Some("test"));
+        ctx.account = Some("unused-test-account".to_string());
+        assert!(Arc::ptr_eq(&client, &clients.get(&mut ctx).unwrap()));
+        assert_eq!(ctx.account.as_deref(), Some("unused-test-account"));
     }
 
     fn http_test_auth() -> StoredAuth {
@@ -3594,6 +3690,7 @@ mod tests {
             session_id: None,
             session_seq: None,
             provider: "codex".into(),
+            account: None,
             traffic: None,
             monitor: None,
         }
@@ -6222,6 +6319,7 @@ mod tests {
             session_id: Some("s".into()),
             session_seq: None,
             provider: "codex".into(),
+            account: None,
             traffic: None,
             monitor: None,
         };
@@ -6251,6 +6349,7 @@ mod tests {
             session_id: None,
             session_seq: None,
             provider: "codex".into(),
+            account: None,
             traffic: None,
             monitor: None,
         };
@@ -6278,6 +6377,7 @@ mod tests {
             session_id: None,
             session_seq: None,
             provider: "codex".into(),
+            account: None,
             traffic: None,
             monitor: None,
         };
@@ -6299,6 +6399,7 @@ mod tests {
             session_id: Some("bad\nsession".into()),
             session_seq: None,
             provider: "codex".into(),
+            account: None,
             traffic: None,
             monitor: None,
         };
@@ -6393,6 +6494,7 @@ mod tests {
             session_id: None,
             session_seq: None,
             provider: "codex".into(),
+            account: None,
             traffic: None,
             monitor: None,
         };

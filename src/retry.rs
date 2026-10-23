@@ -43,7 +43,7 @@ pub fn compute_backoff_delay(attempt: u32, retry_after: Option<&str>) -> Backoff
 /// Retry-After is either a delay in seconds or an HTTP-date (RFC 9110).
 /// Reading only the number dropped a dated header on the floor and retried
 /// on our own clock, before the time the server had named.
-fn retry_after_ms(raw: &str) -> Option<u64> {
+pub(crate) fn retry_after_ms(raw: &str) -> Option<u64> {
     let raw = raw.trim();
     let seconds = match raw.parse::<f64>() {
         Ok(seconds) => seconds,
