@@ -46,8 +46,7 @@ impl PendingReasoning {
 }
 
 pub fn encode_reasoning_signature(replay: &ReasoningReplay) -> Option<String> {
-    if replay.id.is_empty()
-        || replay.id.len() > MAX_ID_BYTES
+    if !valid_reasoning_id(&replay.id)
         || replay.encrypted_content.is_empty()
         || replay.encrypted_content.len() > MAX_ENCRYPTED_CONTENT_BYTES
     {
@@ -73,13 +72,22 @@ pub fn decode_reasoning_signature(signature: &str) -> Option<ReasoningReplay> {
     let id = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded_id)
         .ok()?;
-    if id.is_empty() || id.len() > MAX_ID_BYTES {
+    let id = String::from_utf8(id).ok()?;
+    if !valid_reasoning_id(&id) {
         return None;
     }
     Some(ReasoningReplay {
-        id: String::from_utf8(id).ok()?,
+        id,
         encrypted_content: encrypted_content.to_string(),
     })
+}
+
+fn valid_reasoning_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID_BYTES
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn encoded_id_len_limit() -> usize {
@@ -109,6 +117,57 @@ mod tests {
         assert!(signature.starts_with(PREFIX));
         assert!(signature.ends_with(":gAAAAopaque"));
         assert_eq!(decode_reasoning_signature(&signature), Some(replay));
+    }
+
+    #[test]
+    fn composite_ids_are_not_encoded_or_replayed_from_existing_signatures() {
+        let id = "rs_6adb18e156be73a92dc249a9:rs_01a167d93049718084aceff8309d5b7a";
+        assert!(
+            encode_reasoning_signature(&ReasoningReplay {
+                id: id.into(),
+                encrypted_content: "opaque".into(),
+            })
+            .is_none()
+        );
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(id);
+        let body: crate::anthropic::schema::MessagesRequest = serde_json::from_value(json!({
+            "model":"gpt-5.6-sol",
+            "messages":[{"role":"assistant","content":[{
+                "type":"thinking","thinking":"visible summary",
+                "signature":format!("{PREFIX}{encoded}:opaque")
+            }]}]
+        }))
+        .unwrap();
+        let translated = super::super::request::translate_request(
+            &body,
+            super::super::request::TranslateOptions {
+                session_id: None,
+                service_tier: None,
+                model: "gpt-5.6-sol".into(),
+                use_responses_lite: false,
+            },
+        )
+        .unwrap();
+        assert!(!translated.input.iter().any(|item| matches!(
+            item,
+            super::super::request::ResponsesInputItem::Reasoning { .. }
+        )));
+    }
+
+    #[test]
+    fn invalid_reasoning_ids_are_rejected_in_both_directions() {
+        for id in ["", "rs:1", "rs.1", "rs 1", "rs_é", "rs_\n"] {
+            let replay = ReasoningReplay {
+                id: id.into(),
+                encrypted_content: "opaque".into(),
+            };
+            assert!(encode_reasoning_signature(&replay).is_none(), "{id:?}");
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(id);
+            assert!(
+                decode_reasoning_signature(&format!("{PREFIX}{encoded}:opaque")).is_none(),
+                "{id:?}"
+            );
+        }
     }
 
     #[test]
