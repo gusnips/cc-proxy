@@ -261,14 +261,14 @@ impl GeminiProvider {
         };
         capture_buffered_upstream(&ctx, &bytes, "json");
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
-        let value = match google::accumulate_response(&bytes, &message_id, requested) {
+        let value = match google::accumulate_response("Gemini", &bytes, &message_id, requested) {
             Ok(value) => value,
             Err(err) => {
-                return json_error(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    format!("Gemini response translation failed: {err}"),
-                );
+                return upstream_error::translation_error(
+                    err,
+                    "Gemini response translation failed",
+                )
+                .response();
             }
         };
         if let Some(traffic) = ctx.traffic.as_ref() {

@@ -210,12 +210,7 @@ fn refresh_provider(provider: &str) -> Result<Option<Vec<String>>> {
             };
             crate::providers::copilot::models::refresh(&auth)?
         }
-        "antigravity" => {
-            let Some(auth) = crate::providers::antigravity::file_store().load()? else {
-                bail!("Antigravity isn't signed in. Run `cc-proxy auth login antigravity` first.");
-            };
-            crate::providers::antigravity::refresh_models(&auth)?
-        }
+        "antigravity" => crate::providers::antigravity::refresh_models()?,
         "gemini" => crate::providers::gemini::refresh_models()?,
         "opencode" => crate::providers::opencode::model::refresh_models(false)?,
         "opencode-zen" => crate::providers::opencode::model::refresh_models(true)?,

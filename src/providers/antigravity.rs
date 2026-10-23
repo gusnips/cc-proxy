@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::accounts::{AccountAuthStore, Accounts};
 use crate::anthropic::{
     error::json_error,
     schema::{CountTokensResponse, MessagesRequest},
@@ -89,7 +90,7 @@ pub const ANTIGRAVITY_FALLBACK_MODELS: &[&str] = &[
     "gpt-oss-120b-medium",
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredAntigravityAuth {
     pub access: String,
@@ -102,14 +103,18 @@ pub struct StoredAntigravityAuth {
     pub plan: Option<String>,
 }
 
-pub fn file_store() -> FileAuthStore<StoredAntigravityAuth> {
+fn account_store(id: Option<&str>) -> Result<AccountAuthStore<StoredAntigravityAuth>> {
+    Accounts::open("antigravity", &ANTIGRAVITY_CLI)?.for_request(id)
+}
+
+fn single_login_store() -> FileAuthStore<Value> {
     FileAuthStore::new(
         paths::provider_auth_file("antigravity")
             .to_string_lossy()
-            .to_string(),
+            .into_owned(),
         paths::provider_legacy_auth_file("antigravity")
             .to_string_lossy()
-            .to_string(),
+            .into_owned(),
     )
 }
 
@@ -231,40 +236,87 @@ fn parse_available_models(body: &Value) -> Vec<String> {
 }
 
 fn save_refreshed_auth(
+    store: &dyn AuthStorage<StoredAntigravityAuth>,
     stored: StoredAntigravityAuth,
     payload: &Value,
-) -> Option<StoredAntigravityAuth> {
+) -> Result<StoredAntigravityAuth, ProviderError> {
     let access = payload["access_token"]
         .as_str()
-        .filter(|s| !s.is_empty())?
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| {
+            ProviderError::new(
+                StatusCode::BAD_GATEWAY,
+                ProviderErrorKind::Api,
+                "Antigravity token refresh response has no access token. Try the request again.",
+            )
+        })?
         .to_string();
     let refresh = payload["refresh_token"]
         .as_str()
-        .filter(|s| !s.is_empty())
+        .filter(|token| !token.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| stored.refresh.clone());
     let expires_in = payload["expires_in"].as_u64().unwrap_or(3600);
+    if expires_in == 0 {
+        return Err(ProviderError::new(
+            StatusCode::BAD_GATEWAY,
+            ProviderErrorKind::Api,
+            "Antigravity returned an expired access token. Try the request again.",
+        ));
+    }
     let updated = StoredAntigravityAuth {
         access,
         refresh,
-        expires: (now_ms() + expires_in * 1000).saturating_sub(REFRESH_SKEW_MS),
-        project_id: stored.project_id,
-        email: stored.email,
-        plan: stored.plan,
+        expires: now_ms()
+            .saturating_add(expires_in.saturating_mul(1000))
+            .saturating_sub(REFRESH_SKEW_MS),
+        ..stored
     };
-    let _ = file_store().save(updated.clone());
-    Some(updated)
+    store.save(updated.clone()).map_err(auth_storage_error)?;
+    Ok(updated)
+}
+
+fn auth_storage_error(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ProviderErrorKind::Api,
+        format!("Couldn't read or save the Antigravity sign-in: {error}"),
+    )
+}
+
+fn read_auth(
+    store: &dyn AuthStorage<StoredAntigravityAuth>,
+) -> Result<StoredAntigravityAuth, ProviderError> {
+    store.load().map_err(auth_storage_error)?.ok_or_else(|| {
+        ProviderError::new(
+            StatusCode::UNAUTHORIZED,
+            ProviderErrorKind::Authentication,
+            "Antigravity is not signed in. Run `cc-proxy auth login antigravity`.",
+        )
+    })
 }
 
 fn ensure_valid_auth_blocking(
-    client: &reqwest::blocking::Client,
-    stored: StoredAntigravityAuth,
-) -> Result<StoredAntigravityAuth> {
+    store: &dyn AuthStorage<StoredAntigravityAuth>,
+    token_endpoint: &str,
+) -> Result<StoredAntigravityAuth, ProviderError> {
+    let stored = read_auth(store)?;
     if stored.expires > now_ms() {
         return Ok(stored);
     }
-    let payload: Value = client
-        .post(TOKEN_ENDPOINT)
+    let lock = crate::auth::refresh_lock(&store.path());
+    let _guard = lock.blocking_lock();
+    let stored = read_auth(store)?;
+    if stored.expires > now_ms() {
+        return Ok(stored);
+    }
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(auth_storage_error)?;
+    let response = client
+        .post(token_endpoint)
         .header("Accept", "application/json")
         .form(&[
             ("grant_type", "refresh_token"),
@@ -273,23 +325,40 @@ fn ensure_valid_auth_blocking(
             ("refresh_token", &stored.refresh),
         ])
         .send()
-        .context("Antigravity token refresh failed")?
-        .error_for_status()
-        .context("Antigravity OAuth session expired or was revoked. Run `cc-proxy auth login antigravity`.")?
-        .json()
-        .context("Invalid Antigravity token refresh response")?;
-    save_refreshed_auth(stored, &payload)
-        .ok_or_else(|| anyhow::anyhow!("Antigravity token refresh response missing access_token"))
+        .map_err(|error| ProviderError::new(
+            StatusCode::BAD_GATEWAY,
+            ProviderErrorKind::Api,
+            format!("Antigravity token refresh failed: {error}. Check your connection and try again."),
+        ))?;
+    if !response.status().is_success() {
+        // A peer process may have renewed this login during the HTTP request.
+        let latest = read_auth(store)?;
+        if latest != stored {
+            return Ok(latest);
+        }
+        return Err(ProviderError::new(
+            StatusCode::UNAUTHORIZED,
+            ProviderErrorKind::Authentication,
+            "Antigravity OAuth session expired or was revoked. Run `cc-proxy auth login antigravity --replace`.",
+        ));
+    }
+    let payload: Value = response.json().map_err(|error| ProviderError::new(
+        StatusCode::BAD_GATEWAY,
+        ProviderErrorKind::Api,
+        format!("Antigravity token refresh response was not valid JSON: {error}. Try the request again."),
+    ))?;
+    save_refreshed_auth(store, stored, &payload)
 }
 
 /// Queries Antigravity's `:fetchAvailableModels` endpoint and saves the live
 /// agent wire model list to `antigravity/models.json`.
-pub fn refresh_models(stored: &StoredAntigravityAuth) -> Result<Vec<String>> {
+pub fn refresh_models() -> Result<Vec<String>> {
+    let store = account_store(None)?;
+    let auth = ensure_valid_auth_blocking(&store, TOKEN_ENDPOINT)?;
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()?;
-    let auth = ensure_valid_auth_blocking(&client, stored.clone())?;
     let mut last_err = None;
     for base in [DAILY_API, PROD_API] {
         let resp = client
@@ -483,82 +552,22 @@ fn discover_project_blocking(
     )
 }
 
-async fn load_valid_auth() -> Result<StoredAntigravityAuth, ProviderError> {
-    let stored = file_store()
-        .load()
-        .map_err(|e| {
-            ProviderError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ProviderErrorKind::Api,
-                format!("Failed to read Antigravity credentials: {e}"),
-            )
-        })?
-        .ok_or_else(|| {
-            ProviderError::new(
-                StatusCode::UNAUTHORIZED,
-                ProviderErrorKind::Authentication,
-                "Antigravity is not signed in. Run `cc-proxy auth login antigravity`.",
-            )
-        })?;
+async fn load_valid_auth(account: Option<&str>) -> Result<StoredAntigravityAuth, ProviderError> {
+    let store = account_store(account).map_err(auth_storage_error)?;
+    load_valid_auth_from_store(store, TOKEN_ENDPOINT.to_string()).await
+}
 
+async fn load_valid_auth_from_store(
+    store: impl AuthStorage<StoredAntigravityAuth> + 'static,
+    token_endpoint: String,
+) -> Result<StoredAntigravityAuth, ProviderError> {
+    let stored = read_auth(&store)?;
     if stored.expires > now_ms() {
         return Ok(stored);
     }
-
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| {
-            ProviderError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ProviderErrorKind::Api,
-                e.to_string(),
-            )
-        })?;
-
-    let resp = client
-        .post(TOKEN_ENDPOINT)
-        .header("Accept", "application/json")
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("client_id", &client_id()),
-            ("client_secret", &client_secret()),
-            ("refresh_token", &stored.refresh),
-        ])
-        .send()
+    tokio::task::spawn_blocking(move || ensure_valid_auth_blocking(&store, &token_endpoint))
         .await
-        .map_err(|e| {
-            ProviderError::new(
-                StatusCode::BAD_GATEWAY,
-                ProviderErrorKind::Api,
-                format!("Antigravity token refresh failed: {e}"),
-            )
-        })?;
-
-    if !resp.status().is_success() {
-        return Err(ProviderError::new(
-            StatusCode::UNAUTHORIZED,
-            ProviderErrorKind::Authentication,
-            "Antigravity OAuth session expired or was revoked. Run `cc-proxy auth login antigravity`.",
-        ));
-    }
-
-    let payload: Value = resp.json().await.map_err(|e| {
-        ProviderError::new(
-            StatusCode::BAD_GATEWAY,
-            ProviderErrorKind::Api,
-            format!("Invalid Antigravity token refresh response: {e}"),
-        )
-    })?;
-
-    save_refreshed_auth(stored, &payload).ok_or_else(|| {
-        ProviderError::new(
-            StatusCode::BAD_GATEWAY,
-            ProviderErrorKind::Api,
-            "Antigravity token refresh response missing access_token",
-        )
-    })
+        .map_err(auth_storage_error)?
 }
 
 fn build_antigravity_envelope(
@@ -710,7 +719,7 @@ impl AntigravityProvider {
             Ok(model) => model,
             Err(error) => return error.response(),
         };
-        let auth = match load_valid_auth().await {
+        let auth = match load_valid_auth(ctx.account.as_deref()).await {
             Ok(auth) => auth,
             Err(err) => return err.response(),
         };
@@ -752,14 +761,15 @@ impl AntigravityProvider {
         };
         capture_buffered_upstream(&ctx, &bytes, "json");
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
-        let value = match google::accumulate_response(&bytes, &message_id, requested) {
+        let value = match google::accumulate_response("Antigravity", &bytes, &message_id, requested)
+        {
             Ok(v) => v,
             Err(err) => {
-                return json_error(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    format!("Antigravity response translation failed: {err}"),
-                );
+                return upstream_error::translation_error(
+                    err,
+                    "Antigravity response translation failed",
+                )
+                .response();
             }
         };
         if let Some(traffic) = ctx.traffic.as_ref() {
@@ -827,7 +837,7 @@ impl Provider for AntigravityProvider {
         body.stream = true;
         let requested = body.model.as_deref().unwrap_or_default();
         let wire_model = resolve_wire_model(&body)?;
-        let auth = load_valid_auth().await?;
+        let auth = load_valid_auth(ctx.account.as_deref()).await?;
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &wire_model);
             monitor.upstream_started(&ctx.req_id);
@@ -876,157 +886,167 @@ fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-impl CliHandlers for AntigravityCli {
-    fn auth_state(&self) -> AuthState {
-        match file_store().load().ok().flatten() {
-            Some(auth) => AuthState::SignedIn {
+fn sign_in() -> Result<StoredAntigravityAuth> {
+    let listener = TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
+        .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))
+        .context("Failed to bind local OAuth callback port for Antigravity")?;
+    let port = listener.local_addr()?.port();
+    let redirect_uri = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
+    let (verifier, challenge) = generate_pkce();
+    let state = uuid::Uuid::new_v4().simple().to_string();
+
+    let mut auth_url = reqwest::Url::parse(AUTH_ENDPOINT)?;
+    auth_url
+        .query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &client_id())
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("scope", &SCOPES.join(" "))
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("access_type", "offline")
+        .append_pair("prompt", "consent")
+        .append_pair("state", &state);
+
+    println!("Open this URL in your browser to sign in to Google Antigravity:");
+    println!("  {}", auth_url.as_str());
+    let _ = crate::browser::open(auth_url.as_str());
+
+    let (mut stream, _) = listener
+        .accept()
+        .context("Failed waiting for OAuth callback")?;
+    let mut reader = BufReader::new(&stream);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("Malformed HTTP callback request"))?;
+    let callback_url = reqwest::Url::parse(&format!("http://127.0.0.1{path}"))?;
+    let mut code = None;
+    let mut returned_state = None;
+    for (k, v) in callback_url.query_pairs() {
+        if k == "code" {
+            code = Some(v.into_owned());
+        } else if k == "state" {
+            returned_state = Some(v.into_owned());
+        }
+    }
+    let html = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body><h2>Antigravity sign-in complete.</h2><p>You can close this tab and return to the terminal.</p></body></html>";
+    let _ = stream.write_all(html.as_bytes());
+    let _ = stream.flush();
+
+    if returned_state.as_deref() != Some(state.as_str()) {
+        bail!("Antigravity OAuth state mismatch");
+    }
+    let code = code.ok_or_else(|| anyhow::anyhow!("Missing authorization code in callback"))?;
+
+    let http = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let token_resp: Value = http
+        .post(TOKEN_ENDPOINT)
+        .header("Accept", "application/json")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", &client_id()),
+            ("client_secret", &client_secret()),
+            ("code", &code),
+            ("redirect_uri", &redirect_uri),
+            ("code_verifier", &verifier),
+        ])
+        .send()?
+        .error_for_status()
+        .context("Antigravity token exchange failed")?
+        .json()?;
+
+    let access = token_resp["access_token"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Missing access_token from Google"))?
+        .to_string();
+    let refresh = token_resp["refresh_token"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Missing refresh_token from Google"))?
+        .to_string();
+    let expires_in = token_resp["expires_in"].as_u64().unwrap_or(3600);
+    let email = token_resp["id_token"]
+        .as_str()
+        .and_then(decode_jwt_email)
+        .or_else(|| decode_jwt_email(&access));
+
+    println!("Discovering Cloud Code Assist project...");
+    let (project_id, plan) = discover_project_blocking(&http, &access)?;
+    Ok(StoredAntigravityAuth {
+        access,
+        refresh,
+        expires: now_ms()
+            .saturating_add(expires_in.saturating_mul(1000))
+            .saturating_sub(REFRESH_SKEW_MS),
+        project_id,
+        email,
+        plan,
+    })
+}
+
+impl crate::accounts::AccountSupport for AntigravityCli {
+    fn sign_in(&self, _device: bool) -> Result<Value> {
+        Ok(serde_json::to_value(sign_in()?)?)
+    }
+
+    fn identity(&self, login: &Value) -> Option<String> {
+        let auth: StoredAntigravityAuth = serde_json::from_value(login.clone()).ok()?;
+        auth.email
+            .map(|email| email.trim().to_ascii_lowercase())
+            .filter(|email| !email.is_empty())
+            .or_else(|| (!auth.project_id.is_empty()).then_some(auth.project_id))
+    }
+
+    fn state(&self, login: &Value) -> AuthState {
+        match serde_json::from_value::<StoredAntigravityAuth>(login.clone()) {
+            Ok(auth) => AuthState::SignedIn {
                 account: auth.email.or(Some(auth.project_id)),
                 expires_ms: Some(auth.expires),
             },
-            None => AuthState::Missing,
+            Err(_) => AuthState::Missing,
         }
+    }
+
+    fn single_login(&self) -> Box<dyn AuthStorage<Value>> {
+        Box::new(single_login_store())
+    }
+}
+
+impl CliHandlers for AntigravityCli {
+    fn auth_state(&self) -> AuthState {
+        Accounts::current_state("antigravity", self)
     }
 
     fn login(&self) -> Result<()> {
-        let listener = TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
-            .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))
-            .context("Failed to bind local OAuth callback port for Antigravity")?;
-        let port = listener.local_addr()?.port();
-        let redirect_uri = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
-        let (verifier, challenge) = generate_pkce();
-        let state = uuid::Uuid::new_v4().simple().to_string();
-
-        let mut auth_url = reqwest::Url::parse(AUTH_ENDPOINT)?;
-        auth_url
-            .query_pairs_mut()
-            .append_pair("response_type", "code")
-            .append_pair("client_id", &client_id())
-            .append_pair("redirect_uri", &redirect_uri)
-            .append_pair("scope", &SCOPES.join(" "))
-            .append_pair("code_challenge", &challenge)
-            .append_pair("code_challenge_method", "S256")
-            .append_pair("access_type", "offline")
-            .append_pair("prompt", "consent")
-            .append_pair("state", &state);
-
-        println!("Open this URL in your browser to sign in to Google Antigravity:");
-        println!("  {}", auth_url.as_str());
-        let _ = crate::browser::open(auth_url.as_str());
-
-        let (mut stream, _) = listener
-            .accept()
-            .context("Failed waiting for OAuth callback")?;
-        let mut reader = BufReader::new(&stream);
-        let mut request_line = String::new();
-        reader.read_line(&mut request_line)?;
-        let path = request_line
-            .split_whitespace()
-            .nth(1)
-            .ok_or_else(|| anyhow::anyhow!("Malformed HTTP callback request"))?;
-        let callback_url = reqwest::Url::parse(&format!("http://127.0.0.1{path}"))?;
-        let mut code = None;
-        let mut returned_state = None;
-        for (k, v) in callback_url.query_pairs() {
-            if k == "code" {
-                code = Some(v.into_owned());
-            } else if k == "state" {
-                returned_state = Some(v.into_owned());
-            }
-        }
-        let html = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body><h2>Antigravity sign-in complete.</h2><p>You can close this tab and return to the terminal.</p></body></html>";
-        let _ = stream.write_all(html.as_bytes());
-        let _ = stream.flush();
-
-        if returned_state.as_deref() != Some(state.as_str()) {
-            bail!("Antigravity OAuth state mismatch");
-        }
-        let code = code.ok_or_else(|| anyhow::anyhow!("Missing authorization code in callback"))?;
-
-        let http = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()?;
-        let token_resp: Value = http
-            .post(TOKEN_ENDPOINT)
-            .header("Accept", "application/json")
-            .form(&[
-                ("grant_type", "authorization_code"),
-                ("client_id", &client_id()),
-                ("client_secret", &client_secret()),
-                ("code", &code),
-                ("redirect_uri", &redirect_uri),
-                ("code_verifier", &verifier),
-            ])
-            .send()?
-            .error_for_status()
-            .context("Antigravity token exchange failed")?
-            .json()?;
-
-        let access = token_resp["access_token"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing access_token from Google"))?
-            .to_string();
-        let refresh = token_resp["refresh_token"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing refresh_token from Google"))?
-            .to_string();
-        let expires_in = token_resp["expires_in"].as_u64().unwrap_or(3600);
-        let email = token_resp["id_token"]
-            .as_str()
-            .and_then(decode_jwt_email)
-            .or_else(|| decode_jwt_email(&access));
-
-        println!("Discovering Cloud Code Assist project...");
-        let (project_id, plan) = discover_project_blocking(&http, &access)?;
-        let stored = StoredAntigravityAuth {
-            access,
-            refresh,
-            expires: (now_ms() + expires_in * 1000).saturating_sub(REFRESH_SKEW_MS),
-            project_id: project_id.clone(),
-            email: email.clone(),
-            plan,
-        };
-        file_store().save(stored.clone())?;
-        println!("Fetching Antigravity's model list...");
-        if let Err(error) = refresh_models(&stored) {
-            eprintln!(
-                "Sign-in is saved, but the model list could not be refreshed: {error:#}. Retry with `cc-proxy models refresh antigravity`."
-            );
-        }
-        if let Some(email) = email {
-            println!("Signed in to Antigravity as {email} (project: {project_id}).");
-        } else {
-            println!("Signed in to Antigravity (project: {project_id}).");
-        }
-        Ok(())
+        crate::auth_cli::AccountCli::open("antigravity", self)?.login(&Default::default())
     }
 
     fn device(&self) -> Result<()> {
-        self.login()
+        crate::auth_cli::AccountCli::open("antigravity", self)?.login(
+            &crate::auth_cli::LoginOptions {
+                device: true,
+                ..Default::default()
+            },
+        )
     }
 
     fn status(&self) -> Result<()> {
-        let Some(stored) = file_store().load()? else {
-            bail!("Not authenticated");
-        };
-        if let Some(email) = &stored.email {
-            println!("Account: {email}");
-        }
-        println!("Project: {}", stored.project_id);
-        if let Some(plan) = &stored.plan {
-            println!("Plan: {plan}");
-        }
-        println!("Storage: {}", file_store().path());
-        Ok(())
+        crate::auth_cli::AccountCli::open("antigravity", self)?.status()
     }
 
     fn logout(&self) -> Result<()> {
-        file_store().clear()?;
-        let _ = std::fs::remove_file(super::model_catalog::cache_file("antigravity"));
-        println!("Antigravity stored auth cleared.");
-        Ok(())
+        crate::auth_cli::AccountCli::open("antigravity", self)?.logout(None, false)
+    }
+
+    fn accounts(&self) -> Option<&dyn crate::accounts::AccountSupport> {
+        Some(self)
     }
 }
 
@@ -1035,6 +1055,180 @@ static ANTIGRAVITY_CLI: AntigravityCli = AntigravityCli;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::AccountSupport;
+    use crate::auth::InMemoryAuthStore;
+    use crate::providers::codex::auth::test_http;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn stored_auth(name: &str) -> StoredAntigravityAuth {
+        StoredAntigravityAuth {
+            access: format!("access-{name}"),
+            refresh: format!("refresh-{name}"),
+            expires: 0,
+            project_id: format!("project-{name}"),
+            email: Some(format!("{name}@example.com")),
+            plan: Some("test-plan".into()),
+        }
+    }
+
+    #[test]
+    fn account_migration_keeps_the_identity_and_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = Accounts::in_dir("antigravity", dir.path().join("antigravity"));
+        let legacy = InMemoryAuthStore::new();
+        let auth = stored_auth("first");
+        legacy.save(serde_json::to_value(&auth).unwrap()).unwrap();
+        accounts
+            .migrate(&legacy, |login| ANTIGRAVITY_CLI.identity(login))
+            .unwrap();
+        let current = accounts.current().unwrap().unwrap();
+        assert_eq!(current.identity.as_deref(), Some("first@example.com"));
+        assert_eq!(
+            accounts
+                .store::<StoredAntigravityAuth>(&current.id)
+                .load()
+                .unwrap()
+                .unwrap(),
+            auth
+        );
+        assert!(legacy.load().unwrap().is_none());
+        assert!(ANTIGRAVITY_CLI.accounts().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_and_model_refresh_share_only_the_selected_accounts_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = Accounts::in_dir("antigravity", dir.path().join("antigravity"));
+        for name in ["first", "second"] {
+            accounts
+                .install(
+                    name,
+                    None,
+                    &serde_json::to_value(stored_auth(name)).unwrap(),
+                    None,
+                )
+                .unwrap();
+        }
+        let first_id = accounts.require("first").unwrap().id;
+        let second_id = accounts.require("second").unwrap().id;
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let calls = refreshes.clone();
+        let server = test_http::spawn_mock_server("antigravity oauth mock ready", move |request| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let name = if request.contains("refresh_token=refresh-first") {
+                "first"
+            } else {
+                "second"
+            };
+            test_http::json_response(
+                200,
+                &format!(
+                    r#"{{"access_token":"rotated-{name}","refresh_token":"new-refresh-{name}","expires_in":3600}}"#
+                ),
+            )
+        });
+        let endpoint = server.url.clone();
+        let blocking_store = accounts.store(&first_id);
+        let blocking = tokio::task::spawn_blocking(move || {
+            ensure_valid_auth_blocking(&blocking_store, &endpoint)
+        });
+        let (runtime_auth, blocking_auth) = tokio::join!(
+            load_valid_auth_from_store(accounts.store(&first_id), server.url.clone()),
+            blocking,
+        );
+        let runtime_auth = runtime_auth.unwrap();
+        assert_eq!(runtime_auth, blocking_auth.unwrap().unwrap());
+        assert_eq!(runtime_auth.access, "rotated-first");
+        assert_eq!(runtime_auth.project_id, "project-first");
+        assert_eq!(runtime_auth.email.as_deref(), Some("first@example.com"));
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            accounts
+                .store::<StoredAntigravityAuth>(&second_id)
+                .load()
+                .unwrap()
+                .unwrap()
+                .refresh,
+            "refresh-second"
+        );
+
+        let other = load_valid_auth_from_store(accounts.store(&second_id), server.url.clone())
+            .await
+            .unwrap();
+        assert_eq!(other.access, "rotated-second");
+        assert_eq!(other.project_id, "project-second");
+        assert_eq!(
+            accounts
+                .store::<StoredAntigravityAuth>(&first_id)
+                .load()
+                .unwrap()
+                .unwrap(),
+            runtime_auth
+        );
+        assert_eq!(refreshes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_late_refresh_cannot_overwrite_a_new_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = Accounts::in_dir("antigravity", dir.path().join("antigravity"));
+        accounts
+            .install(
+                "main",
+                None,
+                &serde_json::to_value(stored_auth("first")).unwrap(),
+                None,
+            )
+            .unwrap();
+        let id = accounts.require("main").unwrap().id;
+        let store = accounts.store(&id);
+        let server_accounts = accounts.clone();
+        let server = test_http::spawn_mock_server("antigravity oauth mock ready", move |_| {
+            let replacement = StoredAntigravityAuth {
+                expires: u64::MAX,
+                ..stored_auth("replacement")
+            };
+            server_accounts
+                .install(
+                    "main",
+                    Some(&id),
+                    &serde_json::to_value(replacement).unwrap(),
+                    None,
+                )
+                .unwrap();
+            test_http::json_response(
+                200,
+                r#"{"access_token":"too-late","refresh_token":"too-late-refresh","expires_in":3600}"#,
+            )
+        });
+        let error = load_valid_auth_from_store(store, server.url.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Api);
+        assert!(error.message.contains("signed out or replaced"));
+        let current = accounts.require("main").unwrap();
+        assert_eq!(
+            accounts
+                .store::<StoredAntigravityAuth>(&current.id)
+                .load()
+                .unwrap()
+                .unwrap()
+                .access,
+            "access-replacement"
+        );
+    }
+
+    #[test]
+    fn invalid_refresh_responses_leave_the_saved_login_unchanged() {
+        let store = InMemoryAuthStore::new();
+        let auth = stored_auth("first");
+        store.save(auth.clone()).unwrap();
+        for payload in [json!({}), json!({"access_token": "new", "expires_in": 0})] {
+            assert!(save_refreshed_auth(&store, auth.clone(), &payload).is_err());
+            assert_eq!(store.load().unwrap(), Some(auth.clone()));
+        }
+    }
 
     #[test]
     fn parse_and_collapse_available_models_matches_cca_response() {
