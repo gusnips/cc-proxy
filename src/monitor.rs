@@ -89,6 +89,10 @@ pub enum MonitorEvent {
         model: String,
         effort: Option<String>,
     },
+    AccountSelected {
+        request_id: String,
+        account: String,
+    },
     ModelResolved {
         request_id: String,
         model: String,
@@ -142,6 +146,7 @@ pub struct ActiveRequest {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    pub account: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub endpoint: EndpointKind,
@@ -184,6 +189,7 @@ pub struct CompletedRequest {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    pub account: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub endpoint: EndpointKind,
@@ -257,6 +263,7 @@ pub struct SessionSummary {
     pub request_count: usize,
     pub failure_count: usize,
     pub provider: Option<String>,
+    pub account: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub last_seen: SystemTime,
@@ -404,6 +411,13 @@ impl MonitorHandle {
         });
     }
 
+    pub fn account_selected(&self, request_id: impl Into<String>, account: impl Into<String>) {
+        self.publish(MonitorEvent::AccountSelected {
+            request_id: request_id.into(),
+            account: account.into(),
+        });
+    }
+
     pub fn model_resolved(&self, request_id: impl Into<String>, model: impl Into<String>) {
         self.publish(MonitorEvent::ModelResolved {
             request_id: request_id.into(),
@@ -519,6 +533,7 @@ impl MonitorStore {
                         session_seq,
                         project: None,
                         provider: None,
+                        account: None,
                         model: None,
                         effort: None,
                         endpoint,
@@ -566,6 +581,14 @@ impl MonitorStore {
                     active.model = Some(model);
                     active.effort = effort;
                     active.status = RequestStatus::ProviderSelected;
+                }
+            }
+            MonitorEvent::AccountSelected {
+                request_id,
+                account,
+            } => {
+                if let Some(active) = self.active.get_mut(&request_id) {
+                    active.account = Some(account);
                 }
             }
             MonitorEvent::ModelResolved { request_id, model } => {
@@ -791,6 +814,7 @@ impl MonitorStore {
                 session_seq: None,
                 project: None,
                 provider: None,
+                account: None,
                 model: None,
                 effort: None,
                 endpoint: EndpointKind::Messages,
@@ -824,6 +848,7 @@ impl MonitorStore {
             session_seq: active.session_seq,
             project: active.project,
             provider: active.provider,
+            account: active.account,
             model: active.model,
             effort: active.effort,
             endpoint: active.endpoint,
@@ -954,6 +979,7 @@ fn session_summaries(
                 request_count: 0,
                 failure_count: 0,
                 provider: None,
+                account: None,
                 model: None,
                 effort: None,
                 last_seen: request.finished_at,
@@ -970,6 +996,7 @@ fn session_summaries(
         }
         entry.project = request.project.clone().or(entry.project.clone());
         entry.provider = request.provider.clone().or(entry.provider.clone());
+        entry.account = request.account.clone();
         entry.model = request.model.clone().or(entry.model.clone());
         entry.effort = request.effort.clone().or(entry.effort.clone());
         entry.last_seen = max_system_time(entry.last_seen, request.finished_at);
@@ -998,6 +1025,7 @@ fn session_summaries(
                 request_count: 0,
                 failure_count: 0,
                 provider: None,
+                account: None,
                 model: None,
                 effort: None,
                 last_seen: request.started_at,
@@ -1012,6 +1040,7 @@ fn session_summaries(
         entry.request_count += 1;
         entry.project = request.project.clone().or(entry.project.clone());
         entry.provider = request.provider.clone().or(entry.provider.clone());
+        entry.account = request.account.clone();
         entry.model = request.model.clone().or(entry.model.clone());
         entry.effort = request.effort.clone().or(entry.effort.clone());
         entry.last_seen = max_system_time(entry.last_seen, request.started_at);
@@ -1380,6 +1409,7 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
             session_seq: None,
             project: None,
             provider: Some("codex".to_string()),
+            account: None,
             model: Some("gpt-5.6-sol".to_string()),
             effort: None,
             endpoint: EndpointKind::Messages,

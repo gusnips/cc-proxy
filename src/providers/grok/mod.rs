@@ -78,7 +78,10 @@ impl Provider for GrokProvider {
     fn cli(&self) -> &dyn CliHandlers {
         &GROK_CLI
     }
-    async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
+    async fn handle_messages(&self, body: MessagesRequest, mut ctx: RequestContext) -> Response {
+        if let Err(error) = ctx.pin_account(&GROK_CLI) {
+            return error.response();
+        }
         let requested = body.model.clone().unwrap_or_else(|| "grok-4.5".into());
         let resolved = resolve_model(&requested);
         if let Err(error) = assert_routable_model(&resolved) {
@@ -201,8 +204,9 @@ impl Provider for GrokProvider {
     async fn generate_anthropic_stream(
         &self,
         mut body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<Generation, ProviderError> {
+        ctx.pin_account(&GROK_CLI)?;
         body.stream = true;
         let requested = body.model.clone().unwrap_or_else(|| "grok-4.5".into());
         let resolved = resolve_model(&requested);

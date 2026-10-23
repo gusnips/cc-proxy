@@ -300,3 +300,48 @@ pub struct RequestContext {
     pub traffic: Option<Arc<TrafficCapture>>,
     pub monitor: Option<MonitorHandle>,
 }
+
+impl RequestContext {
+    pub(crate) fn select_account(&mut self, account: &crate::accounts::Account) {
+        self.account = Some(account.id.clone());
+        if let Some(monitor) = &self.monitor {
+            monitor.account_selected(&self.req_id, &account.name);
+        }
+        crate::logging::create_logger("auth").info(
+            "account_selected",
+            Some(serde_json::Map::from_iter([
+                ("reqId".into(), serde_json::json!(&self.req_id)),
+                ("provider".into(), serde_json::json!(&self.provider)),
+                ("account".into(), serde_json::json!(&account.name)),
+            ])),
+        );
+    }
+
+    pub(crate) fn pin_account(
+        &mut self,
+        support: &dyn crate::accounts::AccountSupport,
+    ) -> Result<(), ProviderError> {
+        if support.pinned_credentials().is_some() {
+            return Ok(());
+        }
+        let select = || -> anyhow::Result<_> {
+            let accounts = crate::accounts::Accounts::open(&self.provider, support)?;
+            match &self.account {
+                Some(id) => accounts.list()?.into_iter().find(|account| &account.id == id)
+                    .map(Some).ok_or_else(|| anyhow::anyhow!("The saved login was removed or replaced. Retry to use the current account.")),
+                None => accounts.current(),
+            }
+        };
+        let account = select().map_err(|error| {
+            ProviderError::new(
+                StatusCode::UNAUTHORIZED,
+                ProviderErrorKind::Authentication,
+                format!("Can't select a saved {} login: {error:#}", self.provider),
+            )
+        })?;
+        if let Some(account) = account {
+            self.select_account(&account);
+        }
+        Ok(())
+    }
+}

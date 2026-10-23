@@ -230,6 +230,13 @@ fn run_monitor_events(
                     KeyCode::Char('?') => app.show_help = !app.show_help,
                     KeyCode::Char('b') => app.show_setup = !app.show_setup,
                     KeyCode::Char('p') => app.show_providers = !app.show_providers,
+                    KeyCode::Down | KeyCode::Char('j') if app.show_providers => {
+                        app.providers.scroll(true)
+                    }
+                    KeyCode::Up | KeyCode::Char('k') if app.show_providers => {
+                        app.providers.scroll(false)
+                    }
+                    KeyCode::Char('r') if app.show_providers => app.providers.retry(),
                     KeyCode::Tab => app.focus = app.focus.next(),
                     KeyCode::Down => app.move_down(state.sessions.len(), state.recent.len(), true),
                     KeyCode::Char('j') => {
@@ -703,8 +710,18 @@ fn text_cell(value: impl Into<String>) -> Cell<'static> {
     Cell::from(Span::styled(value.into(), Style::default().fg(DIM_WHITE)))
 }
 
-fn model_cell(value: Option<&str>, width: usize) -> Cell<'static> {
-    text_cell(ellipsize(value.unwrap_or("-"), width))
+fn model_cell(value: Option<&str>, account: Option<&str>, width: usize) -> Cell<'static> {
+    let model = value.unwrap_or("-");
+    let text = account.map_or_else(
+        || model.to_string(),
+        |account| {
+            format!(
+                "{account} / {}",
+                model.rsplit(" → ").next().unwrap_or(model)
+            )
+        },
+    );
+    text_cell(ellipsize(&text, width))
 }
 
 fn table_column_width(area: Rect, widths: &[Constraint], column: usize) -> usize {
@@ -918,10 +935,19 @@ fn column_header<K>(columns: &[ColumnSpec<K>]) -> Row<'static> {
     )
 }
 
-fn target_cell(provider: Option<&str>, model: Option<&str>, width: usize) -> Cell<'static> {
+fn target_cell(
+    provider: Option<&str>,
+    model: Option<&str>,
+    account: Option<&str>,
+    width: usize,
+) -> Cell<'static> {
     let provider = provider.unwrap_or("-");
     let model = model.unwrap_or("-");
-    text_cell(ellipsize(&format!("{provider}/{model}"), width))
+    let target = account.map_or_else(
+        || format!("{provider}/{model}"),
+        |account| format!("{provider}/{account} / {model}"),
+    );
+    text_cell(ellipsize(&target, width))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1060,10 +1086,15 @@ fn render_sessions(
                         session.active_count, session.request_count, session.failure_count
                     )),
                     SessionColumn::Provider => provider_cell(session.provider.as_deref()),
-                    SessionColumn::Model => model_cell(session.model.as_deref(), width),
-                    SessionColumn::Target => {
-                        target_cell(session.provider.as_deref(), session.model.as_deref(), width)
+                    SessionColumn::Model => {
+                        model_cell(session.model.as_deref(), session.account.as_deref(), width)
                     }
+                    SessionColumn::Target => target_cell(
+                        session.provider.as_deref(),
+                        session.model.as_deref(),
+                        session.account.as_deref(),
+                        width,
+                    ),
                     SessionColumn::Effort => text_cell(session.effort.as_deref().unwrap_or("-")),
                     SessionColumn::Input => number_cell(compact_tokens(session.input_tokens)),
                     SessionColumn::Output => number_cell(compact_tokens(session.output_tokens)),
@@ -1208,10 +1239,15 @@ fn render_active(
                         text_cell(display_session_id(request.session_id.as_deref()))
                     }
                     ActiveColumn::Provider => provider_cell(request.provider.as_deref()),
-                    ActiveColumn::Model => model_cell(request.model.as_deref(), width),
-                    ActiveColumn::Target => {
-                        target_cell(request.provider.as_deref(), request.model.as_deref(), width)
+                    ActiveColumn::Model => {
+                        model_cell(request.model.as_deref(), request.account.as_deref(), width)
                     }
+                    ActiveColumn::Target => target_cell(
+                        request.provider.as_deref(),
+                        request.model.as_deref(),
+                        request.account.as_deref(),
+                        width,
+                    ),
                     ActiveColumn::Effort => text_cell(request.effort.as_deref().unwrap_or("-")),
                     ActiveColumn::Endpoint => muted_cell(request.endpoint.label()),
                     ActiveColumn::Input => number_cell(token_value(request.input_tokens)),
@@ -1363,10 +1399,15 @@ fn render_recent(
                         text_cell(display_session_id(request.session_id.as_deref()))
                     }
                     RecentColumn::Provider => provider_cell(request.provider.as_deref()),
-                    RecentColumn::Model => model_cell(request.model.as_deref(), width),
-                    RecentColumn::Target => {
-                        target_cell(request.provider.as_deref(), request.model.as_deref(), width)
+                    RecentColumn::Model => {
+                        model_cell(request.model.as_deref(), request.account.as_deref(), width)
                     }
+                    RecentColumn::Target => target_cell(
+                        request.provider.as_deref(),
+                        request.model.as_deref(),
+                        request.account.as_deref(),
+                        width,
+                    ),
                     RecentColumn::Effort => text_cell(request.effort.as_deref().unwrap_or("-")),
                     RecentColumn::Endpoint => muted_cell(request.endpoint.label()),
                     RecentColumn::Latency => number_cell(ui::duration(request.latency)),
@@ -1503,7 +1544,9 @@ fn render_events(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
                         text_cell(display_session_id(request.session_id.as_deref()))
                     }
                     EventColumn::Provider => provider_cell(request.provider.as_deref()),
-                    EventColumn::Model => model_cell(request.model.as_deref(), width),
+                    EventColumn::Model => {
+                        model_cell(request.model.as_deref(), request.account.as_deref(), width)
+                    }
                     EventColumn::Message => detail_cell(message),
                 }
             })
@@ -1534,6 +1577,11 @@ fn render_session_detail(
             ),
             detail_line("failures", session.failure_count.to_string(), RED),
             detail_line("provider", session.provider.as_deref().unwrap_or("-"), TEAL),
+            detail_line(
+                "account",
+                session.account.as_deref().unwrap_or("not reported"),
+                WHITE,
+            ),
             detail_line("model", session.model.as_deref().unwrap_or("-"), DIM_WHITE),
             detail_line("effort", session.effort.as_deref().unwrap_or("-"), YELLOW),
             detail_line(
@@ -1619,6 +1667,11 @@ fn render_request_detail(
                 http_status_color(request.http_status),
             ),
             detail_line("provider", request.provider.as_deref().unwrap_or("-"), TEAL),
+            detail_line(
+                "account",
+                request.account.as_deref().unwrap_or("not reported"),
+                WHITE,
+            ),
             detail_line("model", request.model.as_deref().unwrap_or("-"), DIM_WHITE),
             detail_line("effort", request.effort.as_deref().unwrap_or("-"), YELLOW),
             detail_line("latency", ui::duration(request.latency), DIM_WHITE),
@@ -1641,14 +1694,13 @@ fn render_request_detail(
             ),
         ];
         if let Some(error) = request.error.as_deref().filter(|error| !error.is_empty()) {
-            lines.push(detail_line("detail", error, YELLOW));
+            lines.insert(8, detail_line("detail", error, YELLOW));
         }
         if let Some(path) = &request.traffic_capture_path {
-            lines.push(detail_line(
-                "capture",
-                path.to_string_lossy().into_owned(),
-                DIM_WHITE,
-            ));
+            lines.insert(
+                9,
+                detail_line("capture", path.to_string_lossy().into_owned(), DIM_WHITE),
+            );
         }
         lines
     } else {
@@ -1685,7 +1737,7 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
         ),
         ("?", "help"),
         ("b", "setup"),
-        ("p", "providers"),
+        ("p", "accounts/providers"),
         ("↑↓ j k", "navigate"),
         ("Tab", "pane"),
         ("Enter", "open"),
@@ -1817,7 +1869,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ),
         ("?", "toggle help"),
         ("b", "toggle setup"),
-        ("p", "toggle providers"),
+        ("p", "accounts, usage and reset timers"),
         ("arrows", "navigate rows and panes"),
         ("j / k", "previous / next row"),
         ("Tab", "switch pane"),
@@ -2753,6 +2805,31 @@ mod tests {
             detail_text.contains("upstream unavailable"),
             "{detail_text}"
         );
+    }
+
+    #[test]
+    fn request_account_is_visible_in_rows_and_full_detail() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started(
+            "account-request",
+            Some("s".into()),
+            Some(1),
+            EndpointKind::Messages,
+        );
+        monitor.provider_selected("account-request", "codex", "gpt-5.6-sol", None);
+        monitor.account_selected("account-request", "work");
+        let active: MonitorSnapshot = monitor.snapshot().into();
+        let screen = draw(140, 10, |frame| {
+            render_active(frame, frame.area(), &active.active, 0)
+        });
+        assert!(buffer_text(&screen).contains("work /"));
+        monitor.request_completed("account-request", 200, None, None);
+        let completed: MonitorSnapshot = monitor.snapshot().into();
+        let screen = draw(120, 30, |frame| {
+            render_request_detail(frame, frame.area(), &completed, 0)
+        });
+        let text = buffer_text(&screen);
+        assert!(text.contains("account") && text.contains("work"), "{text}");
     }
 
     #[test]

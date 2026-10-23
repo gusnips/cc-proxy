@@ -51,8 +51,9 @@ impl KimiProvider {
     async fn send(
         &self,
         body: &MessagesRequest,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(reqwest::Response, String), ProviderError> {
+        ctx.pin_account(&KIMI_CLI)?;
         let requested = body.model.as_deref().unwrap_or(KIMI_DEFAULT_MODEL);
         let resolved = resolve_model(requested);
         assert_routable_model(&resolved).map_err(|error| {
@@ -90,9 +91,9 @@ impl KimiProvider {
     async fn buffered_response(
         &self,
         body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<serde_json::Value, ProviderError> {
-        let (response, _) = self.send(&body, &ctx).await?;
+        let (response, _) = self.send(&body, &mut ctx).await?;
         let bytes = response
             .bytes()
             .await
@@ -163,10 +164,10 @@ impl Provider for KimiProvider {
     async fn generate_anthropic_stream(
         &self,
         mut body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<Generation, ProviderError> {
         body.stream = true;
-        let (response, resolved_model) = self.send(&body, &ctx).await?;
+        let (response, resolved_model) = self.send(&body, &mut ctx).await?;
         let model = body.model.unwrap_or_else(|| KIMI_DEFAULT_MODEL.to_string());
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
         Ok(Generation {

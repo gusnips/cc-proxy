@@ -877,8 +877,14 @@ impl CodexClients {
                     .map_or_else(|| "missing".to_string(), |account| account.id),
             );
         }
-        let id = ctx.account.as_ref().expect("account was pinned");
         let saved = accounts.list().map_err(auth_error)?;
+        if let Some(account) = saved
+            .iter()
+            .find(|account| Some(account.id.as_str()) == ctx.account.as_deref())
+        {
+            ctx.select_account(account);
+        }
+        let id = ctx.account.as_ref().expect("account was pinned");
         if id != "missing" && !saved.iter().any(|account| &account.id == id) {
             return Err(auth_error(anyhow::anyhow!(
                 "This Codex account was signed out or replaced. Retry the request to use the current account."

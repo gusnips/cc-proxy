@@ -712,8 +712,11 @@ impl AntigravityProvider {
     async fn buffered_messages_response(
         &self,
         body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Response {
+        if let Err(error) = ctx.pin_account(&ANTIGRAVITY_CLI) {
+            return error.response();
+        }
         let requested = body.model.as_deref().unwrap_or_default();
         let wire_model = match resolve_wire_model(&body) {
             Ok(model) => model,
@@ -832,8 +835,9 @@ impl Provider for AntigravityProvider {
     async fn generate_anthropic_stream(
         &self,
         mut body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<Generation, ProviderError> {
+        ctx.pin_account(&ANTIGRAVITY_CLI)?;
         body.stream = true;
         let requested = body.model.as_deref().unwrap_or_default();
         let wire_model = resolve_wire_model(&body)?;
