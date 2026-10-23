@@ -429,7 +429,7 @@ fn tty_pick(
 }
 
 /// The options that hold every word of `query`, in any case, in list order.
-fn matching(options: &[String], query: &str) -> Vec<usize> {
+pub(crate) fn matching(options: &[String], query: &str) -> Vec<usize> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     options
         .iter()

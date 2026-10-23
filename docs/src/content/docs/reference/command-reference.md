@@ -217,6 +217,7 @@ stored key. When nothing of ours is set, the proxy falls back to
 ## Configuration values
 
 ```sh
+cc-proxy config
 cc-proxy config get <key>
 cc-proxy config set <key> <value>
 cc-proxy config list
@@ -226,10 +227,54 @@ cc-proxy config edit
 Reads and writes config.json through dotted keys (`port`,
 `opencode.apiKey`, `codex.fullLane`). `get` prints one value, `set`
 validates and writes one, `list` shows every known key, and `edit` opens
-the file in `$VISUAL` or `$EDITOR`. Reads show the file value; when an
+the file in your editor. Reads show the file value; when an
 environment variable overrides a key at runtime, the commands say so.
 Secret keys only ever report set or unset, never their value. Restart the
-service after changing bind settings.
+service after changing `port` or `bindAddress`.
+
+### The settings screen
+
+In a terminal, `cc-proxy config` with no subcommand lists every setting:
+
+| Key                  | What it does                                                         |
+| -------------------- | -------------------------------------------------------------------- |
+| Up, Down             | Move through the list. It wraps at the ends.                         |
+| Left, Right          | Step a yes/no or a fixed choice back or forward, and save it.        |
+| Enter                | On a yes/no or a choice, step forward. On text or a number, type it. |
+| Any letter or number | Search by name or description. Backspace edits the search.           |
+| Esc                  | Clear the search, then close. In a field, drop what you typed.       |
+| Ctrl-C               | Close.                                                               |
+
+Every change saves as soon as you make it, exactly as `config set` would, so
+there is nothing to confirm and nothing to undo when you close the screen. The
+line under the list says what was saved, whether an environment variable still
+wins, and whether the running proxy needs `cc-proxy restart`. A key is hidden
+while you type it and never shown again.
+
+The `providers` and `config.json` rows open the file in your editor, on the
+line of the `providers` key. When the editor closes, the screen reads the file
+again.
+
+Run in a pipe or a script, `cc-proxy config` prints the same list as
+`cc-proxy config list` and never waits for input.
+
+### Your editor
+
+`edit` and the editor rows use `$VISUAL`, or `$EDITOR` when that is empty. The
+variable can hold arguments and quotes, such as `code --wait` or
+`"/Applications/Sublime Text.app/subl" -w`. It never goes through a shell, so
+`$HOME` and `|` reach the editor as plain text. vim, nvim, nano, emacs, VS Code,
+Cursor, Windsurf and VSCodium start on the right line. Any other editor opens
+at the top. An editor that returns before you close the file (most graphical
+ones) needs its wait flag, such as `-w`. cc-proxy adds `--wait` for the VS Code
+family itself.
+
+### A file cc-proxy can't read
+
+If config.json isn't valid JSON, can't be read, or a key you change sits inside
+a value that isn't an object (`"log": "x"` when you set `log.verbose`), cc-proxy
+stops and names the file or the key. It never replaces a file it can't read
+with a new one. Fix it with `cc-proxy config edit`, then try again.
 
 ## Updating
 

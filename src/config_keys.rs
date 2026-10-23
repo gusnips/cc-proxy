@@ -1,9 +1,13 @@
 //! `cc-proxy config get/set/list/edit`: inspect and change config.json
-//! through dotted keys (`port`, `opencode.apiKey`, `codex.fullLane`).
+//! through dotted keys (`port`, `opencode.apiKey`, `codex.fullLane`). With no
+//! subcommand, `cc-proxy config` opens the same keys as a screen (`interactive`).
 //!
 //! Reads show the FILE value — the thing `set` manages. When an environment
 //! variable overrides a key at runtime, get/list say so instead of
 //! pretending the file wins. Secret keys never print their value.
+
+mod editor;
+mod interactive;
 
 use anyhow::{Context, Result};
 
@@ -34,6 +38,26 @@ struct ConfigKey {
     env: &'static [&'static str],
     default: Option<&'static str>,
     blurb: &'static str,
+}
+
+impl ConfigKey {
+    /// The fixed values left and right step through, for a key that has them.
+    /// These only offer values: `parse_value` still decides what is accepted.
+    fn choices(&self) -> Option<&'static [&'static str]> {
+        match self.kind {
+            ConfigKind::Bool => Some(&["true", "false"]),
+            ConfigKind::AutoReviewEffort => {
+                Some(&["off", "none", "low", "medium", "high", "xhigh", "max"])
+            }
+            ConfigKind::ServiceTier => Some(&["fast", "priority", "ultrafast", "flex"]),
+            ConfigKind::Str | ConfigKind::Port | ConfigKind::Secret => None,
+        }
+    }
+
+    /// Read once at startup, so a running proxy keeps the old value until it restarts.
+    fn needs_restart(&self) -> bool {
+        matches!(self.path, "port" | "bindAddress")
+    }
 }
 
 static CONFIG_KEYS: &[ConfigKey] = &[
@@ -455,54 +479,55 @@ pub(crate) fn write_values<'a>(
     config::write_config_json_at(&paths::config_dir(), &root)
 }
 
+/// What a save did, for `config set` and the settings screen to word their own way.
+struct Applied {
+    path: std::path::PathBuf,
+    /// The environment variable that still wins over the file at runtime.
+    overridden_by: Option<&'static str>,
+    restart: bool,
+}
+
+/// Check `raw` for `key` and write it to config.json.
+fn apply(key: &ConfigKey, raw: &str) -> Result<Applied> {
+    let value = parse_value(key, raw)?;
+    Ok(Applied {
+        path: write_value(key.path, value)?,
+        overridden_by: env_override(key).map(|(name, _)| name),
+        restart: key.needs_restart(),
+    })
+}
+
 pub fn run_config_set(name: &str, raw: &str) -> Result<()> {
     let key = find_key(name)?;
-    let value = parse_value(key, raw)?;
-    let path = write_value(key.path, value)?;
+    let applied = apply(key, raw)?;
     let saved = if key.kind == ConfigKind::Secret {
         format!("{} saved", key.path)
     } else {
         format!("{} = {}", key.path, raw.trim())
     };
-    let mut lines = vec![saved, format!("Written to {}", path.display())];
-    if let Some(name) = key
-        .env
-        .iter()
-        .find(|name| std::env::var(name).is_ok_and(|v| !v.is_empty()))
-    {
+    let mut lines = vec![saved, format!("Written to {}", applied.path.display())];
+    if let Some(name) = applied.overridden_by {
         lines.push(format!("${name} is set and wins at runtime."));
     }
-    if key.path == "port" {
-        lines.push("Run `cc-proxy restart` to move the running proxy to the new port.".into());
+    if applied.restart {
+        lines.push("Run `cc-proxy restart` to apply it to the running proxy.".into());
     }
     ui::print_note(Mood::Glad, &lines);
     Ok(())
 }
 
 pub fn run_config_edit() -> Result<()> {
-    let dir = paths::config_dir();
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("config.json");
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .context("set $VISUAL or $EDITOR to choose an editor")?;
-    let status = std::process::Command::new(&editor)
-        .arg(&path)
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .with_context(|| format!("failed to launch editor `{editor}`"))?;
-    if !status.success() {
-        anyhow::bail!("editor exited with {status}");
+    editor::open(None)
+}
+
+/// `cc-proxy config` with no subcommand: the settings screen in a terminal,
+/// the list of settings anywhere else.
+pub fn run_config_screen() -> Result<()> {
+    if crate::prompt::is_interactive() {
+        interactive::run()
+    } else {
+        run_config_list()
     }
-    // Validate on close so a typo does not silently break the next start.
-    let raw = std::fs::read_to_string(&path).unwrap_or_default();
-    if !raw.trim().is_empty() {
-        serde_json::from_str::<serde_json::Value>(&raw)
-            .with_context(|| format!("{} is not valid JSON after editing", path.display()))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -596,6 +621,38 @@ mod tests {
         for value in ["", "bogus", "LOW"] {
             assert!(parse_value(key, value).is_err());
         }
+    }
+
+    #[test]
+    fn every_choice_is_accepted_by_its_own_validator() {
+        for key in CONFIG_KEYS {
+            for choice in key.choices().into_iter().flatten() {
+                assert_eq!(
+                    parse_value(key, choice).unwrap_or_else(|error| panic!(
+                        "{} rejects its own choice `{choice}`: {error}",
+                        key.path
+                    )),
+                    match key.kind {
+                        ConfigKind::Bool => serde_json::json!(*choice == "true"),
+                        _ => serde_json::json!(choice),
+                    },
+                    "{}",
+                    key.path
+                );
+            }
+        }
+        assert!(find_key("port").unwrap().choices().is_none());
+        assert!(find_key("opencode.apiKey").unwrap().choices().is_none());
+    }
+
+    #[test]
+    fn only_startup_settings_ask_for_a_restart() {
+        let restart: Vec<_> = CONFIG_KEYS
+            .iter()
+            .filter(|key| key.needs_restart())
+            .map(|key| key.path)
+            .collect();
+        assert_eq!(restart, ["port", "bindAddress"]);
     }
 
     #[test]

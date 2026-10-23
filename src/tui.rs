@@ -431,7 +431,7 @@ impl Drop for MonitorApp {
     }
 }
 
-struct TerminalGuard;
+pub(crate) struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
@@ -440,7 +440,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, anyhow::Error> {
+pub(crate) fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, anyhow::Error> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(io::stdout());

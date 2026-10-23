@@ -95,10 +95,10 @@ enum Commands {
         #[command(subcommand)]
         command: Option<ServiceCommand>,
     },
-    /// View or change config.json values
+    /// View or change config.json values. With no subcommand, opens a settings screen
     Config {
         #[command(subcommand)]
-        command: ConfigCommand,
+        command: Option<ConfigCommand>,
     },
     /// Update the installed binary to the latest release
     Update {
@@ -359,14 +359,19 @@ fn run() -> Result<()> {
             }
         }
         Commands::Config { command } => match command {
-            ConfigCommand::Get { key } => cc_proxy::config_keys::run_config_get(&key),
-            ConfigCommand::Set { key, value } => {
+            None => {
+                cc_proxy::config_keys::run_config_screen()?;
+                route::refresh_model_labels();
+                Ok(())
+            }
+            Some(ConfigCommand::Get { key }) => cc_proxy::config_keys::run_config_get(&key),
+            Some(ConfigCommand::Set { key, value }) => {
                 cc_proxy::config_keys::run_config_set(&key, &value)?;
                 route::refresh_model_labels();
                 Ok(())
             }
-            ConfigCommand::List => cc_proxy::config_keys::run_config_list(),
-            ConfigCommand::Edit => {
+            Some(ConfigCommand::List) => cc_proxy::config_keys::run_config_list(),
+            Some(ConfigCommand::Edit) => {
                 cc_proxy::config_keys::run_config_edit()?;
                 route::refresh_model_labels();
                 Ok(())

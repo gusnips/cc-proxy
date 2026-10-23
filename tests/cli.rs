@@ -380,6 +380,55 @@ fn config_edit_uses_editor() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn config_edit_runs_an_editor_that_has_arguments_and_a_path_with_spaces()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new()?;
+    let editors = temp.path().join("my editors");
+    std::fs::create_dir_all(&editors)?;
+    let seen = temp.path().join("seen.txt");
+    let editor = editors.join("ed.sh");
+    std::fs::write(
+        &editor,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", seen.display()),
+    )?;
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))?;
+
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    isolated_opencode_env(&mut cmd, &temp);
+    cmd.env("VISUAL", "").env(
+        "EDITOR",
+        format!("\"{}\" -w --name 'a b'", editor.display()),
+    );
+    cmd.args(["config", "edit"]).assert().success();
+
+    let config = temp.path().join("config").join("config.json");
+    assert_eq!(
+        std::fs::read_to_string(seen)?.lines().collect::<Vec<_>>(),
+        ["-w", "--name", "a b", config.to_str().unwrap()]
+    );
+    Ok(())
+}
+
+#[test]
+fn bare_config_prints_the_settings_list_when_it_is_not_a_terminal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    isolated_opencode_env(&mut cmd, &temp);
+    cmd.arg("config")
+        .write_stdin("")
+        .assert()
+        .success()
+        .stdout(contains("port = (default 18765)"))
+        .stdout(contains("codex.fullLane"))
+        .stdout(contains("\x1b").not());
+    Ok(())
+}
+
 #[test]
 fn update_check_with_pinned_version_is_offline() -> Result<(), Box<dyn std::error::Error>> {
     let current = format!("v{}", env!("CARGO_PKG_VERSION"));
