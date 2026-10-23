@@ -542,6 +542,7 @@ fn clean_json_schema(value: &Value) -> Value {
 }
 
 pub fn accumulate_response(
+    provider: &str,
     bytes: &[u8],
     message_id: &str,
     requested_model: &str,
@@ -575,6 +576,9 @@ pub fn accumulate_response(
 
     for chunk in &chunks {
         let root = chunk.get("response").unwrap_or(chunk);
+        if let Some(error) = root.get("error").filter(|error| !error.is_null()) {
+            return Err(crate::providers::upstream_error::from_stream(error, provider).into());
+        }
         if let Some(usage) = root.get("usageMetadata") {
             if let Some(inp) = usage.get("promptTokenCount").and_then(Value::as_u64) {
                 input_tokens = inp;
@@ -763,6 +767,9 @@ where
                             capture.upstream_event(event.event.as_deref(), &frame);
                         }
                         self.translate_frame(&frame, &mut out);
+                        if self.terminal {
+                            return Some(Bytes::from(out));
+                        }
                     }
                     if !out.is_empty() {
                         return Some(Bytes::from(out));
@@ -867,6 +874,12 @@ where
 
     fn translate_frame(&mut self, frame: &Value, out: &mut Vec<u8>) {
         let root = frame.get("response").unwrap_or(frame);
+        if let Some(error) = root.get("error").filter(|error| !error.is_null()) {
+            let failure = crate::providers::upstream_error::from_stream(error, self.provider_name);
+            out.extend(stream_error(failure.error_type(), &failure.message));
+            self.terminal = true;
+            return;
+        }
         if let Some(usage) = root.get("usageMetadata") {
             if let Some(inp) = usage.get("promptTokenCount").and_then(Value::as_u64) {
                 self.input_tokens = inp;
@@ -1025,6 +1038,36 @@ where
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn google_errors_never_become_empty_successful_answers() {
+        use http_body_util::BodyExt;
+        let error =
+            json!({"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"slow down"}});
+        let buffered = accumulate_response(
+            "Gemini",
+            &serde_json::to_vec(&error).unwrap(),
+            "msg",
+            "gemini",
+        )
+        .unwrap_err();
+        let failure = crate::providers::upstream_error::carried(&buffered).unwrap();
+        assert_eq!(failure.status, http::StatusCode::TOO_MANY_REQUESTS);
+        let input =
+            futures_util::stream::iter([Ok::<_, ()>(Bytes::from(format!("data: {error}\n\n")))]);
+        let body = stream_body(
+            input,
+            "Gemini",
+            "msg".into(),
+            "gemini".into(),
+            None,
+            "test".into(),
+            None,
+        );
+        let output = String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap();
+        assert!(output.contains("rate_limit_error") && output.contains("slow down"));
+        assert!(!output.contains("message_stop"));
+    }
+
     #[test]
     fn prepares_google_v1beta_request_and_accumulates_response() {
         let req: MessagesRequest = serde_json::from_value(json!({
@@ -1076,7 +1119,7 @@ mod tests {
             "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 5}
         }))
         .unwrap();
-        let acc = accumulate_response(&upstream, "msg_1", "gemini-4-argon").unwrap();
+        let acc = accumulate_response("Gemini", &upstream, "msg_1", "gemini-4-argon").unwrap();
         assert_eq!(acc["stop_reason"], "tool_use");
         assert_eq!(acc["usage"]["input_tokens"], 12);
         assert_eq!(acc["usage"]["output_tokens"], 5);

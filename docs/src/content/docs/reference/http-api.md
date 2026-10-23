@@ -163,7 +163,12 @@ curl http://127.0.0.1:18765/v1/responses \
   -d '{"model":"grok-4.5","input":"Hello"}'
 ```
 
-Codex models use native Responses passthrough, including native JSON and SSE output. For Kimi, Grok, OpenCode Go, and Cursor, the route accepts:
+Codex models return native JSON or SSE output. Native requests must send full
+text and tool history. Encrypted content, item references, `conversation` and
+`previous_response_id` are rejected because they do not identify the saved login
+that created them. There is no automatic account rotation on this route.
+
+For Kimi, Grok, OpenCode Go and Cursor, the route accepts:
 
 - string input or message items
 - `instructions`

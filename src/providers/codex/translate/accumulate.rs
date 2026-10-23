@@ -13,7 +13,7 @@ pub fn accumulate_response(
     message_id: &str,
     model: &str,
 ) -> Result<Value, anyhow::Error> {
-    accumulate_response_with_traffic(upstream, message_id, model, None)
+    accumulate_response_with_traffic(upstream, message_id, model, None, None)
 }
 
 pub fn accumulate_response_with_traffic(
@@ -21,8 +21,9 @@ pub fn accumulate_response_with_traffic(
     message_id: &str,
     model: &str,
     traffic: Option<&TrafficCapture>,
+    account: Option<&str>,
 ) -> Result<Value, anyhow::Error> {
-    let events = match reduce_upstream_bytes(upstream) {
+    let events = match reduce_upstream_bytes(upstream, account) {
         Ok(events) => events,
         Err(err) => {
             write_reducer_error_capture(traffic, &err);
@@ -308,7 +309,14 @@ mod tests {
                 })
             ),
         );
-        let response = accumulate_response(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap();
+        let response = accumulate_response_with_traffic(
+            upstream.as_bytes(),
+            "msg_1",
+            "gpt-5.5",
+            None,
+            Some("account-a"),
+        )
+        .unwrap();
         assert_eq!(response["type"], "message");
         assert_eq!(response["content"][0]["type"], "text");
         assert_eq!(response["content"][0]["text"], "Hello world");
@@ -346,7 +354,14 @@ mod tests {
                 })
             ),
         );
-        let response = accumulate_response(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap();
+        let response = accumulate_response_with_traffic(
+            upstream.as_bytes(),
+            "msg_1",
+            "gpt-5.5",
+            None,
+            Some("account-a"),
+        )
+        .unwrap();
         assert_eq!(response["content"][0]["type"], "tool_use");
         assert_eq!(response["content"][0]["input"]["file_path"], "/tmp/a");
     }
@@ -407,7 +422,14 @@ mod tests {
                 })
             ),
         );
-        let response = accumulate_response(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap();
+        let response = accumulate_response_with_traffic(
+            upstream.as_bytes(),
+            "msg_1",
+            "gpt-5.5",
+            None,
+            Some("account-a"),
+        )
+        .unwrap();
         let content = response["content"].as_array().unwrap();
         assert!(content.len() >= 3);
         // First should be server_tool_use
@@ -479,7 +501,14 @@ mod tests {
                 )
             ),
         );
-        let response = accumulate_response(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap();
+        let response = accumulate_response_with_traffic(
+            upstream.as_bytes(),
+            "msg_1",
+            "gpt-5.5",
+            None,
+            Some("account-a"),
+        )
+        .unwrap();
         let content = response["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "thinking");
         assert_eq!(content[0]["thinking"], "part one\n\npart two");
@@ -532,7 +561,14 @@ mod tests {
                 })
             ),
         );
-        let response = accumulate_response(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap();
+        let response = accumulate_response_with_traffic(
+            upstream.as_bytes(),
+            "msg_1",
+            "gpt-5.5",
+            None,
+            Some("account-a"),
+        )
+        .unwrap();
         let content = response["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
@@ -569,7 +605,14 @@ mod tests {
                 json!({"response":{"id":"resp_1","usage":{}}})
             ),
         );
-        let response = accumulate_response(upstream.as_bytes(), "msg_1", "gpt-5.5").unwrap();
+        let response = accumulate_response_with_traffic(
+            upstream.as_bytes(),
+            "msg_1",
+            "gpt-5.5",
+            None,
+            Some("account-a"),
+        )
+        .unwrap();
         let content = response["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "thinking");
@@ -578,7 +621,7 @@ mod tests {
             content[0]["signature"]
                 .as_str()
                 .unwrap()
-                .starts_with("ccp:codex:v1:")
+                .starts_with("ccp:codex:v2:account-a:")
         );
     }
 }

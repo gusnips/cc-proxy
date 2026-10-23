@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use http::StatusCode;
 
 use super::auth::manager::GrokAuthManager;
-use super::auth::token_store::{StoredAuth, file_store};
+use super::auth::token_store::for_request;
 use super::translate::request::GrokResponsesRequest;
 use crate::traffic::TrafficCapture;
 
@@ -14,7 +14,6 @@ const MAX_BUFFERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct GrokClient {
     client: Arc<reqwest::Client>,
-    auth: Arc<GrokAuthManager<crate::auth::FileAuthStore<StoredAuth>>>,
     url: String,
     client_version: String,
 }
@@ -81,32 +80,17 @@ impl GrokClient {
                 .http2_keep_alive_while_idle(true)
                 .build()?,
         );
-        let auth = Arc::new(GrokAuthManager::new(file_store())?);
-        Ok(Self::with_shared(
-            url_for(base_url)?,
-            client_version,
+        Ok(Self {
             client,
-            auth,
-        ))
-    }
-
-    fn with_shared(
-        url: String,
-        client_version: String,
-        client: Arc<reqwest::Client>,
-        auth: Arc<GrokAuthManager<crate::auth::FileAuthStore<StoredAuth>>>,
-    ) -> Self {
-        Self {
-            client,
-            auth,
-            url,
+            url: url_for(base_url)?,
             client_version,
-        }
+        })
     }
 
     pub async fn post(
         &self,
         body: &GrokResponsesRequest,
+        account: Option<&str>,
         traffic: Option<Arc<TrafficCapture>>,
     ) -> Result<GrokResponse, GrokError> {
         if let Some(capture) = traffic.as_ref() {
@@ -118,7 +102,9 @@ impl GrokClient {
                 "body_bytes": serde_json::to_vec(body).map(|v| v.len()).unwrap_or(0),
             }));
         }
-        let auth = match self.auth.get_auth().await {
+        let manager =
+            GrokAuthManager::new(for_request(account).map_err(auth_error)?).map_err(auth_error)?;
+        let auth = match manager.get_auth().await {
             Ok(auth) => auth,
             Err(error) => {
                 capture_failure(traffic.as_deref(), "auth", "authentication", 0);
@@ -129,14 +115,10 @@ impl GrokClient {
             .attempt(&auth.access, body, 1, traffic.as_deref())
             .await?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            let refreshed = self
-                .auth
-                .force_refresh(&auth.access)
-                .await
-                .map_err(|error| {
-                    capture_failure(traffic.as_deref(), "auth", "refresh", 1);
-                    auth_error(error)
-                })?;
+            let refreshed = manager.force_refresh(&auth.access).await.map_err(|error| {
+                capture_failure(traffic.as_deref(), "auth", "refresh", 1);
+                auth_error(error)
+            })?;
             let replay = self
                 .attempt(&refreshed.access, body, 2, traffic.as_deref())
                 .await?;

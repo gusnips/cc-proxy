@@ -83,6 +83,7 @@ fn mock_state_for_tick(
     );
     streaming.project = Some("cc-proxy".to_string());
     streaming.provider = Some("codex".to_string());
+    streaming.account = Some("work".into());
     streaming.model = Some("claude-sonnet-4-6 → gpt-5.6-sol".to_string());
     streaming.effort = Some("high".to_string());
     streaming.generation_started_at = Some(now - Duration::from_secs(10));
@@ -190,6 +191,7 @@ fn mock_state_for_tick(
     );
     success.project = Some("cc-proxy".to_string());
     success.provider = Some("codex".to_string());
+    success.account = Some("home".into());
     success.model = Some("claude-sonnet-4-6 → gpt-5.6-terra".to_string());
     success.effort = Some("xhigh".to_string());
     success.generation_duration = Some(Duration::from_secs(4));
@@ -662,6 +664,7 @@ fn active_request(
         session_seq,
         project: None,
         provider: None,
+        account: None,
         model: None,
         effort: None,
         endpoint,
@@ -701,6 +704,7 @@ fn completed_request(
         session_seq,
         project: None,
         provider: None,
+        account: None,
         model: None,
         effort: None,
         endpoint,

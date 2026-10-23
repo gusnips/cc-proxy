@@ -3,6 +3,34 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.14 (2026-10-23)
+
+- Codex, Kimi, Grok and Antigravity can keep more than one saved login.
+  `cc-proxy auth add codex --name work` saves another account without
+  switching, `cc-proxy auth use codex work` switches when you want, and
+  `cc-proxy login codex --replace` signs the current account in again. Each
+  account has its own credential file, so a refresh for one never rewrites
+  another.
+- `auth.autoRotate` (off by default) lets a request try another saved account
+  when the one in use answers 429 with a provider-stated reset time. Each
+  account is tried once per request, confirmed waits survive a proxy restart,
+  and a stream that already started is never replayed. Antigravity model
+  quotas rotate; short capacity throttles do not.
+- Codex continuation, compaction and reasoning signatures are tied to the
+  saved login that created them. A signature from another account, or history
+  written by an older proxy version, needs a new conversation. Native
+  `/v1/responses` requests that name a conversation or carry encrypted history
+  are rejected because their account cannot be verified.
+- `cc-proxy config` with no subcommand opens a keyboard settings list: Up and
+  Down move, Left and Right change a value, Enter edits one, and a complex
+  setting opens `config.json` at its line. Every change saves at once.
+- `cc-proxy usage codex` and `cc-proxy usage kimi` report every saved account,
+  mark the current one, and keep a failed lookup visible without switching
+  accounts. Grok and Antigravity usage percentages stay unavailable.
+- The monitor shows the saved account used by each request. The local
+  Providers panel lists saved accounts with the current marker, provider
+  usage, reset times and confirmed waits, with scroll and `r` to refresh.
+
 ## v0.2.13 (2026-10-23)
 
 - OpenCode Go and Zen no longer fail the turn when the requested reasoning

@@ -1,5 +1,7 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::accounts::{AccountAuthStore, Accounts};
 use crate::auth::{AuthStorage, KeychainFileAuthStore, SystemKeychain};
 use crate::paths;
 
@@ -46,20 +48,37 @@ impl<S: AuthStorage<StoredAuth>> CodexTokenStore<S> {
     }
 }
 
-pub type DefaultCodexAuthStore = KeychainFileAuthStore<StoredAuth, SystemKeychain>;
+pub type DefaultCodexAuthStore = AccountAuthStore<StoredAuth>;
 
-pub fn file_store() -> CodexTokenStore<DefaultCodexAuthStore> {
+pub fn account_store(id: &str) -> CodexTokenStore<DefaultCodexAuthStore> {
+    CodexTokenStore::new(Accounts::new("codex").store(id))
+}
+
+pub fn current_account() -> Result<Option<crate::accounts::Account>> {
+    Accounts::open("codex", &super::super::CODEX_CLI)?.current()
+}
+
+/// Reads the current account once. Its token manager stays pinned to this ID.
+pub fn file_store() -> Result<CodexTokenStore<DefaultCodexAuthStore>> {
+    let account = current_account()?;
+    Ok(account_store(
+        account.as_ref().map_or("missing", |a| a.id.as_str()),
+    ))
+}
+
+/// Where the one login was kept before accounts. It moves into the first
+/// account the first time accounts are read.
+pub fn single_login_store() -> KeychainFileAuthStore<serde_json::Value, SystemKeychain> {
     let primary = paths::provider_auth_file("codex");
     let legacy = paths::provider_legacy_auth_file("codex");
-    let store = KeychainFileAuthStore::new(
+    KeychainFileAuthStore::new(
         primary.to_string_lossy().to_string(),
         legacy.to_string_lossy().to_string(),
         KEYCHAIN_SERVICE,
         KEYCHAIN_ACCOUNT,
         use_macos_keychain(),
         SystemKeychain,
-    );
-    CodexTokenStore::new(store)
+    )
 }
 
 fn use_macos_keychain() -> bool {

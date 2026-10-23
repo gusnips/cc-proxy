@@ -5,7 +5,6 @@ pub mod translate;
 
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::{
@@ -29,7 +28,6 @@ use crate::provider::{
 use crate::providers::upstream_error;
 use crate::{registry::GROK_MODELS, traffic::StreamTrafficCapture};
 
-use self::auth::token_store::file_store;
 use self::translate::{
     accumulate::accumulate_response_with_traffic,
     model_allowlist::{assert_routable_model, resolve_model},
@@ -80,7 +78,10 @@ impl Provider for GrokProvider {
     fn cli(&self) -> &dyn CliHandlers {
         &GROK_CLI
     }
-    async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
+    async fn handle_messages(&self, body: MessagesRequest, mut ctx: RequestContext) -> Response {
+        if let Err(error) = ctx.pin_account(&GROK_CLI) {
+            return error.response();
+        }
         let requested = body.model.clone().unwrap_or_else(|| "grok-4.5".into());
         let resolved = resolve_model(&requested);
         if let Err(error) = assert_routable_model(&resolved) {
@@ -104,7 +105,11 @@ impl Provider for GrokProvider {
             monitor.model_resolved(&ctx.req_id, &resolved);
             monitor.upstream_started(&ctx.req_id);
         }
-        let upstream = match self.client.post(&translated, ctx.traffic.clone()).await {
+        let upstream = match self
+            .client
+            .post(&translated, ctx.account.as_deref(), ctx.traffic.clone())
+            .await
+        {
             Ok(response) => response,
             Err(error) => return map_error(error),
         };
@@ -199,8 +204,9 @@ impl Provider for GrokProvider {
     async fn generate_anthropic_stream(
         &self,
         mut body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<Generation, ProviderError> {
+        ctx.pin_account(&GROK_CLI)?;
         body.stream = true;
         let requested = body.model.clone().unwrap_or_else(|| "grok-4.5".into());
         let resolved = resolve_model(&requested);
@@ -224,7 +230,7 @@ impl Provider for GrokProvider {
         }
         let upstream = self
             .client
-            .post(&translated, ctx.traffic.clone())
+            .post(&translated, ctx.account.as_deref(), ctx.traffic.clone())
             .await
             .map_err(grok_provider_error)?;
         let response = stream_response(
@@ -528,55 +534,67 @@ fn map_error(error: client::GrokError) -> Response {
 
 pub struct GrokCli;
 pub static GROK_CLI: GrokCli = GrokCli;
-impl CliHandlers for GrokCli {
-    fn auth_state(&self) -> crate::provider::AuthState {
-        match file_store().load_auth().ok().flatten() {
-            Some(auth) => crate::provider::AuthState::SignedIn {
-                account: None,
+impl crate::accounts::AccountSupport for GrokCli {
+    fn sign_in(&self, device: bool) -> anyhow::Result<serde_json::Value> {
+        let store = auth::token_store::GrokTokenStore::new(crate::auth::InMemoryAuthStore::new());
+        if device {
+            auth::device::device_login(&store)?;
+        } else {
+            auth::login::login(&store)?;
+        }
+        let login = store.load_auth()?.ok_or_else(|| {
+            anyhow::anyhow!("Grok did not return a sign-in. Run the login command again.")
+        })?;
+        Ok(serde_json::to_value(login)?)
+    }
+
+    fn identity(&self, login: &serde_json::Value) -> Option<String> {
+        let auth = serde_json::from_value(login.clone()).ok()?;
+        auth::token_store::identity(&auth)
+    }
+
+    fn state(&self, login: &serde_json::Value) -> crate::provider::AuthState {
+        match serde_json::from_value::<auth::token_store::StoredAuth>(login.clone()) {
+            Ok(auth) => crate::provider::AuthState::SignedIn {
+                account: auth::token_store::identity(&auth),
                 expires_ms: Some(auth.expires_at_ms),
             },
-            None => crate::provider::AuthState::Missing,
+            Err(_) => crate::provider::AuthState::Missing,
         }
     }
-    fn login(&self) -> anyhow::Result<()> {
-        let store = file_store();
-        auth::login::login(&store)?;
-        println!("Grok authentication saved in {}", store.auth_path());
-        Ok(())
-    }
-    fn device(&self) -> anyhow::Result<()> {
-        let store = file_store();
-        auth::device::device_login(&store)?;
-        println!("Grok authentication saved in {}", store.auth_path());
-        Ok(())
-    }
-    fn status(&self) -> anyhow::Result<()> {
-        let store = file_store();
-        match store.load_auth()? {
-            Some(auth) => {
-                println!("Auth path: {}", store.auth_path());
-                println!("Authenticated: true");
-                println!(
-                    "Expires in {}s",
-                    auth.expires_at_ms.saturating_sub(now_ms()) / 1000
-                );
-                Ok(())
-            }
-            None => anyhow::bail!("Not authenticated"),
-        }
-    }
-    fn logout(&self) -> anyhow::Result<()> {
-        let store = file_store();
-        store.clear_auth()?;
-        println!("Grok proxy credentials removed");
-        Ok(())
+
+    fn single_login(&self) -> Box<dyn crate::auth::AuthStorage<serde_json::Value>> {
+        Box::new(auth::token_store::single_login_store())
     }
 }
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+
+impl CliHandlers for GrokCli {
+    fn auth_state(&self) -> crate::provider::AuthState {
+        crate::accounts::Accounts::current_state("grok", self)
+    }
+
+    fn login(&self) -> anyhow::Result<()> {
+        crate::auth_cli::AccountCli::open("grok", self)?.login(&Default::default())
+    }
+
+    fn device(&self) -> anyhow::Result<()> {
+        crate::auth_cli::AccountCli::open("grok", self)?.login(&crate::auth_cli::LoginOptions {
+            device: true,
+            ..Default::default()
+        })
+    }
+
+    fn status(&self) -> anyhow::Result<()> {
+        crate::auth_cli::AccountCli::open("grok", self)?.status()
+    }
+
+    fn logout(&self) -> anyhow::Result<()> {
+        crate::auth_cli::AccountCli::open("grok", self)?.logout(None, false)
+    }
+
+    fn accounts(&self) -> Option<&dyn crate::accounts::AccountSupport> {
+        Some(self)
+    }
 }
 
 #[cfg(test)]

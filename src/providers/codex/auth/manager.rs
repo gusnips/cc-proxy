@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::LazyLock;
 #[cfg(test)]
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -10,8 +9,23 @@ use super::jwt::{TokenResponse, extract_account_id, validate_token_response};
 use super::token_store::{CodexTokenStore, StoredAuth};
 use crate::auth::AuthStorage;
 
-static CODEX_REFRESH_LOCK: LazyLock<Arc<AsyncMutex<()>>> =
-    LazyLock::new(|| Arc::new(AsyncMutex::new(())));
+/// The login a first sign-in gives, ready to be saved as an account.
+pub fn initial_auth(tokens: &TokenResponse) -> Result<StoredAuth, anyhow::Error> {
+    validate_token_response(tokens)?;
+    Ok(StoredAuth {
+        access: tokens.access_token.clone(),
+        refresh: tokens.refresh_token.clone(),
+        expires: now_ms() + (tokens.expires_in.unwrap_or(3600) * 1000),
+        account_id: extract_account_id(tokens),
+    })
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 pub struct CodexAuthManager<S: AuthStorage<StoredAuth>> {
     pub store: CodexTokenStore<S>,
@@ -28,11 +42,12 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
     }
 
     fn new_with_token_endpoint(store: CodexTokenStore<S>, token_endpoint: String) -> Self {
+        let refresh_lock = crate::auth::refresh_lock(&store.auth_path());
         Self {
             store,
             #[cfg(test)]
             test_auth: Arc::new(Mutex::new(None)),
-            refresh_lock: CODEX_REFRESH_LOCK.clone(),
+            refresh_lock,
             refresh_client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(15))
                 .timeout(Duration::from_secs(30))
@@ -42,19 +57,12 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
         }
     }
 
-    fn now_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    }
-
     pub async fn get_auth(&self) -> Result<StoredAuth, anyhow::Error> {
         let stored = self
             .load_auth()?
             .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run: cc-proxy auth login codex"))?;
 
-        if stored.expires > Self::now_ms() + REFRESH_MARGIN_MS {
+        if stored.expires > now_ms() + REFRESH_MARGIN_MS {
             return Ok(stored);
         }
 
@@ -93,7 +101,7 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
             .load_auth()?
             .ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
 
-        if (!force && current.expires > Self::now_ms() + REFRESH_MARGIN_MS)
+        if (!force && current.expires > now_ms() + REFRESH_MARGIN_MS)
             || rejected_access.is_some_and(|access| current.access != access)
         {
             return Ok(current);
@@ -146,7 +154,7 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
             .map_err(|e| anyhow::anyhow!("failed to parse token response: {e}"))?;
         validate_token_response(&tokens)?;
         let account_id = extract_account_id(&tokens).or_else(|| current.account_id.clone());
-        let expires = Self::now_ms() + (tokens.expires_in.unwrap_or(3600) * 1000);
+        let expires = now_ms() + (tokens.expires_in.unwrap_or(3600) * 1000);
         let next = StoredAuth {
             access: tokens.access_token,
             refresh: tokens.refresh_token,
@@ -155,23 +163,6 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
         };
         self.store.save_auth(next.clone())?;
         Ok(next)
-    }
-
-    pub fn persist_initial_tokens(
-        &self,
-        tokens: &TokenResponse,
-    ) -> Result<StoredAuth, anyhow::Error> {
-        validate_token_response(tokens)?;
-        let account_id = extract_account_id(tokens);
-        let expires = Self::now_ms() + (tokens.expires_in.unwrap_or(3600) * 1000);
-        let auth = StoredAuth {
-            access: tokens.access_token.clone(),
-            refresh: tokens.refresh_token.clone(),
-            expires,
-            account_id,
-        };
-        self.store.save_auth(auth.clone())?;
-        Ok(auth)
     }
 
     #[cfg(test)]

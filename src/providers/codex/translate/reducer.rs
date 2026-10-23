@@ -221,6 +221,7 @@ fn reasoning_input_item(replay: ReasoningReplay) -> ResponsesInputItem {
 }
 
 fn finalize_active_thinking(
+    account: Option<&str>,
     active: ActiveThinking,
     out: &mut Vec<ReducerEvent>,
     reasoning_by_output_index: &mut std::collections::HashMap<usize, PendingReasoning>,
@@ -231,12 +232,13 @@ fn finalize_active_thinking(
         .and_then(|pending| pending.replay());
     if config::codex_reasoning_signatures_enabled()
         && let Some(replay) = replay
-        && let Some(signature) = encode_reasoning_signature(&replay)
     {
-        out.push(ReducerEvent::ThinkingSignature {
-            index: active.anthropic_index,
-            signature,
-        });
+        if let Some(signature) = encode_reasoning_signature(&replay, account) {
+            out.push(ReducerEvent::ThinkingSignature {
+                index: active.anthropic_index,
+                signature,
+            });
+        }
         output_items_by_index.insert(active.output_index, reasoning_input_item(replay));
     }
     out.push(ReducerEvent::ThinkingStop {
@@ -245,6 +247,7 @@ fn finalize_active_thinking(
 }
 
 fn close_thinking(
+    account: Option<&str>,
     out: &mut Vec<ReducerEvent>,
     active_thinking: &mut Option<ActiveThinking>,
     reasoning_by_output_index: &mut std::collections::HashMap<usize, PendingReasoning>,
@@ -252,6 +255,7 @@ fn close_thinking(
 ) {
     if let Some(active) = active_thinking.take() {
         finalize_active_thinking(
+            account,
             active,
             out,
             reasoning_by_output_index,
@@ -261,6 +265,7 @@ fn close_thinking(
 }
 
 fn emit_signature_only_reasoning(
+    account: Option<&str>,
     output_index: usize,
     anthropic_index: &mut usize,
     out: &mut Vec<ReducerEvent>,
@@ -277,21 +282,20 @@ fn emit_signature_only_reasoning(
     else {
         return;
     };
-    let Some(signature) = encode_reasoning_signature(&replay) else {
-        return;
-    };
-    let index = *anthropic_index;
-    *anthropic_index += 1;
-    out.push(ReducerEvent::ThinkingStart { index });
-    out.push(ReducerEvent::ThinkingSignature { index, signature });
-    out.push(ReducerEvent::ThinkingStop { index });
+    if let Some(signature) = encode_reasoning_signature(&replay, account) {
+        let index = *anthropic_index;
+        *anthropic_index += 1;
+        out.push(ReducerEvent::ThinkingStart { index });
+        out.push(ReducerEvent::ThinkingSignature { index, signature });
+        out.push(ReducerEvent::ThinkingStop { index });
+    }
     output_items_by_index.insert(output_index, reasoning_input_item(replay));
 }
 
 pub fn finish_metadata_from_upstream(
     input: &[u8],
 ) -> Result<Option<FinishMetadata>, UpstreamStreamError> {
-    let events = reduce_upstream_bytes(input)?;
+    let events = reduce_upstream_bytes(input, None)?;
     Ok(events.into_iter().rev().find_map(|event| match event {
         ReducerEvent::Finish {
             continuation_eligible,
@@ -307,7 +311,10 @@ pub fn finish_metadata_from_upstream(
     }))
 }
 
-pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, UpstreamStreamError> {
+pub fn reduce_upstream_bytes(
+    input: &[u8],
+    account: Option<&str>,
+) -> Result<Vec<ReducerEvent>, UpstreamStreamError> {
     let sse_events = parse_sse_events(input);
     let mut out = Vec::new();
 
@@ -485,6 +492,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
 
             if item_type == "message" {
                 close_thinking(
+                    account,
                     &mut out,
                     &mut active_thinking,
                     &mut reasoning_by_output_index,
@@ -508,6 +516,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
 
             if item_type == "function_call" {
                 close_thinking(
+                    account,
                     &mut out,
                     &mut active_thinking,
                     &mut reasoning_by_output_index,
@@ -572,6 +581,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
             }
             if active_thinking.map(|active| active.output_index) != Some(output_index) {
                 close_thinking(
+                    account,
                     &mut out,
                     &mut active_thinking,
                     &mut reasoning_by_output_index,
@@ -596,6 +606,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
 
         if t == "response.output_text.delta" {
             close_thinking(
+                account,
                 &mut out,
                 &mut active_thinking,
                 &mut reasoning_by_output_index,
@@ -745,6 +756,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
                 let had_active_summary =
                     active_thinking.is_some_and(|active| active.output_index == output_index);
                 close_thinking(
+                    account,
                     &mut out,
                     &mut active_thinking,
                     &mut reasoning_by_output_index,
@@ -752,6 +764,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
                 );
                 if !had_active_summary {
                     emit_signature_only_reasoning(
+                        account,
                         output_index,
                         &mut anthropic_index,
                         &mut out,
@@ -766,6 +779,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
                 && item_val.get("type").and_then(|v| v.as_str()) == Some("web_search_call")
             {
                 close_thinking(
+                    account,
                     &mut out,
                     &mut active_thinking,
                     &mut reasoning_by_output_index,
@@ -886,6 +900,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
     }
 
     close_thinking(
+        account,
         &mut out,
         &mut active_thinking,
         &mut reasoning_by_output_index,
@@ -1189,7 +1204,7 @@ mod tests {
                 })
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let last = out.last().unwrap();
         if let ReducerEvent::Finish {
             stop_reason,
@@ -1243,7 +1258,7 @@ mod tests {
                 })
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let last = out.last().unwrap();
         if let ReducerEvent::Finish { stop_reason, .. } = last {
             assert_eq!(*stop_reason, "tool_use");
@@ -1265,7 +1280,7 @@ mod tests {
                 json!({"response":{"id":"resp_1","status":"completed","usage":{}}}),
             )
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         assert!(matches!(out.first(), Some(ReducerEvent::Progress)));
         let Some(ReducerEvent::Finish { usage, .. }) = out.last() else {
             panic!("expected Finish");
@@ -1301,7 +1316,7 @@ mod tests {
                 })
             )
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         assert!(out.iter().any(|event| {
             matches!(
                 event,
@@ -1326,7 +1341,7 @@ mod tests {
     #[test]
     fn reduce_upstream_error_event() {
         let upstream = sse("error", json!({"error":{"message":"upstream failure"}}));
-        let result = reduce_upstream_bytes(upstream.as_bytes());
+        let result = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a"));
         assert!(result.is_err());
         match result.unwrap_err().kind {
             UpstreamErrorKind::Failed => {}
@@ -1378,7 +1393,7 @@ mod tests {
                 })
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let has_web_search = out
             .iter()
             .any(|e| matches!(e, ReducerEvent::WebSearch { .. }));
@@ -1419,7 +1434,7 @@ mod tests {
                 })
             ),
         );
-        let err = reduce_upstream_bytes(upstream.as_bytes()).unwrap_err();
+        let err = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap_err();
         assert_eq!(err.kind, UpstreamErrorKind::Transient);
         assert!(err.message.contains("terminal"));
     }
@@ -1430,7 +1445,7 @@ mod tests {
             "response.incomplete",
             json!({"response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"usage":{}}}),
         );
-        let err = reduce_upstream_bytes(upstream.as_bytes()).unwrap_err();
+        let err = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap_err();
         assert_eq!(err.kind, UpstreamErrorKind::Transient);
         assert!(err.message.contains("interrupted"));
     }
@@ -1441,7 +1456,7 @@ mod tests {
             "response.incomplete",
             json!({"response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"content_filter"},"usage":{"input_tokens":2,"output_tokens":3}}}),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let Some(ReducerEvent::Finish {
             stop_reason, usage, ..
         }) = out.last()
@@ -1461,7 +1476,7 @@ mod tests {
             "response.incomplete",
             json!({"response":{"id":"resp_1","status":"incomplete","error":null,"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":2,"output_tokens":8}}}),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let Some(ReducerEvent::Finish {
             stop_reason,
             terminal_type,
@@ -1494,7 +1509,7 @@ mod tests {
                 json!({"response":{"id":"resp_1","status":"completed","usage":{}}}),
             ),
         );
-        let err = reduce_upstream_bytes(upstream.as_bytes()).unwrap_err();
+        let err = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap_err();
         assert_eq!(err.kind, UpstreamErrorKind::Transient);
         assert!(err.message.contains("multiple terminal"));
     }
@@ -1524,7 +1539,7 @@ mod tests {
                 ),
                 sse(event_type, payload),
             );
-            let err = reduce_upstream_bytes(upstream.as_bytes()).unwrap_err();
+            let err = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap_err();
 
             assert_eq!(err.kind, UpstreamErrorKind::Transient);
             assert!(err.message.contains("after the terminal"));
@@ -1545,7 +1560,7 @@ mod tests {
             ),
         );
 
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let Some(ReducerEvent::Finish { stop_reason, .. }) = out.last() else {
             panic!("expected Finish");
         };
@@ -1563,7 +1578,7 @@ mod tests {
             sse("ping", json!({"cost":"0"})),
         );
 
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let Some(ReducerEvent::Finish { stop_reason, .. }) = out.last() else {
             panic!("expected Finish");
         };
@@ -1597,7 +1612,7 @@ mod tests {
                 json!({"response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{}}}),
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let Some(ReducerEvent::Finish { stop_reason, .. }) = out.last() else {
             panic!("expected Finish");
         };
@@ -1610,7 +1625,7 @@ mod tests {
             "response.completed",
             json!({"response":{"id":"resp_1","status":"completed","incomplete_details":null,"usage":{}}}),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let last = out.last().unwrap();
         if let ReducerEvent::Finish {
             stop_reason,
@@ -1631,7 +1646,7 @@ mod tests {
             "response.completed",
             json!({"response":{"id":"resp_1","usage":{}}}),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let last = out.last().unwrap();
         if let ReducerEvent::Finish {
             continuation_eligible,
@@ -1779,7 +1794,7 @@ mod tests {
                 )
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         assert!(matches!(
             out.iter()
                 .find(|event| matches!(event, ReducerEvent::ThinkingStart { .. })),
@@ -1842,7 +1857,7 @@ mod tests {
                 )
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         assert!(!out.iter().any(|event| matches!(
             event,
             ReducerEvent::ThinkingStart { .. }
@@ -1876,7 +1891,7 @@ mod tests {
                 json!({"response":{"id":"resp_1","usage":{}}})
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let deltas: Vec<&str> = out
             .iter()
             .filter_map(|event| match event {
@@ -1918,7 +1933,7 @@ mod tests {
                 json!({"response":{"id":"resp_1","usage":{}}})
             ),
         );
-        let out = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let out = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         assert_eq!(
             out.iter()
                 .filter(|event| matches!(event, ReducerEvent::ThinkingStart { .. }))
@@ -1968,7 +1983,7 @@ mod tests {
                 json!({"response":{"id":"resp_1","usage":{}}})
             ),
         );
-        let events = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let events = reduce_upstream_bytes(upstream.as_bytes(), Some("account-a")).unwrap();
         let signature_index = events
             .iter()
             .position(|event| matches!(event, ReducerEvent::ThinkingSignature { .. }))

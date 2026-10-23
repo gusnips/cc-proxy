@@ -16,13 +16,19 @@ harnesses:
 Sign in with a **ChatGPT Plus or Pro account**, not OpenAI API credentials.
 
 ```sh
-cc-proxy codex auth login
+cc-proxy login codex
 # Headless device-code flow
-cc-proxy codex auth device
-cc-proxy codex auth status
+cc-proxy login codex --device
+cc-proxy auth status codex
 ```
 
-The proxy owns its tokens and does not read native Codex CLI credentials. It refreshes expiring access tokens with a single-flight guard. See [Files and storage](/reference/files-and-storage/) for credential locations.
+The proxy owns its tokens and does not read native Codex CLI credentials. It refreshes expiring access tokens with a single-flight guard for each saved account. See [Files and storage](/reference/files-and-storage/) for credential locations.
+
+Use `cc-proxy auth add codex` to save another account and `cc-proxy auth use codex`
+to switch. Encrypted reasoning signatures stay with the saved login that made
+them. To continue after switching accounts, start a new conversation. History
+from proxy versions without account tracking also needs a new conversation.
+See [saved accounts and rotation](/reference/configuration/#saved-accounts-and-auto-rotate).
 
 To see how much of your 5-hour and weekly limits you have used, and when they reset, run `cc-proxy usage codex`. See [`usage`](/reference/command-reference/#usage).
 
@@ -155,7 +161,7 @@ While the native request is active, the monitor shows `compacting`. Structured l
 
 `CCP_CODEX_RESPONSES_API=1` enables both `POST /v1/responses` and `POST /v1/chat/completions`. The setting is under Codex configuration, but the routes also accept Kimi, Grok, OpenCode Go, and Cursor models.
 
-The Responses route preserves native JSON or SSE response bodies for registered Codex models. The Chat Completions route translates standard text messages, reasoning effort, JSON object or JSON Schema output, and buffered or streaming responses. Its omitted reasoning effort defaults to `medium`; the proxy-wide Codex effort override still takes precedence.
+The Responses route returns native JSON or SSE for registered Codex models. It accepts full text and tool history, but rejects encrypted content, item references, `conversation` and `previous_response_id` because they do not identify their saved account. The Chat Completions route translates standard text messages, reasoning effort, JSON object or JSON Schema output, and buffered or streaming responses. Its omitted reasoning effort defaults to `medium`; the proxy-wide Codex effort override still takes precedence.
 
 The proxy replaces incoming credentials with stored Codex auth for both routes. Response retrieval or deletion, function calling through Chat Completions, and WebSocket ingress are outside their scope. See [HTTP API](/reference/http-api/) for supported Chat Completions fields and error behavior.
 

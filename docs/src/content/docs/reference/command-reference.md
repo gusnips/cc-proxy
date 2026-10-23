@@ -126,27 +126,72 @@ cc-proxy models refresh [provider|all]
 The command shape is:
 
 ```text
-cc-proxy <provider> auth <action>
+cc-proxy auth <action> [provider]
 ```
 
-| Provider   | `login`                | `device`        | `status`                             | `logout`                               |
-| ---------- | ---------------------- | --------------- | ------------------------------------ | -------------------------------------- |
-| `codex`    | Browser PKCE           | Device code     | Account, expiry, storage             | Delete proxy credential                |
-| `kimi`     | Device code            | Unsupported     | User, expiry, scope, storage         | Delete proxy credential                |
-| `grok`     | Browser PKCE           | Device code     | Expiry and storage                   | Delete proxy credential                |
-| `copilot`  | Device code            | Same as `login` | Account, host, token expiry, storage | Delete proxy credential and model list |
-| `cursor`   | Browser polling flow   | Unsupported     | Source, claims, expiry               | Delete proxy credential                |
-| `glm`      | API key entry          | Unsupported     | Env and stored key presence          | Delete proxy credential                |
-| `opencode` | API key entry (hidden) | Unsupported     | Key source and base URL              | Delete stored key                      |
+For sign-in and sign-out, the shorter forms take the same arguments and options:
+
+```sh
+cc-proxy login codex                # same as: cc-proxy auth login codex
+cc-proxy login codex --device
+cc-proxy login codex --replace
+cc-proxy logout codex               # same as: cc-proxy auth logout codex
+cc-proxy logout codex work
+cc-proxy logout codex --all
+```
+
+| Provider      | `login`                | `device`        | `status`                             | `logout`                               |
+| ------------- | ---------------------- | --------------- | ------------------------------------ | -------------------------------------- |
+| `codex`       | Browser PKCE           | Device code     | Account, expiry, storage             | Delete proxy credential                |
+| `kimi`        | Device code            | Unsupported     | User, expiry, scope, storage         | Delete proxy credential                |
+| `grok`        | Browser PKCE           | Device code     | Expiry and storage                   | Delete proxy credential                |
+| `antigravity` | Google browser sign-in | Same as `login` | Account and expiry                   | Delete a saved account                 |
+| `copilot`     | Device code            | Same as `login` | Account, host, token expiry, storage | Delete proxy credential and model list |
+| `cursor`      | Browser polling flow   | Unsupported     | Source, claims, expiry               | Delete proxy credential                |
+| `glm`         | API key entry          | Unsupported     | Env and stored key presence          | Delete proxy credential                |
+| `opencode`    | API key entry (hidden) | Unsupported     | Key source and base URL              | Delete stored key                      |
 
 Examples:
 
 ```sh
-cc-proxy codex auth login
-cc-proxy grok auth device
-cc-proxy kimi auth status
-cc-proxy cursor auth logout
+cc-proxy login codex
+cc-proxy auth device grok
+cc-proxy auth status kimi
+cc-proxy logout cursor
 ```
+
+### Saved accounts
+
+Codex, Kimi, Grok and Antigravity support these commands:
+
+```sh
+cc-proxy auth add codex --name work
+cc-proxy auth use codex work
+cc-proxy auth status codex
+cc-proxy login codex --replace --account work
+cc-proxy logout codex work
+cc-proxy logout codex --all
+```
+
+`add` saves another login without switching away from the current account.
+`--name` is optional; the first default name is `main`, then `account-2` and so
+on. Names use up to 32 letters, numbers, `-` or `_` and start with a letter or
+number. `--device` chooses device-code login when supported.
+
+`login` with an existing account asks Add or Replace. Outside a terminal it
+refuses to guess: use `auth add` or `login --replace`. `--account` names which
+account to replace; without it, the current account is replaced. A failed or
+cancelled sign-in keeps the saved login. Signing in as an identity already
+saved offers to replace that account instead of adding a duplicate.
+
+`auth use` without an account opens a picker in a terminal. The switch applies
+to the next request, without restarting the proxy. `auth status` lists all
+accounts, the current one and any limit wait. `logout` without a name signs
+out when there is one account; with several, it asks which one. Scripts must
+name the account or use `--all`.
+
+Other providers still keep one login. See [auto-rotate](/reference/configuration/#saved-accounts-and-auto-rotate)
+for automatic switching and its limits.
 
 A missing credential makes `auth status` exit with status 1. Other provider command failures exit with status 2. Successful commands exit with status 0.
 
@@ -162,7 +207,7 @@ Shows how much of each plan you have used and when each limit resets, asked
 straight from the provider with the sign-in the proxy already holds:
 
 ```text
-Codex (plus)
+Codex `home` [current] (plus)
   5-hour window: 45% used, resets in 2h 10m (17:00)
   Weekly: 7% used, resets in 4d 9h (Mon 00:00)
 ```
@@ -185,15 +230,28 @@ in to gets one line with its login command. Name a provider to see only that
 one. If it isn't signed in, that line goes to stderr and the command exits
 with status 1. A failed lookup exits with status 2.
 
+Codex and Kimi show every saved account and mark the current one. Usage
+lookups never change which account requests use. A failed lookup names the
+account and leaves other accounts visible. `auth status <provider>` shows
+saved accounts and confirmed cooldowns without contacting the provider.
+
 `--json` prints one object with a key per provider. Codex and Kimi share one
 shape:
 
 ```json
 {
   "codex": {
-    "plan": "plus",
-    "five_hour": { "used_percent": 45.0, "resets_at_ms": 1786294800000 },
-    "weekly": { "used_percent": 7.0, "resets_at_ms": 1786752000000 }
+    "accounts": [
+      {
+        "name": "home",
+        "current": true,
+        "usage": {
+          "plan": "plus",
+          "five_hour": { "used_percent": 45.0, "resets_at_ms": 1786294800000 },
+          "weekly": { "used_percent": 7.0, "resets_at_ms": 1786752000000 }
+        }
+      }
+    ]
   }
 }
 ```
@@ -206,17 +264,18 @@ send is left out. `opencode` holds OpenCode Go's own reply, unchanged.
 Store the key once without echoing it:
 
 ```sh
-cc-proxy opencode auth login
+cc-proxy login opencode
 ```
 
-The key lands in `opencode.apiKey` in config.json. `opencode auth status`
-reports which source provides the key; `opencode auth logout` removes the
+The key lands in `opencode.apiKey` in config.json. `auth status opencode`
+reports which source provides the key; `logout opencode` removes the
 stored key. When nothing of ours is set, the proxy falls back to
 `OPENCODE_API_KEY` in Claude Code's `~/.claude/settings.json`.
 
 ## Configuration values
 
 ```sh
+cc-proxy config
 cc-proxy config get <key>
 cc-proxy config set <key> <value>
 cc-proxy config list
@@ -226,10 +285,54 @@ cc-proxy config edit
 Reads and writes config.json through dotted keys (`port`,
 `opencode.apiKey`, `codex.fullLane`). `get` prints one value, `set`
 validates and writes one, `list` shows every known key, and `edit` opens
-the file in `$VISUAL` or `$EDITOR`. Reads show the file value; when an
+the file in your editor. Reads show the file value; when an
 environment variable overrides a key at runtime, the commands say so.
 Secret keys only ever report set or unset, never their value. Restart the
-service after changing bind settings.
+service after changing `port` or `bindAddress`.
+
+### The settings screen
+
+In a terminal, `cc-proxy config` with no subcommand lists every setting:
+
+| Key                  | What it does                                                         |
+| -------------------- | -------------------------------------------------------------------- |
+| Up, Down             | Move through the list. It wraps at the ends.                         |
+| Left, Right          | Step a yes/no or a fixed choice back or forward, and save it.        |
+| Enter                | On a yes/no or a choice, step forward. On text or a number, type it. |
+| Any letter or number | Search by name or description. Backspace edits the search.           |
+| Esc                  | Clear the search, then close. In a field, drop what you typed.       |
+| Ctrl-C               | Close.                                                               |
+
+Every change saves as soon as you make it, exactly as `config set` would, so
+there is nothing to confirm and nothing to undo when you close the screen. The
+line under the list says what was saved, whether an environment variable still
+wins, and whether the running proxy needs `cc-proxy restart`. A key is hidden
+while you type it and never shown again.
+
+The `providers` and `config.json` rows open the file in your editor, on the
+line of the `providers` key. When the editor closes, the screen reads the file
+again.
+
+Run in a pipe or a script, `cc-proxy config` prints the same list as
+`cc-proxy config list` and never waits for input.
+
+### Your editor
+
+`edit` and the editor rows use `$VISUAL`, or `$EDITOR` when that is empty. The
+variable can hold arguments and quotes, such as `code --wait` or
+`"/Applications/Sublime Text.app/subl" -w`. It never goes through a shell, so
+`$HOME` and `|` reach the editor as plain text. vim, nvim, nano, emacs, VS Code,
+Cursor, Windsurf and VSCodium start on the right line. Any other editor opens
+at the top. An editor that returns before you close the file (most graphical
+ones) needs its wait flag, such as `-w`. cc-proxy adds `--wait` for the VS Code
+family itself.
+
+### A file cc-proxy can't read
+
+If config.json isn't valid JSON, can't be read, or a key you change sits inside
+a value that isn't an object (`"log": "x"` when you set `log.verbose`), cc-proxy
+stops and names the file or the key. It never replaces a file it can't read
+with a new one. Fix it with `cc-proxy config edit`, then try again.
 
 ## Updating
 

@@ -42,16 +42,16 @@ Update the proxy to a version containing this fix. Updating the binary does not 
 Check the provider selected by the model, then inspect its credential:
 
 ```sh
-cc-proxy codex auth status
-cc-proxy kimi auth status
-cc-proxy grok auth status
-cc-proxy cursor auth status
+cc-proxy auth status codex
+cc-proxy auth status kimi
+cc-proxy auth status grok
+cc-proxy auth status cursor
 ```
 
 Use that provider's login command when credentials are missing or expired. Codex requires ChatGPT subscription auth, not an OpenAI API key. Each provider uses proxy-owned credentials.
-OpenCode Go has no `auth status` command; configure its API key through
-`CCP_OPENCODE_API_KEY`, `OPENCODE_API_KEY`, or `opencode.apiKey` in
-`config.json`.
+For OpenCode Go, run `cc-proxy auth status opencode` to see the API key source.
+Set the key through `cc-proxy login opencode`, `CCP_OPENCODE_API_KEY`,
+`OPENCODE_API_KEY` or `opencode.apiKey` in `config.json`.
 
 ## Model returns HTTP 400
 
@@ -99,7 +99,7 @@ Use HTTP SSE to isolate transport behavior:
 CCP_CODEX_TRANSPORT=http cc-proxy start
 ```
 
-The default `auto` transport falls back to HTTP when WebSocket setup fails before sending the request, including a rejected upgrade. It does not replay an in-flight request. A WebSocket 403 alone doesn't prove your login expired; check `cc-proxy codex auth status` before signing in again. If you chose `websocket` explicitly, set `codex.transport` to `auto` to allow fallback.
+The default `auto` transport falls back to HTTP when WebSocket setup fails before sending the request, including a rejected upgrade. It does not replay an in-flight request. A WebSocket 403 alone doesn't prove your login expired; check `cc-proxy auth status codex` before signing in again. If you chose `websocket` explicitly, set `codex.transport` to `auto` to allow fallback.
 
 ## Cursor bundle cannot be found
 

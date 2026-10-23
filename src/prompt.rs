@@ -4,7 +4,7 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -121,10 +121,9 @@ pub fn choose(question: &str, options: &[String], default: usize) -> Result<usiz
     if options.is_empty() {
         bail!("no options to choose from");
     }
-    if is_interactive()
-        && let Ok(Some(picked)) = tty_pick(question, options, default, false)
-    {
-        return Ok(picked);
+    if is_interactive() {
+        return tty_pick(question, options, default, false)?
+            .context("No option was picked. Run the command again to choose.");
     }
     println!("{question}");
     for (index, option) in options.iter().take(MAX_SHOWN).enumerate() {
@@ -429,7 +428,7 @@ fn tty_pick(
 }
 
 /// The options that hold every word of `query`, in any case, in list order.
-fn matching(options: &[String], query: &str) -> Vec<usize> {
+pub(crate) fn matching(options: &[String], query: &str) -> Vec<usize> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     options
         .iter()

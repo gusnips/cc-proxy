@@ -147,7 +147,7 @@ pub struct PreparedImageRequest {
 }
 
 pub struct CodexImagesBackend {
-    client: std::sync::Arc<super::client::CodexHttpClient>,
+    clients: super::client::CodexClients,
     base_url: String,
     limiter: std::sync::Arc<tokio::sync::Semaphore>,
 }
@@ -156,7 +156,7 @@ impl CodexImagesBackend {
     pub fn new() -> Result<Self, String> {
         let base_url = validate_image_base_url(&crate::config::codex_images_base_url())?;
         Ok(Self {
-            client: std::sync::Arc::new(super::client::CodexHttpClient::new()),
+            clients: super::client::CodexClients::new(),
             base_url,
             limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
         })
@@ -168,7 +168,7 @@ impl CodexImagesBackend {
         base_url: String,
     ) -> Self {
         Self {
-            client,
+            clients: super::client::CodexClients::fixed(client),
             base_url: base_url.trim_end_matches('/').to_string(),
             limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
         }
@@ -178,7 +178,7 @@ impl CodexImagesBackend {
         &self,
         operation: ImageOperation,
         prepared: PreparedImageRequest,
-        ctx: crate::provider::RequestContext,
+        mut ctx: crate::provider::RequestContext,
     ) -> axum::response::Response {
         use axum::response::IntoResponse;
 
@@ -193,12 +193,15 @@ impl CodexImagesBackend {
                 });
             }
         };
+        let client = match self.clients.get(&mut ctx) {
+            Ok(client) => client,
+            Err(error) => return image_transport_error_response(error),
+        };
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &prepared.model);
             monitor.upstream_started(&ctx.req_id);
         }
-        let upstream = match self
-            .client
+        let upstream = match client
             .post_image_json(&self.base_url, operation, &prepared.body, &ctx)
             .await
         {
@@ -232,13 +235,12 @@ impl CodexImagesBackend {
             copy_safe_image_headers(&headers, response.headers_mut());
             return response;
         }
-        let body =
-            match collect_image_response_body(upstream, self.client.body_idle_timeout_ms(), &ctx)
-                .await
-            {
-                Ok(body) => body,
-                Err(error) => return image_error_response(error),
-            };
+        let body = match collect_image_response_body(upstream, client.body_idle_timeout_ms(), &ctx)
+            .await
+        {
+            Ok(body) => body,
+            Err(error) => return image_error_response(error),
+        };
         let usage = match validate_success_response(&body) {
             Ok(usage) => usage,
             Err(error) => return image_error_response(error),
@@ -336,7 +338,9 @@ fn image_transport_error_response(error: super::client::CodexError) -> axum::res
     };
     let mut response = image_error_response(ImageRequestError {
         status,
-        message: if error.status == 0 {
+        message: if error.origin == super::client::CodexErrorOrigin::Auth {
+            error.detail.unwrap_or(error.message)
+        } else if error.status == 0 {
             "Codex image service is unavailable".to_string()
         } else {
             format!("Codex image service returned HTTP {}", error.status)
@@ -813,6 +817,7 @@ mod tests {
                     session_id: None,
                     session_seq: None,
                     provider: "codex".into(),
+                    account: None,
                     traffic: None,
                     monitor: None,
                 },
@@ -873,6 +878,7 @@ mod tests {
                     session_id: None,
                     session_seq: None,
                     provider: "codex".into(),
+                    account: None,
                     traffic: None,
                     monitor: None,
                 },

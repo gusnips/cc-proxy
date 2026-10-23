@@ -29,10 +29,10 @@ re-running the install command and restarting the service.
 Use a **ChatGPT Plus or Pro account**, not an OpenAI API account:
 
 ```sh
-cc-proxy codex auth login
+cc-proxy login codex
 ```
 
-For SSH or another headless environment, use `cc-proxy codex auth device` instead.
+For SSH or another headless environment, use `cc-proxy login codex --device` instead.
 
 ## 3. Turn routing on
 

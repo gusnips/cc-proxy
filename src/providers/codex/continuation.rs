@@ -510,6 +510,24 @@ pub(crate) fn clear_continuation_for_owner(owner: Option<&ConversationIdentity>)
     }
 }
 
+pub(crate) fn clear_continuations_for_session(session_id: &str) {
+    let mut guard = REGISTRY.lock().unwrap();
+    let Some(registry) = guard.as_mut() else {
+        return;
+    };
+    registry.owners.retain(|owner, _| match owner {
+        ConversationIdentity::Main(session) | ConversationIdentity::Agent(session, _) => {
+            session != session_id
+        }
+    });
+    registry.total_transcript_bytes = registry
+        .owners
+        .values()
+        .filter_map(|state| state.continuation.as_ref())
+        .map(|state| state.transcript_bytes)
+        .sum();
+}
+
 #[deprecated(note = "use the owner-aware test helper for typed conversation ownership")]
 pub fn has_continuation_for_tests(session_id: &str) -> bool {
     let owner = ConversationIdentity::Main(session_id.to_owned());

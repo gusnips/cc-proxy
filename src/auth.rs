@@ -17,6 +17,23 @@ where
     fn path(&self) -> String;
 }
 
+/// Managers for the same saved login share a refresh lock, even when a command
+/// creates a new manager. Different accounts can refresh at the same time.
+pub fn refresh_lock(path: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex, Weak};
+    static LOCKS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let mut locks = LOCKS.lock().unwrap_or_else(|error| error.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(path.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
 pub trait Keychain: Send + Sync {
     fn read(&self, service: &str, account: &str) -> Result<Option<String>>;
     fn write(&self, service: &str, account: &str, value: &str) -> Result<()>;
@@ -161,14 +178,27 @@ where
     T: Serialize + DeserializeOwned + Send + Sync + Clone,
 {
     fn load(&self) -> Result<Option<T>> {
-        let parsed = load_auth_file::<T>(&self.file);
-        if parsed.is_some() {
-            return Ok(parsed);
+        let read = |path: &str| -> Result<Option<T>> {
+            let raw = match fs::read_to_string(path) {
+                Ok(raw) => raw,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "Can't read saved sign-in at {path}: {error}"
+                    ));
+                }
+            };
+            serde_json::from_str(&raw).map(Some).map_err(|error| {
+                anyhow::anyhow!(
+                    "Invalid saved sign-in at {path}: {error}. Sign in again to replace it."
+                )
+            })
+        };
+        match read(&self.file)? {
+            Some(value) => Ok(Some(value)),
+            None if self.file != self.legacy_file => read(&self.legacy_file),
+            None => Ok(None),
         }
-        if self.file == self.legacy_file {
-            return Ok(None);
-        }
-        Ok(load_auth_file::<T>(&self.legacy_file))
     }
 
     fn save(&self, value: T) -> Result<()> {
@@ -522,6 +552,28 @@ mod tests {
 
     fn temp_auth_path(dir: &tempfile::TempDir, name: &str) -> String {
         dir.path().join(name).to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn refresh_locks_follow_the_login_path() {
+        let a = refresh_lock("login-a");
+        let again = refresh_lock("login-a");
+        let b = refresh_lock("login-b");
+        assert!(Arc::ptr_eq(&a, &again));
+        assert!(!Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn malformed_auth_never_falls_back_to_an_old_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = temp_auth_path(&dir, "auth.json");
+        let legacy = temp_auth_path(&dir, "legacy.json");
+        std::fs::write(&file, "broken").unwrap();
+        write_atomically(&legacy, &json!({"access":"old"})).unwrap();
+        let store = FileAuthStore::<serde_json::Value>::new(file.clone(), legacy);
+        let error = store.load().unwrap_err().to_string();
+        assert!(error.contains(&file) && error.contains("Invalid saved sign-in"));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "broken");
     }
 
     #[test]

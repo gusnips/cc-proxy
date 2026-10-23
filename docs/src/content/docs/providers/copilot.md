@@ -10,13 +10,13 @@ cc-proxy sends Copilot models to `chat/completions` on the Copilot host your pla
 You need a GitHub account with a Copilot plan.
 
 ```sh
-cc-proxy copilot auth login
-cc-proxy copilot auth status
+cc-proxy login copilot
+cc-proxy auth status copilot
 ```
 
 The login prints a web address and a code. Open the address, enter the code, and approve. cc-proxy waits until you do, then saves the sign-in and reads which models your account can use.
 
-GitHub's token does not work on the Copilot API. cc-proxy trades it for a Copilot token that lasts about 25 minutes, and trades again when it runs low. You do not need to sign in again for that. If GitHub stops accepting the saved sign-in, requests fail with a message that tells you to run `cc-proxy copilot auth login`.
+GitHub's token does not work on the Copilot API. cc-proxy trades it for a Copilot token that lasts about 25 minutes, and trades again when it runs low. You do not need to sign in again for that. If GitHub stops accepting the saved sign-in, requests fail with a message that tells you to run `cc-proxy login copilot`.
 
 The consent page says "GitHub Copilot Chat". cc-proxy uses the same client id as VS Code's Copilot Chat, because GitHub does not issue one to other tools.
 
@@ -56,4 +56,4 @@ These are for testing against a mock server. GitHub Enterprise Server is not sup
 - Rate limits and your premium request allowance come from GitHub. A 429 reaches Claude Code with its `retry-after`.
 - Copilot's terms apply to your account. Check them before you use a plan through a proxy.
 
-The sign-in is stored in `<configuration-root>/copilot/auth.json`, next to the saved model list in `models.json`. `cc-proxy copilot auth logout` removes both.
+The sign-in is stored in `<configuration-root>/copilot/auth.json`, next to the saved model list in `models.json`. `cc-proxy logout copilot` removes both.

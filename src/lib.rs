@@ -1,5 +1,7 @@
+pub mod accounts;
 pub mod anthropic;
 pub mod auth;
+pub mod auth_cli;
 pub mod browser;
 pub mod claude_settings;
 pub mod config;
@@ -19,6 +21,7 @@ pub mod providers;
 pub mod registry;
 pub mod request_identity;
 pub mod retry;
+mod rotation;
 pub mod route;
 pub mod server;
 pub mod session;

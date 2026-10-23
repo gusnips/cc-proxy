@@ -10,8 +10,8 @@ Cursor uses Cursor Agent's HTTP/2 full-duplex Connect protocol at `https://api2.
 Use a **Cursor account**:
 
 ```sh
-cc-proxy cursor auth login
-cc-proxy cursor auth status
+cc-proxy login cursor
+cc-proxy auth status cursor
 ```
 
 The browser flow stores proxy-owned tokens. It does not read Cursor Agent's Keychain or `auth.json`. `CCP_CURSOR_AUTH_TOKEN` can supply a bearer token directly to the proxy process.
