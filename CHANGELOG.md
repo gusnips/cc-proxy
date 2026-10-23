@@ -3,6 +3,16 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.13 (2026-10-23)
+
+- OpenCode Go and Zen no longer fail the turn when the requested reasoning
+  effort is outside what the model takes. MiMo `xhigh` and `max` run at
+  `high`, and GLM `low` and `medium` run at `high`, the least each model
+  offers.
+- The OpenCode Zen free-limit message ("Free usage limit reached ...") now
+  arrives as a limit error without retry, so the client stops instead of
+  looping, with the subscribe link kept in the message.
+
 ## v0.2.12 (2026-10-22)
 
 - Antigravity now discovers the models your account can use from Cloud Code
