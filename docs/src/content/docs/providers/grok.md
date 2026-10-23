@@ -10,14 +10,14 @@ Grok uses the Responses endpoint at `https://cli-chat-proxy.grok.com/v1/response
 Sign in with your **grok.com account** in a browser:
 
 ```sh
-cc-proxy grok auth login
+cc-proxy login grok
 ```
 
 For a headless host, use the device-code flow:
 
 ```sh
-cc-proxy grok auth device
-cc-proxy grok auth status
+cc-proxy login grok --device
+cc-proxy auth status grok
 ```
 
 The proxy owns and refreshes its Grok tokens. It does not read `~/.grok/auth.json`.
@@ -104,6 +104,6 @@ accepts and omits a valid positive integer or null, so it does not limit how
 many hosted search calls the model can make.
 
 Signing in does not mean every model is available. If Grok rejects a request,
-Claude Code shows the error. Run `cc-proxy grok auth status` to check your login,
+Claude Code shows the error. Run `cc-proxy auth status grok` to check your login,
 then inspect the failed request in the monitor. Use the log and error capture
 for response details. The proxy hides known credential fields.

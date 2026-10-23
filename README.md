@@ -177,9 +177,13 @@ it. Antigravity switches for spent quota, not temporary capacity throttles.
 A model-specific limit does not block other models.
 
 Rotation only applies to Messages requests before output starts, not images,
-audio or OpenAI-compatible routes. Codex's encrypted history cannot move
-between accounts. After a proxy restart with several saved Codex accounts,
-start a new conversation. See [rotation limits](docs/src/content/docs/reference/configuration.md#saved-accounts-and-auto-rotate).
+audio or OpenAI-compatible routes. Codex's encrypted history stays with the
+saved login that created it, including after a restart. History from older
+proxy versions needs a new conversation. See [rotation limits](docs/src/content/docs/reference/configuration.md#saved-accounts-and-auto-rotate).
+
+Run `cc-proxy usage codex` or `cc-proxy usage kimi` to see each saved account's
+usage and reset times. In the monitor, press `p` for accounts, known usage and
+wait timers. Request rows keep the name of the account they actually used.
 
 Run `cc-proxy config` for keyboard settings: Up and Down move, Left and Right
 change fixed choices, Enter edits a value. Changes save at once.

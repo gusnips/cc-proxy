@@ -114,11 +114,16 @@ again, but nothing forces a switch back. If every account is waiting, the
 proxy returns one 429 with the earliest retry time. `cc-proxy auth status codex`
 shows each account's wait.
 
-Rotation never replays output after a stream starts. Codex requests that carry
-encrypted reasoning or native compaction history cannot move between accounts.
-A manual switch refuses that history too. After a proxy restart with several
-saved Codex accounts, start a new conversation: old encrypted history does not
-identify which account created it. Ordinary text and tool history can rotate.
+Rotation never replays output after a stream starts. Codex reasoning signatures
+name the saved login that created them, so they remain usable after a proxy
+restart but cannot move between accounts. Replacing a login gives it a new
+internal ID. History from older proxy versions, raw encrypted blocks and history
+from a replaced login need a new conversation. Ordinary text and tool history
+can rotate.
+
+Codex's native Responses route rejects encrypted history, item references,
+`conversation` and `previous_response_id` because their account cannot be
+verified. Send full text and tool history instead.
 
 OpenAI-compatible routes, images and audio use the current account without
 rotation. API-key providers, Copilot and Cursor do not support saved-account

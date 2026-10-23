@@ -207,7 +207,7 @@ Shows how much of each plan you have used and when each limit resets, asked
 straight from the provider with the sign-in the proxy already holds:
 
 ```text
-Codex (plus)
+Codex `home` [current] (plus)
   5-hour window: 45% used, resets in 2h 10m (17:00)
   Weekly: 7% used, resets in 4d 9h (Mon 00:00)
 ```
@@ -230,15 +230,28 @@ in to gets one line with its login command. Name a provider to see only that
 one. If it isn't signed in, that line goes to stderr and the command exits
 with status 1. A failed lookup exits with status 2.
 
+Codex and Kimi show every saved account and mark the current one. Usage
+lookups never change which account requests use. A failed lookup names the
+account and leaves other accounts visible. `auth status <provider>` shows
+saved accounts and confirmed cooldowns without contacting the provider.
+
 `--json` prints one object with a key per provider. Codex and Kimi share one
 shape:
 
 ```json
 {
   "codex": {
-    "plan": "plus",
-    "five_hour": { "used_percent": 45.0, "resets_at_ms": 1786294800000 },
-    "weekly": { "used_percent": 7.0, "resets_at_ms": 1786752000000 }
+    "accounts": [
+      {
+        "name": "home",
+        "current": true,
+        "usage": {
+          "plan": "plus",
+          "five_hour": { "used_percent": 45.0, "resets_at_ms": 1786294800000 },
+          "weekly": { "used_percent": 7.0, "resets_at_ms": 1786752000000 }
+        }
+      }
+    ]
   }
 }
 ```

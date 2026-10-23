@@ -18,7 +18,7 @@ Daily: run `claude` through the proxy. Rare: sign in, switch provider, choose mo
 
 ## What it can and can't do
 
-- Real: sign in with a browser or a device code, route by model name, translate streaming and tool calls, show usage and a live monitor, update itself.
+- Real: sign in with a browser or a device code, route by model name, translate streaming and tool calls, show usage for each saved Codex or Kimi account, identify request accounts in the live monitor, update itself.
 - Limits: saved accounts and opt-in rotation for Codex, Kimi, Grok and Antigravity. No fallback between different providers. Encrypted Codex history stays with its account. Each provider controls its own plans, model access and terms; unofficial clients can carry account risk (the README says so).
 - Open: account-aware refresh and rotation for Copilot and Cursor.
 
