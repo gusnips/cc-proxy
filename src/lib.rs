@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod anthropic;
 pub mod auth;
 pub mod browser;
