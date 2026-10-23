@@ -2432,11 +2432,9 @@ mod opencode_account_tests {
         assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("OPENCODE_API_KEY")
+        assert_eq!(
+            value["error"]["message"].as_str().unwrap(),
+            "OpenCode Go has no API key. Run `cc-proxy auth login opencode` to add one."
         );
     }
 }
