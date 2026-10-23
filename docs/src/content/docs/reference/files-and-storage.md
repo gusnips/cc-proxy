@@ -36,17 +36,28 @@ running and removed.
 
 ## Provider credentials
 
-On macOS, Codex and Cursor use Keychain services:
+Codex, Kimi, Grok and Antigravity keep saved accounts under their provider folder:
 
-- `claude-code-proxy.codex`
-- `claude-code-proxy.cursor`
+- `accounts.json`: account names, internal IDs and which account is current.
+- `accounts/<id>.json`: one account's credentials. A new sign-in gets a new ID.
+- `accounts.lock`: a short file lock for account changes and refresh writes.
 
-Kimi, Grok and GitHub Copilot use `<configuration-root>/<provider>/auth.json` on every platform. Codex and Cursor use the same file layout on Linux and Windows. File-backed credentials are written with restrictive permissions where supported.
+A refresh only writes its own account file. A refresh that finishes after
+sign-out or replacement cannot restore the old login. Credential files are
+private to your user where the operating system supports file permissions.
 
-When `CCP_CONFIG_DIR` is set, file-backed provider credentials use
-`<CCP_CONFIG_DIR>/<provider>/auth.json`, including Codex and Cursor on macOS.
-`CCP_CURSOR_AUTH_TOKEN` bypasses Cursor's local credential store for that
-process.
+On first use, a single login in `<provider>/auth.json`, the old configuration
+folder or Codex's `claude-code-proxy.codex` Keychain entry moves into an account
+called `main`. The old copy is cleared only after the account is saved.
+
+Cursor still reads its `claude-code-proxy.cursor` Keychain entry on macOS,
+with a file fallback. Copilot keeps `copilot/auth.json`.
+`CCP_CURSOR_AUTH_TOKEN` supplies Cursor's login directly for that process.
+`CCP_CONFIG_DIR` changes the file root and disables Keychain use.
+
+`rotation.json` under the state root keeps cooldown deadlines by provider and
+internal account ID, with a model name when the limit applies to one model.
+It holds no tokens. `auth status` reads it without contacting a provider.
 
 OpenCode Go is the exception: it reads its API key from
 `CCP_OPENCODE_API_KEY`, `OPENCODE_API_KEY`, or `opencode.apiKey` in
@@ -56,7 +67,9 @@ The proxy owns these credentials independently of native Codex, Grok, and Cursor
 
 ## Kimi device ID
 
-Kimi stores a persistent UUID at `<configuration-root>/kimi/device_id` for file-backed setups. It is bound into the Kimi token and must remain paired with that login.
+Each Kimi account keeps its device ID in its own credential file. A migrated
+login keeps the ID from `<configuration-root>/kimi/device_id`. New logins get
+new IDs. Copy the whole provider folder, not a token by itself.
 
 ## Structured log
 

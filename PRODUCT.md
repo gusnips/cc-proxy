@@ -19,8 +19,8 @@ Daily: run `claude` through the proxy. Rare: sign in, switch provider, choose mo
 ## What it can and can't do
 
 - Real: sign in with a browser or a device code, route by model name, translate streaming and tool calls, show usage and a live monitor, update itself.
-- Limits: one login per provider until saved accounts ship. No fallback between different providers. Each provider controls its own plans, model access and terms; unofficial clients can carry account risk (the README says so).
-- Open: which providers can safely keep more than one login, and how a limit is reported by each.
+- Limits: saved accounts and opt-in rotation for Codex, Kimi, Grok and Antigravity. No fallback between different providers. Encrypted Codex history stays with its account. Each provider controls its own plans, model access and terms; unofficial clients can carry account risk (the README says so).
+- Open: account-aware refresh and rotation for Copilot and Cursor.
 
 ## Voice and brand
 

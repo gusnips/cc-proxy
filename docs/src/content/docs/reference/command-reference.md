@@ -126,27 +126,72 @@ cc-proxy models refresh [provider|all]
 The command shape is:
 
 ```text
-cc-proxy <provider> auth <action>
+cc-proxy auth <action> [provider]
 ```
 
-| Provider   | `login`                | `device`        | `status`                             | `logout`                               |
-| ---------- | ---------------------- | --------------- | ------------------------------------ | -------------------------------------- |
-| `codex`    | Browser PKCE           | Device code     | Account, expiry, storage             | Delete proxy credential                |
-| `kimi`     | Device code            | Unsupported     | User, expiry, scope, storage         | Delete proxy credential                |
-| `grok`     | Browser PKCE           | Device code     | Expiry and storage                   | Delete proxy credential                |
-| `copilot`  | Device code            | Same as `login` | Account, host, token expiry, storage | Delete proxy credential and model list |
-| `cursor`   | Browser polling flow   | Unsupported     | Source, claims, expiry               | Delete proxy credential                |
-| `glm`      | API key entry          | Unsupported     | Env and stored key presence          | Delete proxy credential                |
-| `opencode` | API key entry (hidden) | Unsupported     | Key source and base URL              | Delete stored key                      |
+For sign-in and sign-out, the shorter forms take the same arguments and options:
+
+```sh
+cc-proxy login codex                # same as: cc-proxy auth login codex
+cc-proxy login codex --device
+cc-proxy login codex --replace
+cc-proxy logout codex               # same as: cc-proxy auth logout codex
+cc-proxy logout codex work
+cc-proxy logout codex --all
+```
+
+| Provider      | `login`                | `device`        | `status`                             | `logout`                               |
+| ------------- | ---------------------- | --------------- | ------------------------------------ | -------------------------------------- |
+| `codex`       | Browser PKCE           | Device code     | Account, expiry, storage             | Delete proxy credential                |
+| `kimi`        | Device code            | Unsupported     | User, expiry, scope, storage         | Delete proxy credential                |
+| `grok`        | Browser PKCE           | Device code     | Expiry and storage                   | Delete proxy credential                |
+| `antigravity` | Google browser sign-in | Same as `login` | Account and expiry                   | Delete a saved account                 |
+| `copilot`     | Device code            | Same as `login` | Account, host, token expiry, storage | Delete proxy credential and model list |
+| `cursor`      | Browser polling flow   | Unsupported     | Source, claims, expiry               | Delete proxy credential                |
+| `glm`         | API key entry          | Unsupported     | Env and stored key presence          | Delete proxy credential                |
+| `opencode`    | API key entry (hidden) | Unsupported     | Key source and base URL              | Delete stored key                      |
 
 Examples:
 
 ```sh
-cc-proxy codex auth login
-cc-proxy grok auth device
-cc-proxy kimi auth status
-cc-proxy cursor auth logout
+cc-proxy login codex
+cc-proxy auth device grok
+cc-proxy auth status kimi
+cc-proxy logout cursor
 ```
+
+### Saved accounts
+
+Codex, Kimi, Grok and Antigravity support these commands:
+
+```sh
+cc-proxy auth add codex --name work
+cc-proxy auth use codex work
+cc-proxy auth status codex
+cc-proxy login codex --replace --account work
+cc-proxy logout codex work
+cc-proxy logout codex --all
+```
+
+`add` saves another login without switching away from the current account.
+`--name` is optional; the first default name is `main`, then `account-2` and so
+on. Names use up to 32 letters, numbers, `-` or `_` and start with a letter or
+number. `--device` chooses device-code login when supported.
+
+`login` with an existing account asks Add or Replace. Outside a terminal it
+refuses to guess: use `auth add` or `login --replace`. `--account` names which
+account to replace; without it, the current account is replaced. A failed or
+cancelled sign-in keeps the saved login. Signing in as an identity already
+saved offers to replace that account instead of adding a duplicate.
+
+`auth use` without an account opens a picker in a terminal. The switch applies
+to the next request, without restarting the proxy. `auth status` lists all
+accounts, the current one and any limit wait. `logout` without a name signs
+out when there is one account; with several, it asks which one. Scripts must
+name the account or use `--all`.
+
+Other providers still keep one login. See [auto-rotate](/reference/configuration/#saved-accounts-and-auto-rotate)
+for automatic switching and its limits.
 
 A missing credential makes `auth status` exit with status 1. Other provider command failures exit with status 2. Successful commands exit with status 0.
 
@@ -206,11 +251,11 @@ send is left out. `opencode` holds OpenCode Go's own reply, unchanged.
 Store the key once without echoing it:
 
 ```sh
-cc-proxy opencode auth login
+cc-proxy login opencode
 ```
 
-The key lands in `opencode.apiKey` in config.json. `opencode auth status`
-reports which source provides the key; `opencode auth logout` removes the
+The key lands in `opencode.apiKey` in config.json. `auth status opencode`
+reports which source provides the key; `logout opencode` removes the
 stored key. When nothing of ours is set, the proxy falls back to
 `OPENCODE_API_KEY` in Claude Code's `~/.claude/settings.json`.
 

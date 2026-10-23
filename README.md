@@ -52,7 +52,7 @@ Windows and other prebuilt artifacts are available from
 Sign in with a **ChatGPT Plus or Pro account**, not an OpenAI API account:
 
 ```sh
-cc-proxy codex auth login
+cc-proxy login codex
 ```
 
 Start the proxy and send Claude Code through it:
@@ -71,14 +71,18 @@ leaves the proxy running. `cc-proxy restart` and `cc-proxy reload` restart it
 and reload its config.
 
 Sign in to the other providers the same way (`kimi`, `grok`, `cursor`,
-`glm`, `opencode`, `copilot`), then check state and usage:
+`glm`, `opencode`, `copilot`, `antigravity`), then check state and usage:
 
 ```sh
-cc-proxy kimi auth login
-cc-proxy kimi auth status
+cc-proxy login kimi
+cc-proxy auth status kimi
 cc-proxy usage
 cc-proxy models list
 ```
+
+`cc-proxy login codex` is the short form of `cc-proxy auth login codex`.
+Sign out with `cc-proxy logout codex` (or `cc-proxy auth logout codex`).
+Both forms take the same options.
 
 `cc-proxy usage` shows how much of your Codex, Kimi and OpenCode Go plans
 you have used, and when each limit resets.
@@ -145,17 +149,53 @@ curl http://127.0.0.1:18765/v1/images/generations \
 
 The opt-in Images API returns base64 image data and consumes the signed-in account's image quota. Image prompts and payloads are excluded from traffic captures. See the [HTTP API](docs/src/content/docs/reference/http-api.md) for generation and edit schemas.
 
+## More than one login
+
+Codex, Kimi, Grok and Antigravity can keep several accounts. Add a second
+Codex account, then switch to it:
+
+```sh
+cc-proxy auth add codex --name work
+cc-proxy auth use codex work
+cc-proxy auth status codex
+```
+
+`cc-proxy login codex` asks whether to add or replace an account when you're
+already signed in. To replace it without the question, use
+`cc-proxy login codex --replace`. Sign out of one account with
+`cc-proxy logout codex work`, or all of them with `cc-proxy logout codex --all`.
+
+Automatic switching is off by default. Enable it with:
+
+```sh
+cc-proxy config set auth.autoRotate true
+```
+
+A 429 with a provider-stated retry or reset time makes that account wait.
+The proxy tries another saved account from the same provider and keeps using
+it. Antigravity switches for spent quota, not temporary capacity throttles.
+A model-specific limit does not block other models.
+
+Rotation only applies to Messages requests before output starts, not images,
+audio or OpenAI-compatible routes. Codex's encrypted history cannot move
+between accounts. After a proxy restart with several saved Codex accounts,
+start a new conversation. See [rotation limits](docs/src/content/docs/reference/configuration.md#saved-accounts-and-auto-rotate).
+
+Run `cc-proxy config` for keyboard settings: Up and Down move, Left and Right
+change fixed choices, Enter edits a value. Changes save at once.
+
 ## Providers
 
-| Provider       | Account                              | Model selection                                                          |
-| -------------- | ------------------------------------ | ------------------------------------------------------------------------ |
-| Codex          | ChatGPT Plus or Pro                  | Any `gpt-*` ID (unlisted ones forward raw; `-fast` = priority tier)      |
-| Kimi           | A Kimi account with Kimi Code access | `k3`/`kimi-k3` (legacy `kimi-for-coding`); unlisted `kimi-*` forward raw |
-| Grok           | grok.com                             | `grok-*` IDs (unlisted ones forward raw)                                 |
-| OpenCode Go    | OpenCode Go subscription             | Non-conflicting IDs and `opencode-go/<model-id>`                         |
-| Cursor Agent   | Cursor account                       | Cursor aliases and `cursor:<model-id>` prefixes                          |
-| GLM            | z.ai API key                         | `glm-*` IDs (unlisted ones forward raw)                                  |
-| GitHub Copilot | GitHub account with a Copilot plan   | `copilot/<id>`; `cc-proxy models list` lists yours                            |
+| Provider       | Account                                | Model selection                                                          |
+| -------------- | -------------------------------------- | ------------------------------------------------------------------------ |
+| Codex          | ChatGPT Plus or Pro                    | Any `gpt-*` ID (unlisted ones forward raw; `-fast` = priority tier)      |
+| Kimi           | A Kimi account with Kimi Code access   | `k3`/`kimi-k3` (legacy `kimi-for-coding`); unlisted `kimi-*` forward raw |
+| Grok           | grok.com                               | `grok-*` IDs (unlisted ones forward raw)                                 |
+| Antigravity    | Google account with Antigravity access | `antigravity/<id>`; `cc-proxy models list antigravity` lists models      |
+| OpenCode Go    | OpenCode Go subscription               | Non-conflicting IDs and `opencode-go/<model-id>`                         |
+| Cursor Agent   | Cursor account                         | Cursor aliases and `cursor:<model-id>` prefixes                          |
+| GLM            | z.ai API key                           | `glm-*` IDs (unlisted ones forward raw)                                  |
+| GitHub Copilot | GitHub account with a Copilot plan     | `copilot/<id>`; `cc-proxy models list` lists yours                       |
 
 Run `cc-proxy models list` for the current catalog or
 `cc-proxy models list --full` for every dynamic Cursor alias.
