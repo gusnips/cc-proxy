@@ -1,7 +1,6 @@
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use super::constants::KIMI_CLI_VERSION;
-use super::device_id::get_device_id;
 use crate::config;
 
 fn device_model() -> String {
@@ -23,11 +22,13 @@ fn ascii_only(value: &str, fallback: &str) -> String {
     }
 }
 
-/// The identity headers Kimi expects on every call. A value that cannot be
-/// sent as a header (a configured user agent with a control character, say)
-/// is left out rather than failing the request.
-pub fn common_headers() -> Result<HeaderMap, anyhow::Error> {
-    let device_id = get_device_id()?;
+/// The identity headers Kimi expects on every call. An invalid optional value
+/// (a configured user agent with a control character, say) is left out. The
+/// account's device ID is required and never replaced with another ID.
+pub fn common_headers(device_id: &str) -> Result<HeaderMap, anyhow::Error> {
+    if device_id.trim().is_empty() {
+        anyhow::bail!("The saved Kimi sign-in has no device ID. Sign in again to replace it.");
+    }
     let hostname_str = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
@@ -42,14 +43,33 @@ pub fn common_headers() -> Result<HeaderMap, anyhow::Error> {
             "x-msh-os-version",
             ascii_only(std::env::consts::ARCH, "unknown"),
         ),
-        ("x-msh-device-id", device_id),
         ("user-agent", user_agent),
     ];
     let mut headers = HeaderMap::new();
+    headers.insert("x-msh-device-id", HeaderValue::from_str(device_id)?);
     for (name, value) in pairs {
         if let Ok(value) = HeaderValue::from_str(&value) {
             headers.insert(HeaderName::from_static(name), value);
         }
     }
     Ok(headers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headers_use_only_the_selected_accounts_device_id() {
+        assert_eq!(
+            common_headers("device-first").unwrap()["x-msh-device-id"],
+            "device-first"
+        );
+        assert_eq!(
+            common_headers("device-second").unwrap()["x-msh-device-id"],
+            "device-second"
+        );
+        assert!(common_headers("").is_err());
+        assert!(common_headers("invalid\ndevice").is_err());
+    }
 }

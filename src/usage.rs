@@ -309,7 +309,8 @@ async fn codex(client: &reqwest::Client) -> Result<Option<PlanUsage>, Failure> {
 }
 
 async fn kimi(client: &reqwest::Client) -> Result<Option<PlanUsage>, Failure> {
-    let manager = KimiAuthManager::new(kimi_tokens::file_store());
+    let manager =
+        KimiAuthManager::new(kimi_tokens::file_store().map_err(|_| Failure::SignInUnusable)?);
     if manager
         .store
         .load_auth()
@@ -324,7 +325,8 @@ async fn kimi(client: &reqwest::Client) -> Result<Option<PlanUsage>, Failure> {
         .await
         .map_err(|_| Failure::SignInUnusable)?
         .map_err(|_| Failure::SignInUnusable)?;
-    let mut headers = common_headers().map_err(|error| Failure::Setup(error.to_string()))?;
+    let mut headers =
+        common_headers(&auth.device_id).map_err(|error| Failure::Setup(error.to_string()))?;
     let bearer = HeaderValue::from_str(&format!("Bearer {}", auth.access))
         .map_err(|_| Failure::Setup("the saved token isn't a valid header".into()))?;
     headers.insert(AUTHORIZATION, bearer);

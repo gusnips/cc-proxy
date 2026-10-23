@@ -1,16 +1,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::auth::FileAuthStore;
 use crate::providers::kimi::auth::constants::api_base_url;
 use crate::providers::kimi::auth::headers::common_headers;
 use crate::providers::kimi::auth::manager::KimiAuthManager;
-use crate::providers::kimi::auth::token_store::{StoredAuth, file_store};
+use crate::providers::kimi::auth::token_store::{DefaultKimiAuthStore, StoredAuth, for_request};
 use crate::providers::kimi::translate::request::KimiChatRequest;
 use crate::providers::upstream_error::{self, FailureKind};
 use crate::retry::{self, MAX_RATE_LIMIT_RETRIES, compute_backoff_delay};
 
-type AuthManager = KimiAuthManager<FileAuthStore<StoredAuth>>;
+type AuthManager = KimiAuthManager<DefaultKimiAuthStore>;
 
 #[derive(Debug)]
 pub struct KimiError {
@@ -31,7 +30,6 @@ impl KimiError {
 
 pub struct KimiHttpClient {
     client: reqwest::Client,
-    auth_manager: Arc<AuthManager>,
 }
 
 impl Default for KimiHttpClient {
@@ -51,23 +49,32 @@ impl KimiHttpClient {
                 .read_timeout(Duration::from_secs(120))
                 .build()
                 .expect("failed to create HTTP client"),
-            auth_manager: Arc::new(KimiAuthManager::new(file_store())),
         }
     }
 
     /// Sends the request and returns the response once Kimi has accepted it
     /// with a 2xx, so the caller can read the body as it streams.
-    pub async fn post_kimi(&self, body: &KimiChatRequest) -> Result<reqwest::Response, KimiError> {
-        let mut auth = self.auth(AuthManager::get_auth).await?;
+    pub async fn post_kimi(
+        &self,
+        body: &KimiChatRequest,
+        account: Option<&str>,
+    ) -> Result<reqwest::Response, KimiError> {
+        let store = for_request(account).map_err(|error| KimiError::new(401, error))?;
+        let manager = Arc::new(KimiAuthManager::new(store));
+        let mut auth = Self::auth(manager.clone(), AuthManager::get_auth).await?;
         let mut refreshed = false;
         let mut attempt = 0u32;
         loop {
-            match self.attempt_post(&auth.access, body).await {
+            match self.attempt_post(&auth, body).await {
                 // A token can be rejected before its expiry, for example after
                 // a peer sharing the login (the Kimi CLI) refreshed it. One
                 // refresh and replay recovers that; a second 401 is a real one.
                 Err(KimiError { status: 401, .. }) if !refreshed => {
-                    auth = self.auth(AuthManager::force_refresh).await?;
+                    let rejected_access = auth.access.clone();
+                    auth = Self::auth(manager.clone(), move |manager| {
+                        manager.force_refresh(&rejected_access)
+                    })
+                    .await?;
                     refreshed = true;
                 }
                 Err(err @ KimiError { status: 429, .. }) => {
@@ -86,10 +93,9 @@ impl KimiHttpClient {
     /// client, so it runs on a blocking thread rather than stalling the
     /// runtime that carries every other stream.
     async fn auth(
-        &self,
-        load: fn(&AuthManager) -> anyhow::Result<StoredAuth>,
+        manager: Arc<AuthManager>,
+        load: impl FnOnce(&AuthManager) -> anyhow::Result<StoredAuth> + Send + 'static,
     ) -> Result<StoredAuth, KimiError> {
-        let manager = self.auth_manager.clone();
         match tokio::task::spawn_blocking(move || load(&manager)).await {
             Ok(Ok(auth)) => Ok(auth),
             Ok(Err(error)) => Err(KimiError::new(401, error)),
@@ -99,16 +105,16 @@ impl KimiHttpClient {
 
     async fn attempt_post(
         &self,
-        access_token: &str,
+        auth: &StoredAuth,
         body: &KimiChatRequest,
     ) -> Result<reqwest::Response, KimiError> {
-        let headers = common_headers().map_err(|e| KimiError::new(500, e))?;
+        let headers = common_headers(&auth.device_id).map_err(|e| KimiError::new(500, e))?;
         let response = self
             .client
             .post(format!("{}/chat/completions", api_base_url()))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Authorization", format!("Bearer {}", auth.access))
             .headers(headers)
             .json(body)
             .send()

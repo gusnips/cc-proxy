@@ -33,8 +33,8 @@ struct DeviceAuthResponse {
 const GRANT_DEVICE_CODE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const POLL_SAFETY_MARGIN_MS: u64 = 500;
 
-pub fn run_device_login() -> Result<TokenResponse, anyhow::Error> {
-    let headers = common_headers()?;
+pub fn run_device_login(device_id: &str) -> Result<TokenResponse, anyhow::Error> {
+    let headers = common_headers(device_id)?;
     let client = reqwest::blocking::Client::new();
 
     let init_resp = client
