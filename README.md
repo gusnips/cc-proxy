@@ -21,8 +21,8 @@ provider services.
 
 One local process handles provider authentication, model-based routing,
 protocol translation, streaming responses, and diagnostics. The built-in
-monitor shows sessions, active and recent requests, errors, token usage, and
-throughput.
+monitor lets you choose providers and saved accounts, check usage and manage
+rotation. Its Activity tab keeps the request, error and throughput details.
 
 ## Quick start with Codex
 
@@ -66,9 +66,10 @@ cc-proxy status
 signed in to more than one provider, it asks which one Claude Code should
 use. If you aren't signed in to any, it asks which one to sign in to.
 
-Attach the dashboard from any terminal with `cc-proxy monitor`. Detaching
-leaves the proxy running. `cc-proxy restart` and `cc-proxy reload` restart it
-and reload its config.
+Open `cc-proxy monitor` from any terminal. Accounts opens first: use the arrows
+and Enter to choose a provider or saved login. Press `2` for live activity.
+Closing the monitor leaves the proxy running. `cc-proxy restart` restarts it;
+`cc-proxy reload` asks it to read config changes.
 
 Sign in to the other providers the same way (`kimi`, `grok`, `cursor`,
 `glm`, `opencode`, `copilot`, `antigravity`), then check state and usage:
@@ -183,9 +184,10 @@ carries reasoning from another saved login, cc-proxy drops only that reasoning
 and continues with the text and tool history. See [rotation limits](docs/src/content/docs/reference/configuration.md#saved-accounts-and-auto-rotate).
 
 Run `cc-proxy usage codex` or `cc-proxy usage kimi` to see how much is left on
-each saved account and when each window resets. In the monitor, press `p` for
-accounts, usage and wait timers. Request rows keep the name of the account they
-actually used.
+each saved account and when each window resets. The monitor's Accounts tab
+shows the same usage and wait timers. Select a row and press Enter to switch
+accounts, add a login, change the fallback order or turn auto-rotate on or off.
+Request rows in Activity keep the name of the account they actually used.
 
 Run `cc-proxy config` for keyboard settings: Up and Down move, Left and Right
 change fixed choices, Enter edits a value. Changes save at once.

@@ -98,7 +98,9 @@ If routing is on but nothing answers on the port (the proxy crashed, or the mach
 cc-proxy monitor [--url <URL>]
 ```
 
-Attach a read-only dashboard to a running proxy. The default URL is `http://127.0.0.1:<configured-port>`. No provider login is needed in the dashboard process. `q` and `Ctrl-C` detach without stopping the proxy; multiple dashboards are supported. After a connection failure, the dashboard retains its last snapshot and retries. The proxy accepts monitor reads only from loopback peers; use an SSH port forward for another machine.
+Open the monitor for a running proxy. Accounts opens first, with provider and account choices, usage, rotation and fallback actions. Use arrows and Enter; press `2` for requests and errors in Activity. Changes save without a restart. `q` and `Ctrl-C` close the monitor without stopping the proxy.
+
+The default URL is `http://127.0.0.1:<configured-port>`. An explicit `--url` opens read-only Activity and never loads or changes local accounts. No provider login is needed for that connection. The endpoint accepts only loopback peers; use an SSH port forward for another machine. After a connection failure, the monitor keeps its last snapshot, pauses changes and retries. See [Monitor](/using/monitor-tui/) for the actions and keys.
 
 ## `demo`
 
