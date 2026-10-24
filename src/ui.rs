@@ -481,7 +481,7 @@ mod tests {
     fn a_remaining_meter_empties_and_turns_red_at_the_end() {
         assert_eq!(strip_ansi(&remaining_meter(45.0, 20)).chars().count(), 20);
         assert!(remaining_meter(45.0, 20).starts_with(&paint(&"━".repeat(9), GREEN)));
-        assert!(remaining_meter(5.0, 20).starts_with(&paint(&"━".to_string(), RED)));
+        assert!(remaining_meter(5.0, 20).starts_with(&paint("━", RED)));
         assert!(remaining_meter(25.0, 20).starts_with(&paint(&"━".repeat(5), YELLOW)));
     }
 }

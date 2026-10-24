@@ -20,6 +20,10 @@ description: Release notes for cc-proxy.
   Codex and Kimi.
 - The account list and `cc-proxy auth status codex` show the signed-in email
   instead of the internal account ID when the token carries one.
+- `cc-proxy auth login opencode-zen` now signs in with Console OAuth like the
+  opencode CLI does, opening the verification URL with the code embedded and
+  polling for the token. The bare `opencode.ai/zen` page plus manual API key
+  paste is gone.
 - Claude models on Antigravity no longer fail every tool call with
   `tools.N.custom.input_schema` 400s. `anyOf`/`oneOf` unions in tool schemas
   (e.g. SendMessage's nested message shape) collapse or widen away before

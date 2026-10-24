@@ -776,17 +776,9 @@ impl CliHandlers for OpenCodeZenCli {
     }
 
     fn login(&self) -> anyhow::Result<()> {
-        let url = "https://opencode.ai/zen";
-        println!("Open {url} to get your OpenCode Zen API key.");
-        let _ = crate::browser::open(url);
-        println!("Paste your OpenCode Zen API key (input is hidden) and press Enter:");
-        let key = crate::prompt::read_hidden_line("API key: ")?;
-        if key.is_empty() {
-            anyhow::bail!("no API key provided");
-        }
-        let path = crate::config::save_opencode_zen_api_key(&key)?;
-        println!("OpenCode Zen API key saved to {}", path.display());
-        Ok(())
+        // Zen signs in with Console OAuth like the opencode CLI does; the
+        // verification URL carries the code, so no API key paste is needed.
+        self.device()
     }
 
     fn device(&self) -> anyhow::Result<()> {
