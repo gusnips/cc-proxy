@@ -16,7 +16,11 @@ the proxy running. You can open it in more than one terminal.
 
 Accounts opens first. It shows where Claude Code goes, your fallback order and
 saved logins grouped by provider. `[primary]` marks the provider Claude Code uses.
-`[current]` marks the saved account chosen for that provider's new requests.
+`[current]` marks the saved account choice, not an active request. If that account
+has a confirmed wait, it shows `[current, waiting]`. With auto-rotate on, a new
+request skips accounts still waiting. When every account has a confirmed wait,
+`[first reset]` marks the earliest reset. The saved choice changes when a request
+actually switches accounts, not while the proxy is idle.
 
 Use Up and Down to choose a row, then Enter to see its actions. Choose an action
 with the arrows and press Enter to run it. Escape goes back without making a
@@ -49,7 +53,9 @@ until it reconnects.
 Select a saved account to see its usage. Codex and Kimi show how much is left in
 each window and when it resets. Confirmed limits show how long the account must
 wait, including model-specific limits. Providers that do not report usage still
-show confirmed wait timers.
+show confirmed wait timers. Remaining percentages are bright green from 80%,
+green above 30%, yellow above 10% and red at 10% or less. These colors also apply
+to the bars and numbers in `cc-proxy usage`.
 
 Usage loads in the background and refreshes while Accounts is open. Press `r` to
 refresh now. A failed lookup says usage is unavailable, not zero. Page Up and Page

@@ -14,7 +14,9 @@ A calm terminal tool with a small face. A command prints a headline, a few plain
 
 ## Tokens
 
-Colors live in `src/ui.rs`: `TEAL`, `WHITE`, `DIM_WHITE`, `GREEN`, `RED`, `YELLOW`, `DIM`, and `provider_color` for providers. Never a second palette. A status color always comes with a word.
+Colors live in `src/ui.rs`: `TEAL`, `WHITE`, `DIM_WHITE`, `BRIGHT_GREEN`, `GREEN`, `RED`, `YELLOW`, `DIM`, and `provider_color` for providers. Never a second palette. A status color always comes with a word.
+
+Remaining allowance uses the same colors for percentages and bars: bright green from 80%, green above 30%, yellow above 10% and red at 10% or less. Keep window labels and reset times neutral. Plain text and JSON keep the same numbers without color codes.
 
 ## Components
 
@@ -24,6 +26,7 @@ Colors live in `src/ui.rs`: `TEAL`, `WHITE`, `DIM_WHITE`, `GREEN`, `RED`, `YELLO
 - Accounts is the monitor's first tab: one provider/account list and a detail area. Enter opens actions in the detail area, not a modal. Wide terminals place them side by side; narrow terminals stack them. The selected account's usage and wait timers scroll with Page Up/Down. Failed usage is unavailable, never zero. The background worker loads usage, never a request.
 - Activity is the second tab and keeps the session, active request, recent request and error views. Request rows put the saved account name before the resolved model. Full details keep the original model text.
 - Left/Right, Tab and 1/2 switch tabs. Up/Down or j/k move through rows or actions. Escape closes the active layer first. Actions only run after Enter on an explicit choice. Saved account choices change that provider, not Claude Code's route.
+- A saved current account is not an active request. Mark its confirmed global wait as `[current, waiting]`. When every account has a confirmed global wait, mark the earliest release `[first reset]` and explain that the next request rechecks availability. Model-only waits must not claim the whole provider is waiting. Rendering never changes the saved account.
 - Explicit `monitor --url` connections open Activity and are read-only. They never load this computer's accounts. Demo mode uses simulated accounts; its actions never write real settings or credentials. A disconnected monitor pauses changes and says it is reconnecting.
 
 Build new screens from these. Don't add a terminal UI dependency.
