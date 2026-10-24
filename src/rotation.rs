@@ -339,8 +339,7 @@ async fn execute_with(
             // instead of dying on a 429.
             if !waited {
                 let now = now_ms();
-                if let Some(until) =
-                    first_release(&list, &snapshot, provider.name(), model, now)
+                if let Some(until) = first_release(&list, &snapshot, provider.name(), model, now)
                     && until > now
                 {
                     let wait = until - now;
