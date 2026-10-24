@@ -796,6 +796,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn earliest_reset_resumes_on_non_current_account_after_a_short_wait() {
+        let (_dir, accounts, cooldowns, list) = fixture();
+        accounts.set_current("b").unwrap();
+        let now = now_ms();
+        cooldowns
+            .mark("codex", &list[0].id, None, now + 100)
+            .unwrap();
+        cooldowns
+            .mark("codex", &list[1].id, None, now + 3_600_000)
+            .unwrap();
+        let fake = fake(Vec::new(), None, StatusCode::OK);
+
+        assert_eq!(
+            call(&fake, &accounts, &cooldowns).await.status(),
+            StatusCode::OK
+        );
+        assert!(now_ms() >= now + 100);
+        assert_eq!(*fake.calls.lock().unwrap(), [list[0].id.clone()]);
+        assert_eq!(accounts.current().unwrap().unwrap().id, list[0].id);
+    }
+
+    #[tokio::test]
+    async fn fresh_retry_uses_earliest_reset_not_the_later_current_account() {
+        let (_dir, accounts, cooldowns, list) = fixture();
+        accounts.set_current("b").unwrap();
+        let now = now_ms();
+        let first_reset = now + 3_600_000;
+        cooldowns
+            .mark("codex", &list[0].id, None, first_reset)
+            .unwrap();
+        cooldowns
+            .mark("codex", &list[1].id, None, now + 7_200_000)
+            .unwrap();
+        let fake = fake(Vec::new(), None, StatusCode::OK);
+        let response = call(&fake, &accounts, &cooldowns).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.extensions().get::<ExhaustedAt>().unwrap().until_ms,
+            first_reset
+        );
+        assert!(fake.calls.lock().unwrap().is_empty());
+        assert_eq!(accounts.current().unwrap().unwrap().id, list[1].id);
+
+        // Simulate the client retrying after only the earlier account resets.
+        let mut entries = cooldowns.read().unwrap();
+        entries
+            .iter_mut()
+            .find(|entry| entry.account == list[0].id)
+            .unwrap()
+            .until_ms = now_ms() - 1;
+        fs::write(&cooldowns.path, serde_json::to_vec(&entries).unwrap()).unwrap();
+        assert_eq!(
+            call(&fake, &accounts, &cooldowns).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(*fake.calls.lock().unwrap(), [list[0].id.clone()]);
+        assert_eq!(accounts.current().unwrap().unwrap().id, list[0].id);
+    }
+
+    #[tokio::test]
     async fn all_limited_returns_the_first_deadline_without_calling_again() {
         let (_dir, accounts, cooldowns, list) = fixture();
         let fake = fake(

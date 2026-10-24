@@ -3,6 +3,19 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.3.2 (2026-10-24)
+
+- Remaining percentages now show bright green from 80%, green above 30%, yellow
+  above 10% and red at 10% or less. The monitor and `cc-proxy usage` share the
+  same colors, including the number when a bar is empty.
+- Waiting saved accounts show `[waiting]` or `[current, waiting]`. When all
+  accounts have confirmed global waits, `[first reset]` marks the earliest
+  reset. The details explain that current is a saved choice, not an active
+  request. With auto-rotate on, the next request skips accounts still waiting;
+  it does not need the saved choice changed in advance.
+- OpenCode Go's monitor usage shows how much remains, matching Codex, Kimi and
+  the usage command.
+
 ## v0.3.1 (2026-10-24)
 
 - `cc-proxy monitor` opens Accounts first. Use the arrows and Enter to choose

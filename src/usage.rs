@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use clap::ValueEnum;
 use jiff::{Timestamp, tz::TimeZone};
+use ratatui::text::Line;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -159,17 +160,16 @@ enum AccountResult {
 
 impl PlanUsage {
     /// One line per window, so a dense row cannot hide the number that matters.
-    fn lines(&self, now: Timestamp, tz: &TimeZone) -> Vec<String> {
+    fn lines(&self, now: Timestamp, tz: &TimeZone) -> Vec<Line<'static>> {
         let window = |label: &str, window: Option<Window>| {
             window.map(|window| {
-                let mut part = format!("{label} {:.0}% left", window.remaining_percent());
-                if let Some(reset) = window
+                let reset = window
                     .resets_at_ms
                     .and_then(|ms| Timestamp::from_millisecond(ms).ok())
-                {
-                    part.push_str(&format!(", {}", format_reset(reset, now, tz)));
-                }
-                part
+                    .map_or(String::new(), |reset| {
+                        format!(", {}", format_reset(reset, now, tz))
+                    });
+                ui::remaining_line(label, window.remaining_percent(), &reset)
             })
         };
         [window("5h", self.five_hour), window("week", self.weekly)]
@@ -278,9 +278,8 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
     Ok(code)
 }
 
-/// Usage for providers without saved accounts. Account-aware providers use
-/// `account_usage_lines`, so the monitor never asks them twice in one refresh.
-pub fn headlines() -> Vec<(&'static str, String)> {
+/// OpenCode Go reports usage for its current login only.
+pub(crate) fn headlines() -> Vec<(&'static str, Vec<Line<'static>>)> {
     if crate::accounts::saved_api_key("opencode", None)
         .or_else(config::opencode_api_key)
         .is_none()
@@ -292,31 +291,27 @@ pub fn headlines() -> Vec<(&'static str, String)> {
         Ok(results) => match results.into_iter().next() {
             Some(Ok(Some(Report::OpenCode(response)))) => {
                 let usage = &response.usage;
-                let used = |label: &str,
-                            window: &Option<
-                    crate::providers::opencode::client::OpenCodeUsageWindow,
-                >| {
-                    window
-                        .as_ref()
-                        .and_then(|window| window.percent)
-                        .map(|percent| format!("{label} {percent:.0}%"))
-                };
                 [
-                    used("5h", &usage.rolling),
-                    used("week", &usage.weekly),
-                    used("month", &usage.monthly),
+                    ("5h", &usage.rolling),
+                    ("week", &usage.weekly),
+                    ("month", &usage.monthly),
                 ]
                 .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(" · ")
+                .filter_map(|(label, window)| {
+                    let window = window.as_ref()?;
+                    let remaining = (100.0 - window.percent?).clamp(0.0, 100.0);
+                    Some(ui::remaining_line(label, remaining, ""))
+                })
+                .collect()
             }
             Some(Ok(None)) => return Vec::new(),
-            _ => "usage unavailable".to_string(),
+            _ => {
+                vec!["Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into()]
+            }
         },
         Err(error) => {
             tracing::warn!(%error, "Could not start the OpenCode usage lookup");
-            "usage unavailable".to_string()
+            vec!["Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into()]
         }
     };
     vec![("opencode", headline)]
@@ -326,13 +321,17 @@ pub fn headlines() -> Vec<(&'static str, String)> {
 /// only a lookup key; the monitor shows the saved name, never the provider's
 /// account identity. Each window gets its own line. Call this on its
 /// background worker, not a request.
-pub fn account_usage_lines() -> HashMap<(String, String), Vec<String>> {
+pub(crate) fn account_usage_lines() -> HashMap<(String, String), Vec<Line<'static>>> {
     let mut lines = HashMap::new();
     for provider in ["codex", "kimi", "grok", "antigravity"] {
         let unavailable = if matches!(provider, "codex" | "kimi") {
-            vec![format!("usage unavailable; run cc-proxy usage {provider}")]
+            vec![Line::from(format!(
+                "Usage unavailable. Press r to retry, or run cc-proxy usage {provider}."
+            ))]
         } else {
-            vec!["usage not supported".to_string()]
+            vec![Line::from(
+                "This provider does not report usage. Confirmed wait timers still appear here.",
+            )]
         };
         match Accounts::new(provider).list() {
             Ok(accounts) => {
@@ -361,10 +360,10 @@ pub fn account_usage_lines() -> HashMap<(String, String), Vec<String>> {
                     let account_lines = match account.result {
                         AccountResult::Usage { usage } => usage.lines(now, &tz),
                         AccountResult::Unavailable { .. } => {
-                            vec![format!(
-                                "usage unavailable; run cc-proxy usage {}",
+                            vec![Line::from(format!(
+                                "Usage unavailable. Press r to retry, or run cc-proxy usage {}.",
                                 provider.id()
-                            )]
+                            ))]
                         }
                     };
                     lines.insert((provider.id().to_string(), account.id), account_lines);
@@ -692,6 +691,13 @@ pub(crate) fn window_row(label: &str, remaining: Option<f64>, text: &str, styled
         || " ".repeat(METER_CELLS),
         |remaining| ui::remaining_meter(remaining, METER_CELLS),
     );
+    let text = match (remaining, text.split_once('%')) {
+        (Some(remaining), Some((percent, detail))) => format!(
+            "{}{detail}",
+            ui::strong(&format!("{percent}%"), ui::remaining_color(remaining), true)
+        ),
+        _ => text.to_string(),
+    };
     format!("\n  {label:<18}{meter}  {text}")
 }
 
@@ -947,6 +953,15 @@ mod tests {
     }
 
     #[test]
+    fn terminal_usage_colors_the_number_and_plain_output_stays_plain() {
+        let plain = window_row("5-hour window", Some(0.0), "0% left, resets in 1h", false);
+        assert_eq!(plain, "\n  5-hour window: 0% left, resets in 1h");
+        let terminal = window_row("5-hour window", Some(0.0), "0% left, resets in 1h", true);
+        assert!(terminal.contains(&ui::strong("0%", ui::RED, true)));
+        assert!(terminal.ends_with(" left, resets in 1h"));
+    }
+
+    #[test]
     fn account_lines_show_what_is_left_without_guessing_missing_ones() {
         let now = "2026-08-12T14:50:00Z".parse().unwrap();
         let usage = PlanUsage {
@@ -955,7 +970,11 @@ mod tests {
             weekly: window(7.0, ms("2026-08-17T00:00:00Z")),
         };
         assert_eq!(
-            usage.lines(now, &TimeZone::UTC),
+            usage
+                .lines(now, &TimeZone::UTC)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
             [
                 "5h 55% left, resets in 2h 10m (17:00)",
                 "week 93% left, resets in 4d 9h (Mon 00:00)"
@@ -965,7 +984,14 @@ mod tests {
             five_hour: window(28.0, None),
             ..PlanUsage::default()
         };
-        assert_eq!(usage.lines(now, &TimeZone::UTC), ["5h 72% left"]);
+        assert_eq!(
+            usage
+                .lines(now, &TimeZone::UTC)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["5h 72% left"]
+        );
     }
 
     #[test]
