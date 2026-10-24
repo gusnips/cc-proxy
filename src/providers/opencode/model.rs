@@ -495,7 +495,8 @@ pub fn refresh_models(zen: bool) -> anyhow::Result<Vec<String>> {
         (
             "opencode",
             crate::config::opencode_base_url(),
-            crate::config::opencode_api_key(),
+            crate::accounts::saved_api_key("opencode", None)
+                .or_else(crate::config::opencode_api_key),
         )
     };
     let ids = super::super::model_catalog::fetch_openai(

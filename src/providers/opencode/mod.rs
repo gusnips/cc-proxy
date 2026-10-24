@@ -17,6 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use crate::accounts::{AccountSupport, ApiKeySupport};
 use crate::anthropic::{
     error::json_error,
     schema::{CountTokensResponse, MessagesRequest},
@@ -36,6 +37,13 @@ enum ClientState {
     Invalid(String),
 }
 
+/// Saved API keys for OpenCode Go, so one provider can keep several and rotate.
+static OPENCODE_ACCOUNTS: ApiKeySupport = ApiKeySupport::new(
+    "opencode",
+    "Open https://opencode.ai/console/account to get your OpenCode Go API key.",
+    &["CCP_OPENCODE_API_KEY", "OPENCODE_API_KEY"],
+);
+
 pub struct OpenCodeProvider {
     client: ClientState,
     zen: bool,
@@ -43,10 +51,9 @@ pub struct OpenCodeProvider {
 
 impl OpenCodeProvider {
     pub fn new() -> Self {
-        let client = OpenCodeClient::with_key_source(
-            crate::config::opencode_base_url(),
-            crate::config::opencode_api_key,
-        )
+        let client = OpenCodeClient::with_key_source(crate::config::opencode_base_url(), || {
+            OPENCODE_ACCOUNTS.key(crate::config::opencode_api_key)
+        })
         .map(Arc::new)
         .map(ClientState::Ready)
         .unwrap_or_else(|error| ClientState::Invalid(error.to_string()));
@@ -115,8 +122,8 @@ impl OpenCodeProvider {
     }
 
     /// OpenCode Zen's free models take no key, and refuse a stale one. Every
-    /// other Zen call carries the selected account's token, so switching
-    /// accounts switches the key.
+    /// other call carries the selected account's key, so switching accounts
+    /// switches the key.
     async fn client_for(
         &self,
         model_id: &str,
@@ -124,7 +131,13 @@ impl OpenCodeProvider {
     ) -> Result<Arc<OpenCodeClient>, String> {
         let client = self.client()?;
         if !self.zen {
-            return Ok(client);
+            let Some(id) = account else {
+                return Ok(client);
+            };
+            let Some(key) = crate::accounts::saved_api_key("opencode", Some(id)) else {
+                return Ok(client);
+            };
+            return Ok(Arc::new(client.with_key(Some(key))));
         }
         if model::is_zen_free_model(model_id) {
             return Ok(Arc::new(client.anonymous()));
@@ -133,6 +146,14 @@ impl OpenCodeProvider {
             Ok(Some(token)) => Ok(Arc::new(client.with_key(Some(token)))),
             Ok(None) => Ok(client),
             Err(error) => Err(format!("can't read the Zen sign-in: {error:#}")),
+        }
+    }
+
+    fn account_support(&self) -> &'static dyn AccountSupport {
+        if self.zen {
+            &OPENCODE_ZEN_CLI
+        } else {
+            &OPENCODE_ACCOUNTS
         }
     }
 
@@ -156,9 +177,7 @@ impl OpenCodeProvider {
         mut body: MessagesRequest,
         mut ctx: RequestContext,
     ) -> Response {
-        if self.zen
-            && let Err(error) = ctx.pin_account(&OPENCODE_ZEN_CLI)
-        {
+        if let Err(error) = ctx.pin_account(self.account_support()) {
             return error.response();
         }
         let requested_model = body.model.clone().unwrap_or_default();
@@ -409,9 +428,7 @@ impl Provider for OpenCodeProvider {
         mut body: MessagesRequest,
         mut ctx: RequestContext,
     ) -> Result<Generation, ProviderError> {
-        if self.zen {
-            ctx.pin_account(&OPENCODE_ZEN_CLI)?;
-        }
+        ctx.pin_account(self.account_support())?;
         body.stream = true;
         let requested_model = body.model.clone().unwrap_or_default();
         let requested = requested_model.as_str();
@@ -729,7 +746,10 @@ pub async fn check_key(api_key: &str) -> crate::provider::KeyCheck {
 
 impl CliHandlers for OpenCodeCli {
     fn auth_state(&self) -> crate::provider::AuthState {
-        if crate::config::opencode_api_key().is_some() {
+        if OPENCODE_ACCOUNTS
+            .key(crate::config::opencode_api_key)
+            .is_some()
+        {
             crate::provider::AuthState::KeySaved
         } else {
             crate::provider::AuthState::Missing
@@ -764,6 +784,10 @@ impl CliHandlers for OpenCodeCli {
     }
 
     fn status(&self) -> anyhow::Result<()> {
+        let accounts = crate::accounts::Accounts::open("opencode", &OPENCODE_ACCOUNTS)?;
+        if !accounts.list()?.is_empty() {
+            return crate::auth_cli::AccountCli::open("opencode", &OPENCODE_ACCOUNTS)?.status();
+        }
         let Some(source) = crate::config::opencode_api_key_source() else {
             anyhow::bail!("Not authenticated");
         };
@@ -783,6 +807,10 @@ impl CliHandlers for OpenCodeCli {
             "Unset CCP_OPENCODE_API_KEY / OPENCODE_API_KEY if using env auth; a key in Claude Code settings.json is used only as a last resort."
         );
         Ok(())
+    }
+
+    fn accounts(&self) -> Option<&dyn AccountSupport> {
+        Some(&OPENCODE_ACCOUNTS)
     }
 }
 

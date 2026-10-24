@@ -488,6 +488,135 @@ fn remove_file_if_present(path: &std::path::Path) -> Result<()> {
     }
 }
 
+/// A provider whose login is an API key: each account holds one, so a provider
+/// can keep several and the same rotation picks between them.
+pub struct ApiKeySupport {
+    provider: &'static str,
+    /// Where to get a key, printed before `auth add` asks for one.
+    hint: &'static str,
+    /// Environment variables that pin every request to one key.
+    env: &'static [&'static str],
+}
+
+impl ApiKeySupport {
+    pub const fn new(
+        provider: &'static str,
+        hint: &'static str,
+        env: &'static [&'static str],
+    ) -> Self {
+        Self {
+            provider,
+            hint,
+            env,
+        }
+    }
+
+    /// The key a request uses: the environment's when it is set, else the
+    /// selected account's, else the provider's one key from config.
+    pub fn key(&self, configured: impl FnOnce() -> Option<String>) -> Option<String> {
+        self.key_for(None, configured)
+    }
+
+    /// Like `key`, for the account `account` when rotation pinned one.
+    pub fn key_for(
+        &self,
+        account: Option<&str>,
+        configured: impl FnOnce() -> Option<String>,
+    ) -> Option<String> {
+        if self.pinned_credentials().is_some() {
+            return configured();
+        }
+        saved_api_key(self.provider, account).or_else(configured)
+    }
+}
+
+impl AccountSupport for ApiKeySupport {
+    fn sign_in(&self, _device: bool) -> Result<Value> {
+        println!("{}", self.hint);
+        let key = crate::prompt::read_hidden_line("API key: ")?;
+        let key = key.trim();
+        if key.is_empty() {
+            bail!("no API key provided");
+        }
+        Ok(serde_json::json!({ "apiKey": key }))
+    }
+
+    /// Keys are saved and switched by name; they carry no identity to show.
+    fn identity(&self, _login: &Value) -> Option<String> {
+        None
+    }
+
+    fn state(&self, login: &Value) -> AuthState {
+        api_key_state(login)
+    }
+
+    /// A key provider keeps its first key in config or the environment, so
+    /// there is no single login file to move into accounts.
+    fn single_login(&self) -> Box<dyn AuthStorage<Value>> {
+        Box::new(NoLogin)
+    }
+
+    fn pinned_credentials(&self) -> Option<&'static str> {
+        self.env
+            .iter()
+            .copied()
+            .find(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
+    }
+}
+
+/// What a login that holds an API key looks like.
+pub fn api_key_state(login: &Value) -> AuthState {
+    match api_key_in(login) {
+        Some(_) => AuthState::KeySaved,
+        None => AuthState::Missing,
+    }
+}
+
+/// A provider with no single login to migrate.
+pub struct NoLogin;
+
+impl AuthStorage<Value> for NoLogin {
+    fn load(&self) -> Result<Option<Value>> {
+        Ok(None)
+    }
+    fn save(&self, _value: Value) -> Result<()> {
+        Ok(())
+    }
+    fn clear(&self) -> Result<()> {
+        Ok(())
+    }
+    fn path(&self) -> String {
+        String::new()
+    }
+}
+
+/// The API key saved for one account, or for the current one when `account`
+/// is not pinned.
+pub fn saved_api_key(provider: &str, account: Option<&str>) -> Option<String> {
+    saved_api_key_in(&Accounts::new(provider), account)
+}
+
+fn saved_api_key_in(accounts: &Accounts, account: Option<&str>) -> Option<String> {
+    let login = match account {
+        Some(id) => accounts
+            .for_request::<Value>(Some(id))
+            .ok()?
+            .load()
+            .ok()??,
+        None => accounts.login(&accounts.current().ok()??.name).ok()??,
+    };
+    api_key_in(&login)
+}
+
+fn api_key_in(login: &Value) -> Option<String> {
+    login
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -506,6 +635,43 @@ mod tests {
             .into_iter()
             .map(|account| account.name)
             .collect()
+    }
+
+    #[test]
+    fn saved_api_keys_follow_the_current_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts
+            .save("main", &json!({"apiKey": "sk-a"}), None)
+            .unwrap();
+        accounts
+            .save("work", &json!({"apiKey": "sk-b"}), None)
+            .unwrap();
+        assert_eq!(saved_api_key_in(&accounts, None).as_deref(), Some("sk-a"));
+        let work = accounts
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|account| account.name == "work")
+            .unwrap();
+        assert_eq!(
+            saved_api_key_in(&accounts, Some(&work.id)).as_deref(),
+            Some("sk-b")
+        );
+        accounts.set_current("work").unwrap();
+        assert_eq!(saved_api_key_in(&accounts, None).as_deref(), Some("sk-b"));
+        assert_eq!(saved_api_key_in(&accounts, Some("retired")), None);
+    }
+
+    #[test]
+    fn a_key_account_reports_a_saved_key() {
+        let support = ApiKeySupport::new("glm", "hint", &[]);
+        assert_eq!(
+            support.state(&json!({"apiKey": "sk-test"})),
+            AuthState::KeySaved
+        );
+        assert_eq!(support.state(&json!({})), AuthState::Missing);
+        assert_eq!(support.state(&json!({"apiKey": "   "})), AuthState::Missing);
     }
 
     #[test]

@@ -15,8 +15,8 @@ use crate::providers::upstream_error;
 use crate::registry::{GLM_MODELS, normalize_incoming_model};
 
 use self::auth::{
-    auth_location, clear_glm_auth, env_glm_api_key, file_store, load_glm_api_key,
-    missing_auth_message, save_glm_api_key,
+    GLM_ACCOUNTS, auth_location, clear_glm_auth, env_glm_api_key, file_store, load_glm_api_key,
+    load_glm_api_key_for, missing_auth_message, save_glm_api_key,
 };
 use self::client::{GlmError, GlmHttpClient};
 
@@ -48,7 +48,14 @@ impl Provider for GlmProvider {
         &GLM_CLI
     }
 
-    async fn handle_messages(&self, mut body: MessagesRequest, ctx: RequestContext) -> Response {
+    async fn handle_messages(
+        &self,
+        mut body: MessagesRequest,
+        mut ctx: RequestContext,
+    ) -> Response {
+        if let Err(error) = ctx.pin_account(&GLM_ACCOUNTS) {
+            return error.response();
+        }
         let want_stream = body.stream;
 
         // z.ai is Anthropic-native: forward the request verbatim after stripping
@@ -56,7 +63,7 @@ impl Provider for GlmProvider {
         // SSE/JSON reply straight back to Claude Code (no format translation).
         body.model = body.model.map(|m| normalize_incoming_model(&m));
 
-        let api_key = match load_glm_api_key() {
+        let api_key = match load_glm_api_key_for(ctx.account.as_deref()) {
             Some(k) => k,
             None => {
                 return json_error(
@@ -246,6 +253,10 @@ impl CliHandlers for GlmCli {
     }
 
     fn status(&self) -> Result<(), anyhow::Error> {
+        let accounts = crate::accounts::Accounts::open("glm", &GLM_ACCOUNTS)?;
+        if !accounts.list()?.is_empty() {
+            return crate::auth_cli::AccountCli::open("glm", &GLM_ACCOUNTS)?.status();
+        }
         let env_present = env_glm_api_key().is_some();
         let stored_present = file_store().load().ok().flatten().is_some();
         if !env_present && !stored_present {
@@ -269,6 +280,10 @@ impl CliHandlers for GlmCli {
         clear_glm_auth()?;
         println!("GLM stored auth cleared. Unset CCP_GLM_API_KEY / GLM_API_KEY if using env auth.");
         Ok(())
+    }
+
+    fn accounts(&self) -> Option<&dyn crate::accounts::AccountSupport> {
+        Some(&GLM_ACCOUNTS)
     }
 }
 

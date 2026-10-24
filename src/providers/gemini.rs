@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use crate::accounts::ApiKeySupport;
 use crate::anthropic::{
     error::json_error,
     schema::{CountTokensResponse, MessagesRequest},
@@ -27,6 +28,23 @@ use crate::providers::upstream_error;
 use crate::registry::normalize_incoming_model;
 
 pub const MODEL_PREFIX: &str = "gemini/";
+
+/// Saved API keys for Gemini, so one account can keep several and rotate.
+static GEMINI_ACCOUNTS: ApiKeySupport = ApiKeySupport::new(
+    "gemini",
+    "Open https://aistudio.google.com/apikey to get an API key.",
+    &["CCP_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+);
+
+/// The key a request uses: the environment's when set, else the selected
+/// saved account's, else the one in config.json.
+fn api_key() -> Option<String> {
+    api_key_for(None)
+}
+
+fn api_key_for(account: Option<&str>) -> Option<String> {
+    GEMINI_ACCOUNTS.key_for(account, config::gemini_api_key)
+}
 
 pub const GEMINI_MODELS: &[&str] = &[
     "gemini-4-argon",
@@ -148,7 +166,7 @@ fn fetch_models(base_url: &str, key: &str) -> Result<Vec<String>> {
 }
 
 pub fn refresh_models() -> Result<Vec<String>> {
-    let Some(key) = config::gemini_api_key() else {
+    let Some(key) = api_key() else {
         bail!("Gemini API key isn't configured. Run `cc-proxy auth login gemini` first.");
     };
     let ids = fetch_models(&config::gemini_base_url(), &key)?;
@@ -180,8 +198,8 @@ impl GeminiProvider {
         Self
     }
 
-    fn client(&self) -> Result<Arc<OpenCodeClient>, ProviderError> {
-        let Some(key) = config::gemini_api_key() else {
+    fn client(&self, account: Option<&str>) -> Result<Arc<OpenCodeClient>, ProviderError> {
+        let Some(key) = api_key_for(account) else {
             return Err(ProviderError::new(
                 StatusCode::UNAUTHORIZED,
                 ProviderErrorKind::Authentication,
@@ -210,8 +228,11 @@ impl GeminiProvider {
     async fn buffered_messages_response(
         &self,
         body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Response {
+        if let Err(error) = ctx.pin_account(&GEMINI_ACCOUNTS) {
+            return error.response();
+        }
         let requested = body.model.as_deref().unwrap_or_default();
         let Some(resolved) = resolve_model(requested) else {
             return json_error(
@@ -220,7 +241,7 @@ impl GeminiProvider {
                 format!("Unsupported Gemini model: {requested}"),
             );
         };
-        let client = match self.client() {
+        let client = match self.client(ctx.account.as_deref()) {
             Ok(client) => client,
             Err(err) => return err.response(),
         };
@@ -335,8 +356,9 @@ impl Provider for GeminiProvider {
     async fn generate_anthropic_stream(
         &self,
         mut body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<Generation, ProviderError> {
+        ctx.pin_account(&GEMINI_ACCOUNTS)?;
         body.stream = true;
         let requested = body.model.as_deref().unwrap_or_default();
         let resolved = resolve_model(requested).ok_or_else(|| {
@@ -346,7 +368,7 @@ impl Provider for GeminiProvider {
                 format!("Unsupported Gemini model: {requested}"),
             )
         })?;
-        let client = self.client()?;
+        let client = self.client(ctx.account.as_deref())?;
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved);
             monitor.upstream_started(&ctx.req_id);
@@ -394,7 +416,7 @@ struct GeminiCli;
 
 impl CliHandlers for GeminiCli {
     fn auth_state(&self) -> AuthState {
-        if config::gemini_api_key().is_some() {
+        if api_key().is_some() {
             AuthState::KeySaved
         } else {
             AuthState::Missing
@@ -428,6 +450,10 @@ impl CliHandlers for GeminiCli {
     }
 
     fn status(&self) -> Result<()> {
+        let accounts = crate::accounts::Accounts::open("gemini", &GEMINI_ACCOUNTS)?;
+        if !accounts.list()?.is_empty() {
+            return crate::auth_cli::AccountCli::open("gemini", &GEMINI_ACCOUNTS)?.status();
+        }
         let Some(source) = config::gemini_api_key_source() else {
             bail!("Not authenticated");
         };
@@ -445,6 +471,10 @@ impl CliHandlers for GeminiCli {
             println!("No stored Gemini key in config.json.");
         }
         Ok(())
+    }
+
+    fn accounts(&self) -> Option<&dyn crate::accounts::AccountSupport> {
+        Some(&GEMINI_ACCOUNTS)
     }
 }
 

@@ -10,6 +10,9 @@ use axum::{
 };
 use serde_json::Value;
 
+use crate::accounts::{
+    AccountSupport, Accounts, ApiKeySupport, NoLogin, api_key_state, saved_api_key,
+};
 use crate::anthropic::{
     error::json_error,
     schema::{CountTokensResponse, MessagesRequest},
@@ -74,10 +77,9 @@ pub struct CustomProvider {
 
 impl CustomProvider {
     pub fn new_anthropic() -> Self {
-        let client = OpenCodeClient::with_key_source(
-            config::anthropic_base_url(),
-            config::anthropic_api_key,
-        )
+        let client = OpenCodeClient::with_key_source(config::anthropic_base_url(), || {
+            anthropic_key_for(None)
+        })
         .map(Arc::new)
         .map(ClientState::Ready)
         .unwrap_or_else(|e| ClientState::Invalid(e.to_string()));
@@ -106,7 +108,7 @@ impl CustomProvider {
             let current = config::custom_providers()
                 .remove(interned)
                 .unwrap_or_else(|| started_with.clone());
-            config::custom_provider_api_key(interned, &current).0
+            custom_key_for(interned, &current, None)
         })
         .map(Arc::new)
         .map(ClientState::Ready)
@@ -134,11 +136,21 @@ impl CustomProvider {
         }
     }
 
-    fn client(&self) -> Result<Arc<OpenCodeClient>, String> {
-        match &self.client {
-            ClientState::Ready(client) => Ok(client.clone()),
-            ClientState::Invalid(error) => Err(error.clone()),
+    fn client(&self, account: Option<&str>) -> Result<Arc<OpenCodeClient>, String> {
+        let client = match &self.client {
+            ClientState::Ready(client) => client.clone(),
+            ClientState::Invalid(error) => return Err(error.clone()),
+        };
+        if self.cli.pinned_credentials().is_some() {
+            return Ok(client);
         }
+        let Some(id) = account else {
+            return Ok(client);
+        };
+        let Some(key) = saved_api_key(self.name, Some(id)) else {
+            return Ok(client);
+        };
+        Ok(Arc::new(client.with_key(Some(key))))
     }
 
     fn model_ids(&self) -> Vec<String> {
@@ -165,8 +177,8 @@ impl CustomProvider {
         None
     }
 
-    fn check_anthropic_auth(&self) -> Result<(), ProviderError> {
-        if self.builtin_anthropic && config::anthropic_api_key().is_none() {
+    fn check_anthropic_auth(&self, account: Option<&str>) -> Result<(), ProviderError> {
+        if self.builtin_anthropic && anthropic_key_for(account).is_none() {
             return Err(ProviderError::new(
                 StatusCode::UNAUTHORIZED,
                 ProviderErrorKind::Authentication,
@@ -188,9 +200,12 @@ impl CustomProvider {
     async fn buffered_messages_response(
         &self,
         body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Response {
-        if let Err(err) = self.check_anthropic_auth() {
+        if let Err(err) = ctx.pin_account(&self.cli) {
+            return err.response();
+        }
+        if let Err(err) = self.check_anthropic_auth(ctx.account.as_deref()) {
             return err.response();
         }
         let requested = body.model.as_deref().unwrap_or_default();
@@ -204,7 +219,7 @@ impl CustomProvider {
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved);
         }
-        let client = match self.client() {
+        let client = match self.client(ctx.account.as_deref()) {
             Ok(client) => client,
             Err(error) => {
                 return json_error(
@@ -468,9 +483,10 @@ impl Provider for CustomProvider {
     async fn generate_anthropic_stream(
         &self,
         mut body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<Generation, ProviderError> {
-        self.check_anthropic_auth()?;
+        ctx.pin_account(&self.cli)?;
+        self.check_anthropic_auth(ctx.account.as_deref())?;
         body.stream = true;
         let requested = body.model.as_deref().unwrap_or_default();
         let resolved = self.resolve_model(requested).ok_or_else(|| {
@@ -480,7 +496,7 @@ impl Provider for CustomProvider {
                 format!("Unsupported {} model: {requested}", self.label),
             )
         })?;
-        let client = self.client().map_err(|error| {
+        let client = self.client(ctx.account.as_deref()).map_err(|error| {
             ProviderError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ProviderErrorKind::Api,
@@ -607,6 +623,24 @@ impl Provider for CustomProvider {
     }
 }
 
+static ANTHROPIC_ACCOUNTS: ApiKeySupport = ApiKeySupport::new(
+    "anthropic",
+    "Open https://console.anthropic.com/settings/keys to get your Anthropic API key.",
+    &["CCP_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+);
+
+fn anthropic_key_for(account: Option<&str>) -> Option<String> {
+    ANTHROPIC_ACCOUNTS.key_for(account, config::anthropic_api_key)
+}
+
+fn custom_key_for(name: &str, cfg: &CustomProviderConfig, account: Option<&str>) -> Option<String> {
+    let (configured, source) = config::custom_provider_api_key(name, cfg);
+    if source.as_deref().is_some_and(|src| src != "config.json") {
+        return configured;
+    }
+    saved_api_key(name, account).or(configured)
+}
+
 struct CustomCli {
     name: &'static str,
     label: &'static str,
@@ -620,10 +654,51 @@ fn is_loopback_url(raw: &str) -> bool {
         .is_some_and(|h| matches!(h.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]"))
 }
 
+impl AccountSupport for CustomCli {
+    fn sign_in(&self, device: bool) -> Result<Value> {
+        if self.builtin_anthropic {
+            return ANTHROPIC_ACCOUNTS.sign_in(device);
+        }
+        println!(
+            "Paste your {} API key (input is hidden) and press Enter:",
+            self.label
+        );
+        let key = crate::prompt::read_hidden_line("API key: ")?;
+        let key = key.trim();
+        if key.is_empty() {
+            bail!("no API key provided");
+        }
+        Ok(serde_json::json!({ "apiKey": key }))
+    }
+
+    fn identity(&self, _login: &Value) -> Option<String> {
+        None
+    }
+
+    fn state(&self, login: &Value) -> AuthState {
+        api_key_state(login)
+    }
+
+    fn single_login(&self) -> Box<dyn crate::auth::AuthStorage<Value>> {
+        Box::new(NoLogin)
+    }
+
+    fn pinned_credentials(&self) -> Option<&'static str> {
+        if self.builtin_anthropic {
+            return ANTHROPIC_ACCOUNTS.pinned_credentials();
+        }
+        let cfg = config::custom_providers().remove(self.name)?;
+        let (_, source) = config::custom_provider_api_key(self.name, &cfg);
+        source
+            .filter(|src| src != "config.json")
+            .map(|src| intern_provider_name(&src))
+    }
+}
+
 impl CliHandlers for CustomCli {
     fn auth_state(&self) -> AuthState {
         if self.builtin_anthropic {
-            return if config::anthropic_api_key().is_some() {
+            return if anthropic_key_for(None).is_some() {
                 AuthState::KeySaved
             } else {
                 AuthState::Missing
@@ -632,8 +707,7 @@ impl CliHandlers for CustomCli {
         let Some(cfg) = config::custom_providers().remove(self.name) else {
             return AuthState::Missing;
         };
-        let (key, _) = config::custom_provider_api_key(self.name, &cfg);
-        if key.is_some() || is_loopback_url(&cfg.base_url) {
+        if custom_key_for(self.name, &cfg, None).is_some() || is_loopback_url(&cfg.base_url) {
             AuthState::KeySaved
         } else {
             AuthState::Missing
@@ -672,6 +746,10 @@ impl CliHandlers for CustomCli {
     }
 
     fn status(&self) -> Result<()> {
+        let accounts = Accounts::open(self.name, self)?;
+        if !accounts.list()?.is_empty() {
+            return crate::auth_cli::AccountCli::open(self.name, self)?.status();
+        }
         if self.builtin_anthropic {
             let Some(source) = config::anthropic_api_key_source() else {
                 bail!("Not authenticated");
@@ -710,6 +788,10 @@ impl CliHandlers for CustomCli {
             println!("No stored {} key in config.json.", self.label);
         }
         Ok(())
+    }
+
+    fn accounts(&self) -> Option<&dyn AccountSupport> {
+        Some(self)
     }
 }
 
@@ -796,7 +878,7 @@ pub fn refresh_models(name: &str) -> Result<Vec<String>> {
     let Some(mut cfg) = config::custom_providers().remove(name) else {
         bail!("`{name}` isn't a provider you added. `cc-proxy provider list` shows them.");
     };
-    let (key, _) = config::custom_provider_api_key(name, &cfg);
+    let key = custom_key_for(name, &cfg, None);
     let models = super::model_catalog::fetch_openai(&cfg.base_url, key.as_deref(), Duration::from_secs(30))
         .with_context(|| format!("Could not refresh {name}. Check `cc-proxy auth status {name}`, then retry `cc-proxy models refresh {name}`."))?;
     cfg.models = models.clone();

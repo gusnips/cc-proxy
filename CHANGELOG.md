@@ -19,6 +19,10 @@ description: Release notes for cc-proxy.
   endpoint, per model. An exhausted model waits for its real reset instead of
   reaching Claude Code as a bare "Resource has been exhausted" error that it
   retried on a five-second backoff.
+- API-key providers (GLM, Gemini, OpenCode Go, OpenCode Zen, Anthropic, and
+  custom providers) now support multiple saved accounts (`cc-proxy auth add`,
+  `cc-proxy auth use`, `cc-proxy auth status`) and rotate keys on rate limits
+  when `auth.autoRotate` is on.
 - `cc-proxy status` shows the fallback chain.
 
 ## v0.2.17 (2026-10-24)

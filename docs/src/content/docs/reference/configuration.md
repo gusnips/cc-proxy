@@ -82,11 +82,12 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 
 ## Saved accounts and auto-rotate
 
-Codex, Kimi, Grok, Antigravity and OpenCode Zen can keep more than one login.
-Add an account with `cc-proxy auth add codex`, then choose it with
-`cc-proxy auth use codex`.
-These commands do not restart the proxy. After signing in to Antigravity,
-run `cc-proxy models refresh antigravity` to fetch the current account's model
+Every OAuth and API-key provider (Codex, Kimi, Grok, Antigravity, GLM, Gemini,
+OpenCode Go, OpenCode Zen, Anthropic, and custom providers) can keep more than
+one saved account or API key. Add one with `cc-proxy auth add <provider>`, then
+choose it with `cc-proxy auth use <provider> <account>`. These commands do not
+restart the proxy. After signing in to Antigravity, run
+`cc-proxy models refresh antigravity` to fetch the current account's model
 list. Adding another account does not replace that shared list.
 
 `auth.autoRotate` defaults to `false`. To let a running proxy switch accounts:
@@ -110,8 +111,7 @@ clock. When a 429 arrives without one, cc-proxy asks Google's quota endpoint
 for the model's reset time, so an exhausted Antigravity model still gets a real
 deadline. A model-specific limit blocks only that model on that account.
 Antigravity's short `RATE_LIMIT_EXCEEDED` capacity throttles never switch
-accounts. Gemini API keys do not rotate: Google's quotas belong to the
-project, not the key.
+accounts.
 
 The current account is used again once its wait ends. An account whose wait
 ends becomes eligible again. `cc-proxy auth status codex` shows each account's

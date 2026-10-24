@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::accounts::ApiKeySupport;
 use crate::auth::{AuthStorage, KeychainFileAuthStore, SystemKeychain};
 use crate::paths;
 
@@ -40,8 +41,24 @@ fn env_glm_api_key_from(get: impl Fn(&str) -> Option<String>) -> Option<String> 
         .or_else(|| get("GLM_API_KEY").filter(|k| !k.trim().is_empty()))
 }
 
-/// Load the GLM API key, preferring the environment over stored credentials.
+/// Saved API keys for GLM, so one provider can keep several and rotate.
+pub static GLM_ACCOUNTS: ApiKeySupport = ApiKeySupport::new(
+    "glm",
+    "Open https://z.ai to get an API key.",
+    &["CCP_GLM_API_KEY", "GLM_API_KEY"],
+);
+
+/// Load the GLM API key: the environment's when set, else the selected saved
+/// account's, else the stored one.
 pub fn load_glm_api_key() -> Option<String> {
+    load_glm_api_key_for(None)
+}
+
+pub fn load_glm_api_key_for(account: Option<&str>) -> Option<String> {
+    GLM_ACCOUNTS.key_for(account, configured_glm_api_key)
+}
+
+fn configured_glm_api_key() -> Option<String> {
     if let Some(key) = env_glm_api_key() {
         return Some(key);
     }
