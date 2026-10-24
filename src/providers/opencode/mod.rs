@@ -805,9 +805,18 @@ impl CliHandlers for OpenCodeZenCli {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing device_code from OpenCode Console"))?;
         let user_code = device["user_code"].as_str().unwrap_or_default();
-        let uri = device["verification_uri_complete"]
+        // The console returns a relative path here
+        // (`/console/device?user_code=...&client_id=...`); resolve it against
+        // the console base so the browser gets an absolute URL.
+        let raw_uri = device["verification_uri_complete"]
             .as_str()
+            .or_else(|| device["verification_uri"].as_str())
             .unwrap_or("https://opencode.ai/console");
+        let uri = if raw_uri.starts_with("http://") || raw_uri.starts_with("https://") {
+            raw_uri.to_string()
+        } else {
+            format!("{console}{raw_uri}")
+        };
         let interval = device["interval"].as_u64().unwrap_or(5).max(1);
         let expires_in = device["expires_in"].as_u64().unwrap_or(600);
 
@@ -816,7 +825,7 @@ impl CliHandlers for OpenCodeZenCli {
         if !user_code.is_empty() {
             println!("Enter code: {user_code}");
         }
-        let _ = crate::browser::open(uri);
+        let _ = crate::browser::open(&uri);
 
         let deadline = Instant::now() + Duration::from_secs(expires_in);
         let mut wait = Duration::from_secs(interval);

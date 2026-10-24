@@ -28,6 +28,9 @@ description: Release notes for cc-proxy.
   one to free up (up to two minutes) and continues the request on it, so the
   agent turn survives short resets instead of dying on a 429. Longer waits
   still return a 429 with the earliest reset for the client to retry.
+- `cc-proxy auth login opencode-zen` resolves the console's relative device
+  verification path against the console base URL before printing and opening
+  it, so the browser lands on the real sign-in page.
 - Claude models on Antigravity no longer fail every tool call with
   `tools.N.custom.input_schema` 400s. `anyOf`/`oneOf` unions in tool schemas
   (e.g. SendMessage's nested message shape) collapse or widen away before
