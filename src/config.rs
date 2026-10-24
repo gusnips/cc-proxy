@@ -79,6 +79,8 @@ struct FileConfig {
 struct AuthConfig {
     #[serde(rename = "autoRotate")]
     auto_rotate: Option<bool>,
+    #[serde(rename = "hourlyPing")]
+    hourly_ping: Option<bool>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -300,6 +302,22 @@ pub fn bind_address() -> String {
 pub fn auth_auto_rotate() -> bool {
     read_file_config(&paths::config_dir())
         .and_then(|file| file.auth?.auto_rotate)
+        .unwrap_or(false)
+}
+
+/// Read at the top of each hour, so toggling it takes effect without a restart.
+pub fn auth_hourly_ping() -> bool {
+    if let Ok(raw) = std::env::var("CCP_HOURLY_PING") {
+        let lower = raw.trim().to_ascii_lowercase();
+        if matches!(lower.as_str(), "1" | "true" | "yes" | "on") {
+            return true;
+        }
+        if matches!(lower.as_str(), "0" | "false" | "no" | "off") {
+            return false;
+        }
+    }
+    read_file_config(&paths::config_dir())
+        .and_then(|file| file.auth?.hourly_ping)
         .unwrap_or(false)
 }
 

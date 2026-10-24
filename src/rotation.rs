@@ -392,6 +392,122 @@ fn exhausted_by<'a>(response: &Response, provider: &'a str) -> Option<(u64, &'a 
         .map(|at| (at.until_ms, provider))
 }
 
+/// Milliseconds from `now_ms` until the next top of the hour (`XX:00:00.000`).
+fn ms_until_next_hour(now_ms: u64) -> u64 {
+    const HOUR_MS: u64 = 3_600_000;
+    HOUR_MS - (now_ms % HOUR_MS)
+}
+
+/// Sends a one-token Messages request at the start of every hour (`XX:00`) to
+/// every signed-in provider account that is not currently waiting on a limit,
+/// so rolling 5-hour quota windows start counting down early while `cc-proxy`
+/// is running. Controlled by `auth.hourlyPing` (read on each tick).
+pub(crate) fn spawn_hourly_ping(registry: Arc<Registry>) {
+    tokio::spawn(async move {
+        loop {
+            let wait_ms = ms_until_next_hour(now_ms());
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            if crate::config::auth_hourly_ping() {
+                ping_signed_in_providers(&registry, &Cooldowns::new()).await;
+            }
+        }
+    });
+}
+
+async fn ping_signed_in_providers(registry: &Registry, cooldowns: &Cooldowns) {
+    let route = crate::config::route();
+    let log = crate::logging::create_logger("auth");
+    for name in registry.list_provider_names() {
+        let Some(provider) = registry.provider(&name) else {
+            continue;
+        };
+        if provider.cli().auth_state() == crate::provider::AuthState::Missing {
+            continue;
+        }
+        let Some(model) = ping_model_for(registry, &route, &name) else {
+            continue;
+        };
+        let targets: Vec<Option<String>> = match provider
+            .cli()
+            .accounts()
+            .filter(|support| support.pinned_credentials().is_none())
+            .and_then(|support| Accounts::open(&name, support).ok())
+            .and_then(|accounts| accounts.list().ok())
+        {
+            Some(list) if !list.is_empty() => {
+                let snapshot = cooldowns.read().unwrap_or_default();
+                let now = now_ms();
+                list.into_iter()
+                    .filter(|account| {
+                        !snapshot.iter().any(|c| {
+                            c.provider == name
+                                && c.account == account.id
+                                && c.model.as_deref().is_none_or(|m| m == model)
+                                && c.until_ms > now
+                        })
+                    })
+                    .map(|account| Some(account.id))
+                    .collect()
+            }
+            _ => vec![None],
+        };
+        for account in targets {
+            let Ok(body) = serde_json::from_value::<MessagesRequest>(serde_json::json!({
+                "model": &model,
+                "max_tokens": 1,
+                "stream": false,
+                "messages": [{"role": "user", "content": "hi"}]
+            })) else {
+                continue;
+            };
+            let req_id = format!("hourly-ping-{}", uuid::Uuid::new_v4());
+            let context = RequestContext {
+                account: account.clone(),
+                req_id: req_id.clone(),
+                session_id: None,
+                session_seq: None,
+                provider: name.clone(),
+                traffic: None,
+                monitor: None,
+            };
+            let response = provider.handle_messages(body, context).await;
+            let status = response.status().as_u16();
+            if let (Some(id), Some((until, per_model))) =
+                (account.as_deref(), retry_deadline(&response, now_ms()))
+            {
+                let _ = cooldowns.mark(&name, id, per_model.then_some(model.as_str()), until);
+            }
+            log.info(
+                "hourly_ping",
+                Some(serde_json::Map::from_iter([
+                    ("provider".into(), serde_json::json!(&name)),
+                    ("model".into(), serde_json::json!(&model)),
+                    ("account".into(), serde_json::json!(account)),
+                    ("status".into(), serde_json::json!(status)),
+                    ("reqId".into(), serde_json::json!(req_id)),
+                ])),
+            );
+        }
+    }
+}
+
+fn ping_model_for(
+    registry: &Registry,
+    route: &crate::config::Route,
+    provider: &str,
+) -> Option<String> {
+    for tier in ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"] {
+        if let Ok(model) = crate::tiers::resolve_for(registry, route, provider, tier) {
+            return Some(model);
+        }
+    }
+    registry
+        .catalog_for(provider)
+        .into_iter()
+        .next()
+        .or_else(|| registry.supported_models_for(provider).into_iter().next())
+}
+
 fn storage_error(error: anyhow::Error) -> Response {
     json_error(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1028,5 +1144,22 @@ mod tests {
                 .contains("Antigravity"),
             "{body}"
         );
+    }
+
+    #[tokio::test]
+    async fn hourly_ping_ticks_on_the_hour_and_pings_signed_in_providers() {
+        assert_eq!(ms_until_next_hour(0), 3_600_000);
+        assert_eq!(ms_until_next_hour(1_000), 3_599_000);
+        assert_eq!(ms_until_next_hour(3_600_000), 3_600_000);
+
+        let dir = tempfile::tempdir().unwrap();
+        let cooldowns = Cooldowns {
+            path: dir.path().join("rotation.json"),
+        };
+        let registry = Registry::from_providers([Arc::new(ChainFake {
+            name: "codex",
+            spent_until: None,
+        }) as Arc<dyn Provider>]);
+        ping_signed_in_providers(&registry, &cooldowns).await;
     }
 }

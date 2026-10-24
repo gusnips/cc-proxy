@@ -23,6 +23,10 @@ description: Release notes for cc-proxy.
   custom providers) now support multiple saved accounts (`cc-proxy auth add`,
   `cc-proxy auth use`, `cc-proxy auth status`) and rotate keys on rate limits
   when `auth.autoRotate` is on.
+- `auth.hourlyPing` (`cc-proxy config set auth.hourlyPing true` or
+  `CCP_HOURLY_PING=true`) sends a one-token request at the start of every hour
+  to each signed-in provider account that is not waiting on a limit, so rolling
+  5-hour quota windows start counting down early while `cc-proxy` is active.
 - `cc-proxy status` shows the fallback chain.
 
 ## v0.2.17 (2026-10-24)

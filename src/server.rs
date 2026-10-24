@@ -189,7 +189,9 @@ pub async fn serve_listener(
             ),
         ])),
     );
-    let app = app_with_monitor(Arc::new(Registry::new()), monitor);
+    let registry = Arc::new(Registry::new());
+    crate::rotation::spawn_hourly_ping(registry.clone());
+    let app = app_with_monitor(registry, monitor);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

@@ -117,6 +117,17 @@ The current account is used again once its wait ends. An account whose wait
 ends becomes eligible again. `cc-proxy auth status codex` shows each account's
 wait.
 
+To start rolling 5-hour quota windows early while `cc-proxy` is running, enable
+`auth.hourlyPing`:
+
+```sh
+cc-proxy config set auth.hourlyPing true
+```
+
+At the start of every hour (`XX:00`), cc-proxy sends a one-token request using
+the smallest tier model to each signed-in provider account that is not waiting
+on a limit.
+
 ## Provider fallback
 
 `route.fallback` lists providers to try, in order, when every saved account of

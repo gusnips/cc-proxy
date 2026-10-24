@@ -47,6 +47,7 @@ static OPENCODE_ACCOUNTS: ApiKeySupport = ApiKeySupport::new(
 pub struct OpenCodeProvider {
     client: ClientState,
     zen: bool,
+    pinned_client: bool,
 }
 
 impl OpenCodeProvider {
@@ -57,7 +58,11 @@ impl OpenCodeProvider {
         .map(Arc::new)
         .map(ClientState::Ready)
         .unwrap_or_else(|error| ClientState::Invalid(error.to_string()));
-        Self { client, zen: false }
+        Self {
+            client,
+            zen: false,
+            pinned_client: false,
+        }
     }
 
     pub fn new_zen() -> Self {
@@ -68,7 +73,11 @@ impl OpenCodeProvider {
         .map(Arc::new)
         .map(ClientState::Ready)
         .unwrap_or_else(|error| ClientState::Invalid(error.to_string()));
-        Self { client, zen: true }
+        Self {
+            client,
+            zen: true,
+            pinned_client: false,
+        }
     }
 
     #[cfg(test)]
@@ -76,6 +85,16 @@ impl OpenCodeProvider {
         Self {
             client: ClientState::Ready(Arc::new(client)),
             zen: false,
+            pinned_client: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_zen_client(client: OpenCodeClient) -> Self {
+        Self {
+            client: ClientState::Ready(Arc::new(client)),
+            zen: true,
+            pinned_client: true,
         }
     }
 
@@ -130,6 +149,12 @@ impl OpenCodeProvider {
         account: Option<&str>,
     ) -> Result<Arc<OpenCodeClient>, String> {
         let client = self.client()?;
+        if self.zen && model::is_zen_free_model(model_id) {
+            return Ok(Arc::new(client.anonymous()));
+        }
+        if self.pinned_client {
+            return Ok(client);
+        }
         if !self.zen {
             let Some(id) = account else {
                 return Ok(client);
@@ -138,9 +163,6 @@ impl OpenCodeProvider {
                 return Ok(client);
             };
             return Ok(Arc::new(client.with_key(Some(key))));
-        }
-        if model::is_zen_free_model(model_id) {
-            return Ok(Arc::new(client.anonymous()));
         }
         match zen::access_token(account).await {
             Ok(Some(token)) => Ok(Arc::new(client.with_key(Some(token)))),
@@ -177,7 +199,9 @@ impl OpenCodeProvider {
         mut body: MessagesRequest,
         mut ctx: RequestContext,
     ) -> Response {
-        if let Err(error) = ctx.pin_account(self.account_support()) {
+        if !self.pinned_client
+            && let Err(error) = ctx.pin_account(self.account_support())
+        {
             return error.response();
         }
         let requested_model = body.model.clone().unwrap_or_default();
@@ -428,7 +452,9 @@ impl Provider for OpenCodeProvider {
         mut body: MessagesRequest,
         mut ctx: RequestContext,
     ) -> Result<Generation, ProviderError> {
-        ctx.pin_account(self.account_support())?;
+        if !self.pinned_client {
+            ctx.pin_account(self.account_support())?;
+        }
         body.stream = true;
         let requested_model = body.model.clone().unwrap_or_default();
         let requested = requested_model.as_str();
@@ -1402,10 +1428,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client =
             OpenCodeClient::new(format!("http://{address}/v1"), Some("stale-key".into())).unwrap();
-        let provider = OpenCodeProvider {
-            client: ClientState::Ready(Arc::new(client)),
-            zen: true,
-        };
+        let provider = OpenCodeProvider::with_zen_client(client);
         let request = |model: &str| -> MessagesRequest {
             serde_json::from_value(json!({
                 "model": model,
@@ -1504,10 +1527,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client =
             || OpenCodeClient::new(format!("http://{address}/v1"), Some("key".into())).unwrap();
-        let zen = OpenCodeProvider {
-            client: ClientState::Ready(Arc::new(client())),
-            zen: true,
-        };
+        let zen = OpenCodeProvider::with_zen_client(client());
         let go = OpenCodeProvider::with_client(client());
         let request = |model: &str| {
             let mut body: MessagesRequest = serde_json::from_value(json!({
