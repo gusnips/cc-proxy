@@ -20,8 +20,11 @@ Colors live in `src/ui.rs`: `TEAL`, `WHITE`, `DIM_WHITE`, `GREEN`, `RED`, `YELLO
 
 - `ui::print_card`, `ui::print_note`, `ui::print_error`, `ui::waiting`, `ui::meter`, `ui::duration`, `ui::provider_name`.
 - `prompt::choose`, `prompt::search`, `prompt::confirm`, `prompt::read_hidden_line`, `RawModeGuard`.
-- Monitor: `TerminalGuard` and `setup_terminal` in `src/tui.rs`. Request rows put the saved account name before the resolved model. Full details keep the original model text.
-- The monitor's `p` panel lists local saved accounts, marks `[current]` and shows how much is left per window plus reset or cooldown timers. It scrolls on small terminals. Failed usage is unavailable, never zero. Usage loads on the panel's background worker, not on a request.
+- Monitor: `TerminalGuard`, `setup_terminal`, `suspend_terminal` and `resume_terminal` in `src/tui.rs`. Sign-in and model selection reuse the CLI prompts, then return to the same monitor row. Settings reuse the same terminal handoff.
+- Accounts is the monitor's first tab: one provider/account list and a detail area. Enter opens actions in the detail area, not a modal. Wide terminals place them side by side; narrow terminals stack them. The selected account's usage and wait timers scroll with Page Up/Down. Failed usage is unavailable, never zero. The background worker loads usage, never a request.
+- Activity is the second tab and keeps the session, active request, recent request and error views. Request rows put the saved account name before the resolved model. Full details keep the original model text.
+- Left/Right, Tab and 1/2 switch tabs. Up/Down or j/k move through rows or actions. Escape closes the active layer first. Actions only run after Enter on an explicit choice. Saved account choices change that provider, not Claude Code's route.
+- Explicit `monitor --url` connections open Activity and are read-only. They never load this computer's accounts. Demo mode uses simulated accounts; its actions never write real settings or credentials. A disconnected monitor pauses changes and says it is reconnecting.
 
 Build new screens from these. Don't add a terminal UI dependency.
 
