@@ -112,6 +112,9 @@ enum Commands {
         /// Install a specific release tag instead of the latest
         #[arg(long)]
         version: Option<String>,
+        /// Reinstall even when the installed version already matches
+        #[arg(long)]
+        force: bool,
     },
     /// Print version information
     Version,
@@ -381,9 +384,11 @@ fn run() -> Result<()> {
                 Ok(())
             }
         },
-        Commands::Update { check, version } => {
-            cc_proxy::update::run_update(check, version.as_deref())
-        }
+        Commands::Update {
+            check,
+            version,
+            force,
+        } => cc_proxy::update::run_update(check, version.as_deref(), force),
         Commands::Stop => run_service_command(ServiceCommand::Stop),
         Commands::Status => run_service_command(ServiceCommand::Status),
         Commands::Restart { port } => run_service_command(ServiceCommand::Restart { port }),

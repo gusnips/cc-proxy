@@ -3,6 +3,13 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.16 (2026-10-24)
+
+- `cc-proxy update --force` reinstalls the latest release even when the
+  installed version already matches, covering same-version rebuilds.
+- `cc-proxy auth login opencode` opens the console account page where the Go
+  API key actually lives instead of the marketing page.
+
 ## v0.2.15 (2026-10-23)
 
 - Changing saved Codex accounts no longer stops an existing conversation with a

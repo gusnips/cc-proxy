@@ -5,6 +5,7 @@
 //! archive over HTTPS, verifies its SHA-256 checksum, swaps the binary
 //! atomically, and restarts the background service when one is running.
 //! `cc-proxy update --check` only reports; it changes nothing.
+//! `cc-proxy update --force` reinstalls even when the versions match.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -183,8 +184,9 @@ fn replace_binary(path: &Path, binary: &[u8]) -> Result<()> {
 }
 
 /// Update the installed binary to `version` (`None` = latest release).
-/// With `check`, only report what would happen.
-pub fn run_update(check: bool, version: Option<&str>) -> Result<()> {
+/// With `check`, only report what would happen. With `force`, reinstall even
+/// when the installed version already matches (same-version rebuilds).
+pub fn run_update(check: bool, version: Option<&str>, force: bool) -> Result<()> {
     let platform = asset_platform()?;
     let client = http_client()?;
     let tag = match version {
@@ -195,7 +197,7 @@ pub fn run_update(check: bool, version: Option<&str>) -> Result<()> {
         )?,
     };
 
-    if !is_newer(CURRENT_VERSION, &tag) {
+    if !force && !is_newer(CURRENT_VERSION, &tag) {
         ui::print_note(
             Mood::Glad,
             &[format!(
@@ -205,13 +207,22 @@ pub fn run_update(check: bool, version: Option<&str>) -> Result<()> {
         return Ok(());
     }
     if check {
-        ui::print_note(
-            Mood::Awake,
-            &[
-                format!("{BIN_NAME} {tag} is out. You have {CURRENT_VERSION}."),
-                format!("Run `{BIN_NAME} update` to install it."),
-            ],
-        );
+        if is_newer(CURRENT_VERSION, &tag) {
+            ui::print_note(
+                Mood::Awake,
+                &[
+                    format!("{BIN_NAME} {tag} is out. You have {CURRENT_VERSION}."),
+                    format!("Run `{BIN_NAME} update` to install it."),
+                ],
+            );
+        } else {
+            ui::print_note(
+                Mood::Awake,
+                &[format!(
+                    "{BIN_NAME} {tag} is installed. Run `{BIN_NAME} update --force` to reinstall it."
+                )],
+            );
+        }
         return Ok(());
     }
 
@@ -225,7 +236,11 @@ pub fn run_update(check: bool, version: Option<&str>) -> Result<()> {
     })?;
 
     let mut lines = vec![
-        format!("Updated {BIN_NAME} to {tag}"),
+        if is_newer(CURRENT_VERSION, &tag) {
+            format!("Updated {BIN_NAME} to {tag}")
+        } else {
+            format!("Reinstalled {BIN_NAME} {tag}")
+        },
         format!("From {CURRENT_VERSION}, installed in {}", path.display()),
     ];
     if let daemon::DaemonStatus::Running(info) = daemon::describe() {
