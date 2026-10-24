@@ -141,6 +141,15 @@ impl CustomProvider {
         }
     }
 
+    fn model_ids(&self) -> Vec<String> {
+        if !self.builtin_anthropic
+            && let Some(cfg) = config::custom_providers().remove(self.name)
+        {
+            return cfg.models;
+        }
+        self.models.clone()
+    }
+
     pub fn resolve_model(&self, raw: &str) -> Option<String> {
         let normalized = normalize_incoming_model(raw);
         let prefix = format!("{}/", self.name);
@@ -150,7 +159,7 @@ impl CustomProvider {
             }
             return None;
         }
-        if !self.builtin_anthropic && self.models.iter().any(|m| m == &normalized) {
+        if !self.builtin_anthropic && self.model_ids().iter().any(|m| m == &normalized) {
             return Some(normalized);
         }
         None
@@ -375,11 +384,12 @@ impl Provider for CustomProvider {
 
     fn supported_models(&self) -> Vec<String> {
         let prefix = format!("{}/", self.name);
-        if self.models.is_empty() {
+        let models = self.model_ids();
+        if models.is_empty() {
             return vec![format!("{prefix}default")];
         }
         let mut out = Vec::new();
-        for model in &self.models {
+        for model in &models {
             if model.starts_with(&prefix) {
                 out.push(model.clone());
             } else {
@@ -396,10 +406,11 @@ impl Provider for CustomProvider {
 
     fn catalog(&self) -> Vec<String> {
         let prefix = format!("{}/", self.name);
-        if self.models.is_empty() {
+        let models = self.model_ids();
+        if models.is_empty() {
             return vec![format!("{prefix}default")];
         }
-        self.models
+        models
             .iter()
             .map(|m| {
                 if m.starts_with(&prefix) {
@@ -728,50 +739,6 @@ pub fn validate_base_url(raw: &str) -> Result<String> {
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
-/// The endpoint's model ids from `GET <base>/models`, or none when it doesn't
-/// answer within `timeout` with an OpenAI-style list.
-fn discover_models(base_url: &str, api_key: Option<&str>, timeout: Duration) -> Vec<String> {
-    let Ok(mut url) = reqwest::Url::parse(base_url) else {
-        return Vec::new();
-    };
-    let path = url.path().trim_end_matches('/');
-    let models_path = if path.is_empty() {
-        "/v1/models".to_string()
-    } else {
-        format!("{path}/models")
-    };
-    url.set_path(&models_path);
-    let Ok(client) = reqwest::blocking::Client::builder()
-        .connect_timeout(timeout.min(Duration::from_secs(10)))
-        .timeout(timeout)
-        .build()
-    else {
-        return Vec::new();
-    };
-    let mut req = client.get(url).header("Accept", "application/json");
-    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
-        req = req
-            .header("Authorization", format!("Bearer {key}"))
-            .header("x-api-key", key);
-    }
-    let Ok(resp) = req.send() else {
-        return Vec::new();
-    };
-    let Ok(json) = resp.json::<Value>() else {
-        return Vec::new();
-    };
-    let mut ids: Vec<String> = json["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item["id"].as_str().map(str::to_string))
-        .filter(|id| !id.is_empty())
-        .collect();
-    ids.sort_unstable();
-    ids.dedup();
-    ids
-}
-
 pub fn run_provider_add(
     name: &str,
     base_url: &str,
@@ -790,7 +757,12 @@ pub fn run_provider_add(
     };
     let (existing_key, _) = config::custom_provider_api_key(&name, &temp_cfg);
     if models.is_empty() {
-        models = discover_models(&base_url, existing_key.as_deref(), Duration::from_secs(3));
+        models = super::model_catalog::fetch_openai(
+            &base_url,
+            existing_key.as_deref(),
+            Duration::from_secs(3),
+        )
+        .unwrap_or_default();
     }
     let existing = config::custom_providers().remove(&name);
     let cfg = CustomProviderConfig {
@@ -825,14 +797,8 @@ pub fn refresh_models(name: &str) -> Result<Vec<String>> {
         bail!("`{name}` isn't a provider you added. `cc-proxy provider list` shows them.");
     };
     let (key, _) = config::custom_provider_api_key(name, &cfg);
-    let models = discover_models(&cfg.base_url, key.as_deref(), Duration::from_secs(30));
-    if models.is_empty() {
-        bail!(
-            "{name} sent no model list from {}/models. Check the address, and the key with \
-             `cc-proxy auth status {name}`.",
-            cfg.base_url.trim_end_matches('/')
-        );
-    }
+    let models = super::model_catalog::fetch_openai(&cfg.base_url, key.as_deref(), Duration::from_secs(30))
+        .with_context(|| format!("Could not refresh {name}. Check `cc-proxy auth status {name}`, then retry `cc-proxy models refresh {name}`."))?;
     cfg.models = models.clone();
     config::save_custom_provider(name, &cfg)?;
     Ok(models)

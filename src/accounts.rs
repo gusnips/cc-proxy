@@ -1,0 +1,791 @@
+//! More than one saved login per provider.
+//!
+//! `<config>/<provider>/accounts.json` lists the accounts and says which one is
+//! current. Each account's login sits in `<config>/<provider>/accounts/<id>.json`,
+//! the same JSON the one login used to keep in `auth.json`. A token refresh
+//! rewrites only its own account's file, so two accounts never write the same
+//! file. A short file lock protects list changes and rejects late refresh writes.
+
+use std::fs::{self, File};
+use std::io;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::auth::{AuthStorage, FileAuthStore, write_atomically};
+use crate::provider::AuthState;
+
+/// The name the first account gets, and the one an old single login moves to.
+const FIRST_NAME: &str = "main";
+const MAX_NAME_LEN: usize = 32;
+
+/// What a provider gives the account commands to work with. A provider that
+/// returns this from `CliHandlers::accounts` can keep more than one login.
+pub trait AccountSupport: Send + Sync {
+    /// Signs in (in the browser, or with a device code) and returns the login to keep.
+    fn sign_in(&self, device: bool) -> Result<Value>;
+    /// Who a saved login belongs to, when it says.
+    fn identity(&self, login: &Value) -> Option<String>;
+    /// What a saved login holds.
+    fn state(&self, login: &Value) -> AuthState;
+    /// Where the provider kept its one login before accounts existed.
+    fn single_login(&self) -> Box<dyn AuthStorage<Value>>;
+    /// A credential override pins all requests to one login and disables rotation.
+    fn pinned_credentials(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Account {
+    /// Changes on a new sign-in, so old requests cannot write to its replacement.
+    pub id: String,
+    pub name: String,
+    /// Who the sign-in belongs to, when the provider says. Signing in as the same
+    /// identity again refreshes the account instead of saving a second copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Index {
+    current: Option<String>,
+    accounts: Vec<Account>,
+}
+
+impl Index {
+    fn position(&self, name: &str) -> Option<usize> {
+        self.accounts
+            .iter()
+            .position(|account| account.name == name)
+    }
+}
+
+#[derive(Clone)]
+pub struct Accounts {
+    provider: String,
+    dir: PathBuf,
+}
+
+/// Turns what someone typed into an account name: letters, numbers, `-` and `_`.
+pub fn clean_name(raw: &str) -> Result<String> {
+    let name = raw.trim().to_ascii_lowercase();
+    let starts_well = name
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric());
+    let fits = name.len() <= MAX_NAME_LEN
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    if !starts_well || !fits {
+        bail!(
+            "`{}` can't be an account name. Use up to {MAX_NAME_LEN} letters, numbers, `-` or `_`, starting with a letter or number (for example `work`).",
+            raw.trim()
+        );
+    }
+    Ok(name)
+}
+
+impl Accounts {
+    pub fn new(provider: &str) -> Self {
+        Self::in_dir(provider, crate::paths::config_dir().join(provider))
+    }
+
+    /// The accounts of a provider, with a login from before accounts existed
+    /// moved in first.
+    pub fn open(provider: &str, support: &dyn AccountSupport) -> Result<Self> {
+        let accounts = Self::new(provider);
+        accounts.migrate(support.single_login().as_ref(), |login| {
+            support.identity(login)
+        })?;
+        Ok(accounts)
+    }
+
+    /// What the current account holds, for a provider's `auth_state`.
+    pub fn current_state(provider: &str, support: &dyn AccountSupport) -> AuthState {
+        let state = || -> Result<Option<AuthState>> {
+            let accounts = Self::open(provider, support)?;
+            let Some(account) = accounts.current()? else {
+                return Ok(None);
+            };
+            Ok(accounts
+                .login(&account.name)?
+                .map(|login| support.state(&login)))
+        };
+        state().ok().flatten().unwrap_or(AuthState::Missing)
+    }
+
+    pub(crate) fn in_dir(provider: &str, dir: PathBuf) -> Self {
+        Self {
+            provider: provider.to_string(),
+            dir,
+        }
+    }
+
+    fn index_path(&self) -> PathBuf {
+        self.dir.join("accounts.json")
+    }
+
+    /// Where an account's login is kept.
+    pub fn file(&self, id: &str) -> PathBuf {
+        self.dir.join("accounts").join(format!("{id}.json"))
+    }
+
+    /// The store of one account's login, for a provider's token manager.
+    pub fn store<T>(&self, id: &str) -> AccountAuthStore<T>
+    where
+        T: Serialize + serde::de::DeserializeOwned + Send + Sync + Clone,
+    {
+        AccountAuthStore {
+            accounts: self.clone(),
+            id: id.to_string(),
+            file: self.file_store(id),
+        }
+    }
+
+    /// Pins the selected login, rejecting IDs retired by sign-out or replacement.
+    pub fn for_request<T>(&self, id: Option<&str>) -> Result<AccountAuthStore<T>>
+    where
+        T: Serialize + serde::de::DeserializeOwned + Send + Sync + Clone,
+    {
+        let account = match id {
+            Some(id) => Some(self.list()?.into_iter().find(|account| account.id == id)
+                .context("This account was signed out or replaced. Retry the request to use the current account.")?),
+            None => self.current()?,
+        };
+        Ok(self.store(
+            account
+                .as_ref()
+                .map_or("missing", |account| account.id.as_str()),
+        ))
+    }
+
+    fn file_store<T>(&self, id: &str) -> FileAuthStore<T>
+    where
+        T: Serialize + serde::de::DeserializeOwned + Send + Sync + Clone,
+    {
+        let file = self.file(id).to_string_lossy().into_owned();
+        FileAuthStore::new(file.clone(), file)
+    }
+
+    fn read_index(&self) -> Result<Index> {
+        let path = self.index_path();
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Index::default()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("can't read {}", path.display()));
+            }
+        };
+        let index: Index = serde_json::from_str(&raw).with_context(|| {
+            format!(
+                "can't read the {} account list at {}. Your logins are still in {}. Fix the account list, then try again.",
+                self.provider,
+                path.display(),
+                self.dir.join("accounts").display()
+            )
+        })?;
+        let mut names = std::collections::HashSet::new();
+        let mut ids = std::collections::HashSet::new();
+        for account in &index.accounts {
+            if clean_name(&account.name)? != account.name
+                || uuid::Uuid::parse_str(&account.id).is_err()
+                || !names.insert(&account.name)
+                || !ids.insert(&account.id)
+            {
+                bail!(
+                    "Invalid or repeated account in {}. Fix the account list, then try again.",
+                    path.display()
+                );
+            }
+        }
+        if index
+            .current
+            .as_ref()
+            .is_some_and(|name| !names.contains(name))
+        {
+            bail!(
+                "The current account in {} is not listed. Fix the account list, then try again.",
+                path.display()
+            );
+        }
+        Ok(index)
+    }
+
+    fn write_index(&self, index: &Index) -> Result<()> {
+        write_atomically(&self.index_path().to_string_lossy(), index)
+    }
+
+    /// Runs `change` while no other cc-proxy process changes the list.
+    fn locked<R>(&self, change: impl FnOnce() -> Result<R>) -> Result<R> {
+        fs::create_dir_all(&self.dir)?;
+        let lock = File::create(self.dir.join("accounts.lock"))?;
+        lock.lock()
+            .with_context(|| format!("can't lock the {} account list", self.provider))?;
+        change()
+    }
+
+    pub fn list(&self) -> Result<Vec<Account>> {
+        Ok(self.read_index()?.accounts)
+    }
+
+    /// The account called `raw`, or an error that lists the accounts there are.
+    pub fn require(&self, raw: &str) -> Result<Account> {
+        let index = self.read_index()?;
+        let name = raw.trim().to_ascii_lowercase();
+        match index.position(&name) {
+            Some(at) => Ok(index.accounts[at].clone()),
+            None => bail!(self.missing(&name, &index)),
+        }
+    }
+
+    pub fn find(&self, name: &str) -> Result<Option<Account>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|account| account.name == name))
+    }
+
+    /// The account requests use now. When the list names none, the first one.
+    pub fn current(&self) -> Result<Option<Account>> {
+        let index = self.read_index()?;
+        let at = index
+            .current
+            .as_deref()
+            .and_then(|name| index.position(name))
+            .unwrap_or(0);
+        Ok(index.accounts.into_iter().nth(at))
+    }
+
+    /// The first free name: `main`, then `account-2`, `account-3`.
+    pub fn next_name(&self) -> Result<String> {
+        let taken = self.list()?;
+        let free = |name: &str| taken.iter().all(|account| account.name != name);
+        if free(FIRST_NAME) {
+            return Ok(FIRST_NAME.to_string());
+        }
+        Ok((2..)
+            .map(|number| format!("account-{number}"))
+            .find(|name| free(name))
+            .expect("an unbounded range has a free name"))
+    }
+
+    /// The saved login, as the provider wrote it.
+    pub fn login(&self, name: &str) -> Result<Option<Value>> {
+        self.file_store(&self.require(name)?.id).load()
+    }
+
+    /// Saves only if the slot still matches the command's starting state.
+    /// A browser sign-in can take minutes; another process may change it meanwhile.
+    pub fn install(
+        &self,
+        name: &str,
+        expected_id: Option<&str>,
+        login: &Value,
+        identity: Option<String>,
+    ) -> Result<()> {
+        let name = clean_name(name)?;
+        let name = name.as_str();
+        self.locked(|| {
+            let index = self.read_index()?;
+            let current_id = index.position(name).map(|at| index.accounts[at].id.as_str());
+            if current_id != expected_id {
+                bail!("The `{name}` account changed while you were signing in. Nothing was replaced. Run the command again.");
+            }
+            if let Some(identity) = &identity
+                && let Some(same) = index.accounts.iter().find(|a| a.identity.as_ref() == Some(identity) && a.name != name)
+            {
+                bail!("That sign-in is already saved as `{}`. Nothing changed. Sign in again to that account instead.", same.name);
+            }
+            self.save_unlocked(name, login, identity)
+        })
+    }
+
+    #[cfg(test)]
+    fn save(&self, name: &str, login: &Value, identity: Option<String>) -> Result<()> {
+        self.locked(|| self.save_unlocked(name, login, identity))
+    }
+
+    fn save_unlocked(&self, name: &str, login: &Value, identity: Option<String>) -> Result<()> {
+        let name = clean_name(name)?;
+        let mut index = self.read_index()?;
+        let old_id = index
+            .position(&name)
+            .map(|at| index.accounts[at].id.clone());
+        let account = Account {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.clone(),
+            identity,
+        };
+        // The login first: a crash leaves an unlisted file, not a missing login.
+        write_atomically(&self.file(&account.id).to_string_lossy(), login)?;
+        match index.position(&name) {
+            Some(at) => index.accounts[at] = account,
+            None => index.accounts.push(account),
+        }
+        if index.current.is_none() {
+            index.current = Some(name);
+        }
+        self.write_index(&index)?;
+        if let Some(id) = old_id {
+            remove_file_if_present(&self.file(&id))?;
+        }
+        Ok(())
+    }
+
+    /// A late request must not overwrite a switch made by a newer request or
+    /// by `auth use` while it was waiting for the provider.
+    pub(crate) fn switch_if_current(&self, expected_id: &str, next_id: &str) -> Result<()> {
+        self.locked(|| {
+            let mut index = self.read_index()?;
+            let current = index
+                .current
+                .as_deref()
+                .and_then(|name| index.position(name));
+            if current.is_some_and(|at| index.accounts[at].id == expected_id)
+                && let Some(next) = index.accounts.iter().find(|a| a.id == next_id)
+            {
+                index.current = Some(next.name.clone());
+                self.write_index(&index)?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn set_current(&self, name: &str) -> Result<()> {
+        self.locked(|| {
+            let mut index = self.read_index()?;
+            if index.position(name).is_none() {
+                bail!(self.missing(name, &index));
+            }
+            index.current = Some(name.to_string());
+            self.write_index(&index)
+        })
+    }
+
+    /// Removes one account and its login. When it was the current one, the
+    /// first account left takes over; returns that account.
+    pub fn remove(&self, name: &str) -> Result<Option<Account>> {
+        self.locked(|| {
+            let mut index = self.read_index()?;
+            let Some(at) = index.position(name) else {
+                bail!(self.missing(name, &index));
+            };
+            let removed = index.accounts.remove(at);
+            let was_current = index.current.as_deref() == Some(name);
+            if was_current {
+                index.current = index.accounts.first().map(|account| account.name.clone());
+            }
+            // The list first, so a crash leaves a file nobody lists.
+            self.write_index(&index)?;
+            remove_file_if_present(&self.file(&removed.id))?;
+            Ok(was_current
+                .then(|| index.accounts.first().cloned())
+                .flatten())
+        })
+    }
+
+    pub fn remove_all(&self) -> Result<()> {
+        self.locked(|| {
+            let index = self.read_index()?;
+            self.write_index(&Index::default())?;
+            for account in &index.accounts {
+                remove_file_if_present(&self.file(&account.id))?;
+            }
+            Ok(())
+        })
+    }
+
+    fn missing(&self, name: &str, index: &Index) -> String {
+        let names: Vec<&str> = index.accounts.iter().map(|a| a.name.as_str()).collect();
+        format!(
+            "No {} account is called `{name}`. You have: {}.",
+            crate::ui::provider_name(&self.provider),
+            names.join(", ")
+        )
+    }
+
+    /// Moves a login saved before accounts existed into the first account.
+    /// Does nothing once the list exists. The old copy is removed only after the
+    /// new one is saved, so a failure on the way loses nothing.
+    pub fn migrate(
+        &self,
+        old: &dyn AuthStorage<Value>,
+        identity_of: impl Fn(&Value) -> Option<String>,
+    ) -> Result<()> {
+        // Most calls end here, so a provider nobody signed in to is read without
+        // taking the lock or creating a file.
+        if self.index_path().exists() || old.load()?.is_none() {
+            return Ok(());
+        }
+        self.locked(|| {
+            if self.index_path().exists() {
+                return Ok(());
+            }
+            let Some(login) = old.load()? else {
+                return Ok(());
+            };
+            self.save_unlocked(FIRST_NAME, &login, identity_of(&login))?;
+            // A copy left behind is harmless: nothing reads it any more.
+            let _ = old.clear();
+            Ok(())
+        })
+    }
+}
+
+/// A refresh writes only to a still-listed account. A sign-out or a new sign-in
+/// retires its ID, so a late refresh cannot restore an old login.
+pub struct AccountAuthStore<T>
+where
+    T: Serialize + serde::de::DeserializeOwned + Send + Sync + Clone,
+{
+    accounts: Accounts,
+    id: String,
+    file: FileAuthStore<T>,
+}
+
+impl<T> AuthStorage<T> for AccountAuthStore<T>
+where
+    T: Serialize + serde::de::DeserializeOwned + Send + Sync + Clone,
+{
+    fn load(&self) -> Result<Option<T>> {
+        if !self
+            .accounts
+            .list()?
+            .iter()
+            .any(|account| account.id == self.id)
+        {
+            return Ok(None);
+        }
+        self.file.load()
+    }
+
+    fn save(&self, value: T) -> Result<()> {
+        self.accounts.locked(|| {
+            if !self.accounts.list()?.iter().any(|a| a.id == self.id) {
+                bail!("This account was signed out or replaced. Try the request again to use the current account.");
+            }
+            self.file.save(value)
+        })
+    }
+
+    fn clear(&self) -> Result<()> {
+        self.file.clear()
+    }
+
+    fn path(&self) -> String {
+        self.file.path()
+    }
+}
+
+fn remove_file_if_present(path: &std::path::Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::auth::InMemoryAuthStore;
+
+    fn accounts(dir: &tempfile::TempDir) -> Accounts {
+        Accounts::in_dir("codex", dir.path().join("codex"))
+    }
+
+    fn names(accounts: &Accounts) -> Vec<String> {
+        accounts
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|account| account.name)
+            .collect()
+    }
+
+    #[test]
+    fn the_first_account_is_current_and_the_next_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        assert!(accounts.current().unwrap().is_none());
+        assert_eq!(accounts.next_name().unwrap(), "main");
+
+        accounts
+            .save("main", &json!({"access": "a"}), Some("id-a".into()))
+            .unwrap();
+        accounts
+            .save("work", &json!({"access": "w"}), None)
+            .unwrap();
+        assert_eq!(names(&accounts), ["main", "work"]);
+        assert_eq!(accounts.current().unwrap().unwrap().name, "main");
+        assert_eq!(accounts.next_name().unwrap(), "account-2");
+        assert_eq!(
+            accounts.login("work").unwrap().unwrap(),
+            json!({"access": "w"})
+        );
+
+        accounts.set_current("work").unwrap();
+        assert_eq!(accounts.current().unwrap().unwrap().name, "work");
+        let error = accounts.set_current("nope").unwrap_err().to_string();
+        assert!(
+            error.contains("`nope`") && error.contains("main, work"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn request_stores_pin_current_and_reject_retired_or_unlisted_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts
+            .install("main", None, &json!({"access":"first"}), None)
+            .unwrap();
+        let first = accounts.require("main").unwrap();
+        let pinned = accounts.for_request::<Value>(None).unwrap();
+        accounts
+            .install("work", None, &json!({"access":"second"}), None)
+            .unwrap();
+        accounts.set_current("work").unwrap();
+        assert_eq!(pinned.load().unwrap().unwrap()["access"], "first");
+        assert_eq!(
+            accounts
+                .for_request::<Value>(None)
+                .unwrap()
+                .load()
+                .unwrap()
+                .unwrap()["access"],
+            "second"
+        );
+        assert!(accounts.install(" MAIN ", None, &json!({}), None).is_err());
+        accounts.remove("main").unwrap();
+        write_atomically(
+            &accounts.file(&first.id).to_string_lossy(),
+            &json!({"access":"leftover"}),
+        )
+        .unwrap();
+        assert!(pinned.load().unwrap().is_none());
+        assert!(accounts.for_request::<Value>(Some(&first.id)).is_err());
+        assert!(
+            accounts
+                .for_request::<Value>(Some("../../outside"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn saving_again_replaces_the_login_and_keeps_the_place_in_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts
+            .save("main", &json!({"access": "old"}), Some("id-a".into()))
+            .unwrap();
+        accounts
+            .save("work", &json!({"access": "w"}), None)
+            .unwrap();
+        accounts.set_current("work").unwrap();
+
+        accounts
+            .save("main", &json!({"access": "new"}), Some("id-b".into()))
+            .unwrap();
+        assert_eq!(names(&accounts), ["main", "work"]);
+        assert_eq!(accounts.current().unwrap().unwrap().name, "work");
+        assert_eq!(accounts.login("main").unwrap().unwrap()["access"], "new");
+        assert_eq!(
+            accounts.find("main").unwrap().unwrap().identity.as_deref(),
+            Some("id-b")
+        );
+    }
+
+    #[test]
+    fn removing_the_current_account_hands_over_to_the_first_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        for name in ["main", "work", "home"] {
+            accounts.save(name, &json!({"access": name}), None).unwrap();
+        }
+        accounts.set_current("work").unwrap();
+        let work_file = accounts.file(&accounts.require("work").unwrap().id);
+        let main_file = accounts.file(&accounts.require("main").unwrap().id);
+
+        // Another account going away changes nothing.
+        assert!(accounts.remove("home").unwrap().is_none());
+        assert_eq!(accounts.current().unwrap().unwrap().name, "work");
+
+        let next = accounts.remove("work").unwrap().unwrap();
+        assert_eq!(next.name, "main");
+        assert_eq!(accounts.current().unwrap().unwrap().name, "main");
+        assert!(!work_file.exists());
+        assert!(main_file.exists());
+
+        accounts.remove_all().unwrap();
+        assert!(accounts.list().unwrap().is_empty());
+        assert!(!main_file.exists());
+        assert!(accounts.index_path().exists());
+    }
+
+    #[test]
+    fn a_list_that_cannot_be_read_is_never_treated_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts
+            .save("main", &json!({"access": "a"}), None)
+            .unwrap();
+        let main_file = accounts.file(&accounts.require("main").unwrap().id);
+        fs::write(accounts.index_path(), "{ not json").unwrap();
+
+        let error = format!("{:#}", accounts.list().unwrap_err());
+        assert!(
+            error.contains("account list") && error.contains("accounts.json"),
+            "{error}"
+        );
+        // Writing is refused too, so the logins are not orphaned by a fresh list.
+        assert!(accounts.save("work", &json!({}), None).is_err());
+        assert_eq!(
+            fs::read_to_string(accounts.index_path()).unwrap(),
+            "{ not json"
+        );
+        assert!(main_file.exists());
+    }
+
+    #[test]
+    fn names_are_cleaned_or_refused() {
+        assert_eq!(clean_name("  Work ").unwrap(), "work");
+        assert_eq!(clean_name("a_b-2").unwrap(), "a_b-2");
+        for bad in ["", "-x", "a b", "../x", "x/y", "é", &"a".repeat(33)] {
+            assert!(clean_name(bad).is_err(), "{bad:?}");
+        }
+        let error = clean_name("a b").unwrap_err().to_string();
+        assert!(error.contains("`a b`") && error.contains("work"), "{error}");
+    }
+
+    #[test]
+    fn an_old_single_login_moves_over_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        let old = InMemoryAuthStore::<Value>::new();
+        old.save(json!({"access": "a", "accountId": "acct-1"}))
+            .unwrap();
+        let identity = |login: &Value| login["accountId"].as_str().map(str::to_string);
+
+        accounts.migrate(&old, identity).unwrap();
+        assert_eq!(names(&accounts), ["main"]);
+        assert_eq!(accounts.login("main").unwrap().unwrap()["access"], "a");
+        assert_eq!(
+            accounts.current().unwrap().unwrap().identity.as_deref(),
+            Some("acct-1")
+        );
+        assert!(old.load().unwrap().is_none());
+
+        // A login saved later is not "migrated" over the new accounts.
+        old.save(json!({"access": "later"})).unwrap();
+        accounts.migrate(&old, identity).unwrap();
+        assert_eq!(accounts.login("main").unwrap().unwrap()["access"], "a");
+        assert!(old.load().unwrap().is_some());
+    }
+
+    #[test]
+    fn nothing_to_move_leaves_no_list_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts
+            .migrate(&InMemoryAuthStore::<Value>::new(), |_| None)
+            .unwrap();
+        assert!(!accounts.index_path().exists());
+    }
+
+    #[test]
+    fn two_processes_adding_at_once_both_end_up_in_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("codex");
+        let handles: Vec<_> = (0..8)
+            .map(|number| {
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    // Each thread opens its own handle, as a separate process would.
+                    Accounts::in_dir("codex", root)
+                        .save(&format!("acct-{number}"), &json!({"n": number}), None)
+                        .unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let accounts = Accounts::in_dir("codex", root);
+        assert_eq!(accounts.list().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn late_refresh_cannot_restore_a_removed_or_replaced_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts
+            .install("work", None, &json!({"access": "old"}), None)
+            .unwrap();
+        let old = accounts.require("work").unwrap();
+        let store = accounts.store::<Value>(&old.id);
+        accounts
+            .install("work", Some(&old.id), &json!({"access": "new"}), None)
+            .unwrap();
+        assert!(store.save(json!({"access": "late"})).is_err());
+        assert!(!accounts.file(&old.id).exists());
+        assert_eq!(accounts.login("work").unwrap().unwrap()["access"], "new");
+        // A stale sign-in command cannot overwrite the replacement either.
+        assert!(
+            accounts
+                .install("work", Some(&old.id), &json!({}), None)
+                .is_err()
+        );
+        let current = accounts.require("work").unwrap();
+        let current_store = accounts.store::<Value>(&current.id);
+        accounts.remove_all().unwrap();
+        assert!(current_store.save(json!({})).is_err());
+        assert!(!accounts.file(&current.id).exists());
+    }
+
+    #[test]
+    fn empty_index_prevents_a_leftover_legacy_login_from_returning() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts.save("main", &json!({}), None).unwrap();
+        accounts.remove_all().unwrap();
+        let old = InMemoryAuthStore::<Value>::new();
+        old.save(json!({"access": "leftover"})).unwrap();
+        accounts.migrate(&old, |_| None).unwrap();
+        assert!(accounts.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn index_paths_are_validated_before_opening_a_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts.save("main", &json!({}), None).unwrap();
+        let mut index: Value =
+            serde_json::from_str(&fs::read_to_string(accounts.index_path()).unwrap()).unwrap();
+        index["accounts"][0]["id"] = json!("../../outside");
+        fs::write(accounts.index_path(), index.to_string()).unwrap();
+        assert!(accounts.list().is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn logins_are_private_to_the_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts
+            .save("main", &json!({"access": "a"}), None)
+            .unwrap();
+        let mode = |path: PathBuf| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode(accounts.file(&accounts.require("main").unwrap().id)),
+            0o600
+        );
+        assert_eq!(mode(accounts.index_path()), 0o600);
+    }
+}

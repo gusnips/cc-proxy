@@ -15,7 +15,7 @@ Subscribe to OpenCode Go, copy your API key, and store it once (input is
 hidden, nothing lands in shell history):
 
 ```sh
-cc-proxy opencode auth login
+cc-proxy login opencode
 ```
 
 The key lands in `opencode.apiKey` in config.json. Alternatives, in

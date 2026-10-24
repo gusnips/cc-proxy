@@ -13,6 +13,7 @@ These settings configure the proxy process. Claude Code client settings such as 
 {
   "bindAddress": "127.0.0.1",
   "port": 18765,
+  "auth": { "autoRotate": false },
   "autoReviewModel": "gpt-5.6-terra",
   "route": {
     "on": true,
@@ -78,14 +79,68 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 
 `CCP_CONFIG_DIR` affects `config.json` and file-backed provider auth. It does not relocate the state directory.
 
+## Saved accounts and auto-rotate
+
+Codex, Kimi, Grok and Antigravity can keep more than one login. Add an account with
+`cc-proxy auth add codex`, then choose it with `cc-proxy auth use codex`.
+These commands do not restart the proxy. After signing in to Antigravity,
+run `cc-proxy models refresh antigravity` to fetch the current account's model
+list. Adding another account does not replace that shared list.
+
+`auth.autoRotate` defaults to `false`. To let a running proxy switch accounts:
+
+```sh
+cc-proxy config set auth.autoRotate true
+```
+
+Or run `cc-proxy config`, find `auth.autoRotate` and press Right. The change
+applies on the next request.
+
+When a Messages request returns HTTP 429 with a valid `Retry-After` or a
+provider-confirmed future reset time, the account waits until that time.
+cc-proxy tries another saved account from the same provider. Each account is
+tried at most once per request. No retry time means no automatic switch.
+Quota percentages alone never trigger a switch.
+
+Codex's usage-limit reset clock works even when it omits `Retry-After`.
+Antigravity's `QUOTA_EXHAUSTED` errors use Google's retry delay or reset
+clock. A model-specific limit blocks only that model on that account.
+Antigravity's short `RATE_LIMIT_EXCEEDED` capacity throttles never switch
+accounts. Gemini API keys do not rotate: Google's quotas belong to the
+project, not the key.
+
+The current account is used again once its wait ends. An account whose wait
+ends becomes eligible again. If every account is waiting, the proxy returns one
+429 with the earliest retry time. `cc-proxy auth status codex` shows each
+account's wait.
+
+Rotation never replays output after a stream starts. Codex reasoning signatures
+name the saved login that created them, so they remain usable after a proxy
+restart but cannot move between accounts. When a conversation carries reasoning
+from another saved login (after a switch, a replacement, or history from an
+older proxy version), cc-proxy drops only that reasoning and continues with the
+text and tool history. The answer may know less about the earlier reasoning;
+nothing else is lost.
+
+Codex's native Responses route rejects encrypted history, item references,
+`conversation` and `previous_response_id` because their account cannot be
+verified. Send full text and tool history instead.
+
+OpenAI-compatible routes, images and audio use the current account without
+rotation. API-key providers, Copilot and Cursor do not support saved-account
+rotation in this version.
+
+Cooldowns are saved under the state directory, so restarting the proxy does
+not clear them. See [Files and storage](/reference/files-and-storage/).
+
 ## Routing state
 
 `cc-proxy start`, `use` and `stop` keep the routing state in a `route` object in `config.json`. The proxy reads it on every request, so a switch needs no restart, even when a Homebrew service runs the proxy. `config set` does not take these keys. Use the commands.
 
-| Config key                      | Default | Meaning                                                                                                                                        |
-| ------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `route.on`                      | `false` | Whether Claude names are served. Only `start` and `use <provider>` turn it on. `stop` and `use claude` turn it off.                            |
-| `route.provider`                | unset   | The provider Claude Code goes to. It stays set while routing is off, so `start` can offer it again.                                            |
+| Config key                      | Default | Meaning                                                                                                                                                                |
+| ------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `route.on`                      | `false` | Whether Claude names are served. Only `start` and `use <provider>` turn it on. `stop` and `use claude` turn it off.                                                    |
+| `route.provider`                | unset   | The provider Claude Code goes to. It stays set while routing is off, so `start` can offer it again.                                                                    |
 | `route.tiers.<provider>.<name>` | unset   | The model you chose for a Claude name (`fable`, `opus`, `sonnet`, `haiku`). Written by `cc-proxy models choose`, `cc-proxy models set` and the questions `start` asks. |
 
 A missing, unreadable or malformed `config.json` means routing is off. Nothing is routed by accident.

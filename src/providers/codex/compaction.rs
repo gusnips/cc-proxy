@@ -63,6 +63,13 @@ struct CompactionRegistry {
 
 static REGISTRY: Mutex<Option<CompactionRegistry>> = Mutex::new(None);
 static NEXT_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(test)]
+static TEST_REGISTRY_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn lock_compaction_registry_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    TEST_REGISTRY_LOCK.lock().unwrap()
+}
 
 pub async fn request_compaction(
     client: &CodexHttpClient,
@@ -261,6 +268,16 @@ pub fn clear_compaction(session_id: &str) {
     let mut guard = REGISTRY.lock().unwrap();
     if let Some(registry) = guard.as_mut() {
         registry.states.remove(session_id);
+        update_total_bytes(registry);
+    }
+}
+
+pub(crate) fn clear_compactions_with_prefix(prefix: &str) {
+    let mut guard = REGISTRY.lock().unwrap();
+    if let Some(registry) = guard.as_mut() {
+        registry
+            .states
+            .retain(|session_id, _| !session_id.starts_with(prefix));
         update_total_bytes(registry);
     }
 }
@@ -560,7 +577,6 @@ mod tests {
         "portable summary with enough detail to identify this compacted conversation";
     const STALE_SUMMARY: &str =
         "stale portable summary from an older overlapping compaction attempt";
-    static TEST_REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 
     fn request(input: serde_json::Value) -> ResponsesRequest {
         serde_json::from_value(json!({

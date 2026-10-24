@@ -150,37 +150,128 @@ fn basis_label(basis: Basis) -> &'static str {
     }
 }
 
-/// Fetches the live model list of GitHub Copilot or a provider you added. The
-/// others list their models without asking the provider.
+/// Fetches the live model list of a provider (or every provider that supports
+/// live discovery when `provider` is `Some("all")`).
 pub fn run_refresh(provider: Option<&str>) -> Result<()> {
     let registry = Registry::new();
+    let asked = provider.map(|p| p.trim().to_ascii_lowercase());
+    if asked.as_deref() == Some("all") {
+        return refresh_all(&registry);
+    }
+    if asked.is_none() && crate::prompt::is_interactive() {
+        let providers = routable_providers(&registry);
+        let mut labels = vec!["All providers (all)".to_string()];
+        labels.extend(
+            providers
+                .iter()
+                .map(|id| format!("{} ({id})", ui::provider_name(id))),
+        );
+        let idx = crate::prompt::choose(
+            "Which provider's model list do you want to refresh?",
+            &labels,
+            0,
+        )?;
+        if idx == 0 {
+            return refresh_all(&registry);
+        }
+        return refresh_one(providers[idx - 1]);
+    }
     let provider = pick_provider(
         &registry,
-        provider,
+        asked.as_deref(),
         "Which provider's model list do you want to refresh?",
         true,
     )?;
+    refresh_one(provider)
+}
+
+fn refresh_one(provider: &str) -> Result<()> {
     let name = ui::provider_name(provider);
-    if provider == "copilot" {
-        let Some(auth) = crate::providers::copilot::auth::file_store().load()? else {
-            bail!("GitHub Copilot isn't signed in. Run `cc-proxy auth login copilot` first.");
-        };
-        let ids = crate::providers::copilot::models::refresh(&auth)?;
-        println!("{name} lists {} models now.", ids.len());
-    } else if config::custom_providers().contains_key(provider) {
-        let models = crate::providers::custom::refresh_models(provider)?;
-        println!(
-            "{name} lists {} models now. They're saved in config.json.",
-            models.len()
-        );
-    } else {
-        println!(
-            "There's nothing to fetch for {name}. `cc-proxy models list {provider}` shows its models."
-        );
-        return Ok(());
+    println!("Fetching {name}'s model list...");
+    match refresh_provider(provider)? {
+        Some(ids) => println!("{name} lists {} models now.", ids.len()),
+        None => {
+            print_discovery_unavailable(provider);
+            return Ok(());
+        }
     }
     if config::route().target() == Some(provider) {
         crate::route::refresh_model_labels();
+    }
+    show(&Registry::new(), provider);
+    Ok(())
+}
+
+fn refresh_provider(provider: &str) -> Result<Option<Vec<String>>> {
+    let ids = match provider {
+        "copilot" => {
+            let Some(auth) = crate::providers::copilot::auth::file_store().load()? else {
+                bail!("GitHub Copilot isn't signed in. Run `cc-proxy auth login copilot` first.");
+            };
+            crate::providers::copilot::models::refresh(&auth)?
+        }
+        "antigravity" => crate::providers::antigravity::refresh_models()?,
+        "gemini" => crate::providers::gemini::refresh_models()?,
+        "opencode" => crate::providers::opencode::model::refresh_models(false)?,
+        "opencode-zen" => crate::providers::opencode::model::refresh_models(true)?,
+        _ if config::custom_providers().contains_key(provider) => {
+            crate::providers::custom::refresh_models(provider)?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(ids))
+}
+
+fn print_discovery_unavailable(provider: &str) {
+    if provider == "codex" {
+        println!(
+            "Codex: reads the Codex CLI's local model cache automatically. No live refresh was run."
+        );
+    } else {
+        println!(
+            "{}: live model discovery is not supported yet. Use `cc-proxy models list {provider}` to see the saved list.",
+            ui::provider_name(provider)
+        );
+    }
+}
+
+fn refresh_all(registry: &Registry) -> Result<()> {
+    let mut failures = 0;
+    for provider in routable_providers(registry) {
+        let name = ui::provider_name(provider);
+        if matches!(provider, "antigravity" | "copilot" | "gemini")
+            && registry.provider(provider).is_some_and(|handler| {
+                matches!(
+                    handler.cli().auth_state(),
+                    crate::provider::AuthState::Missing
+                )
+            })
+        {
+            println!(
+                "{name}: skipped. Sign in with `cc-proxy auth login {provider}` to fetch its models."
+            );
+            continue;
+        }
+        println!("Fetching {name}'s model list...");
+        match refresh_provider(provider) {
+            Ok(Some(ids)) => println!("{name}: {} models.", ids.len()),
+            Ok(None) => print_discovery_unavailable(provider),
+            Err(error) => {
+                failures += 1;
+                eprintln!(
+                    "{name}: {error:#}. The saved list has not changed. Retry with `cc-proxy models refresh {provider}`."
+                );
+            }
+        }
+    }
+    crate::route::refresh_model_labels();
+    if let Some(active) = config::route().target() {
+        show(&Registry::new(), active);
+    }
+    if failures > 0 {
+        bail!(
+            "Could not refresh {failures} provider model lists. See the errors above. Other lists were updated."
+        );
     }
     Ok(())
 }

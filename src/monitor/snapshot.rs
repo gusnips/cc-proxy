@@ -98,6 +98,8 @@ pub struct ActiveSnapshot {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub endpoint: EndpointKind,
@@ -135,6 +137,7 @@ impl From<ActiveRequest> for ActiveSnapshot {
             session_seq: value.session_seq,
             project: value.project,
             provider: value.provider,
+            account: value.account,
             model: value.model,
             effort: value.effort,
             endpoint: value.endpoint,
@@ -161,6 +164,8 @@ pub struct CompletedSnapshot {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub endpoint: EndpointKind,
@@ -196,6 +201,7 @@ impl From<CompletedRequest> for CompletedSnapshot {
             session_seq: value.session_seq,
             project: value.project,
             provider: value.provider,
+            account: value.account,
             model: value.model,
             effort: value.effort,
             endpoint: value.endpoint,
@@ -225,6 +231,8 @@ pub struct SessionSnapshot {
     pub request_count: usize,
     pub failure_count: usize,
     pub provider: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub last_seen: SystemTime,
@@ -252,6 +260,7 @@ impl From<SessionSummary> for SessionSnapshot {
             request_count: value.request_count,
             failure_count: value.failure_count,
             provider: value.provider,
+            account: value.account,
             model: value.model,
             effort: value.effort,
             last_seen: value.last_seen,
@@ -277,6 +286,38 @@ impl SessionSnapshot {
 mod tests {
     use super::*;
     use crate::monitor::MonitorHandle;
+
+    #[test]
+    fn account_names_follow_the_attempt_and_survive_completion() {
+        let monitor = MonitorHandle::default();
+        monitor.request_started(
+            "first",
+            Some("session".into()),
+            Some(1),
+            EndpointKind::Messages,
+        );
+        monitor.account_selected("first", "home");
+        assert_eq!(
+            monitor.snapshot().active[0].account.as_deref(),
+            Some("home")
+        );
+        monitor.account_selected("first", "work");
+        monitor.request_completed("first", 200, None, None);
+        monitor.request_started(
+            "second",
+            Some("session".into()),
+            Some(2),
+            EndpointKind::Messages,
+        );
+        monitor.account_selected("second", "home");
+        let snapshot: MonitorSnapshot = monitor.snapshot().into();
+        assert_eq!(snapshot.recent[0].account.as_deref(), Some("work"));
+        assert_eq!(snapshot.active[0].account.as_deref(), Some("home"));
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let decoded: MonitorSnapshot = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, snapshot);
+        assert_eq!(decoded.sessions[0].account.as_deref(), Some("home"));
+    }
 
     #[test]
     fn snapshot_round_trip_preserves_accounting_without_process_clocks() {

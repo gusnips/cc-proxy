@@ -321,6 +321,21 @@ pub fn meter(percent: f64, cells: usize) -> String {
     paint(&"━".repeat(filled), color) + &paint(&"━".repeat(cells - filled), TRACK)
 }
 
+/// A `percent`-left bar: the fill is what remains, green until 30% is left,
+/// yellow until 10%, then red. A shorter bar means less allowance.
+pub fn remaining_meter(percent: f64, cells: usize) -> String {
+    let percent = percent.clamp(0.0, 100.0);
+    let filled = ((percent / 100.0) * cells as f64).round() as usize;
+    let color = if percent <= 10.0 {
+        RED
+    } else if percent <= 30.0 {
+        YELLOW
+    } else {
+        GREEN
+    };
+    paint(&"━".repeat(filled), color) + &paint(&"━".repeat(cells - filled), TRACK)
+}
+
 /// "2h14m", "3m05s", "5s".
 pub fn duration(duration: Duration) -> String {
     let total = duration.as_secs();
@@ -460,5 +475,13 @@ mod tests {
         assert_eq!(bar.chars().count(), 20);
         assert!(meter(45.0, 20).starts_with(&paint(&"━".repeat(9), GREEN)));
         assert!(meter(95.0, 20).starts_with(&paint(&"━".repeat(19), RED)));
+    }
+
+    #[test]
+    fn a_remaining_meter_empties_and_turns_red_at_the_end() {
+        assert_eq!(strip_ansi(&remaining_meter(45.0, 20)).chars().count(), 20);
+        assert!(remaining_meter(45.0, 20).starts_with(&paint(&"━".repeat(9), GREEN)));
+        assert!(remaining_meter(5.0, 20).starts_with(&paint(&"━".to_string(), RED)));
+        assert!(remaining_meter(25.0, 20).starts_with(&paint(&"━".repeat(5), YELLOW)));
     }
 }

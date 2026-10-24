@@ -294,9 +294,15 @@ impl OpenCodeProvider {
                     Err(error) => return map_error(error),
                 };
                 capture_buffered_upstream(&ctx, &bytes, "json");
-                match google::accumulate_response(&bytes, &message_id, requested) {
+                match google::accumulate_response(self.label(), &bytes, &message_id, requested) {
                     Ok(value) => value,
-                    Err(error) => return invalid_upstream_response(error),
+                    Err(error) => {
+                        return upstream_error::translation_error(
+                            error,
+                            &format!("{} response translation failed", self.label()),
+                        )
+                        .response();
+                    }
                 }
             }
         };
@@ -896,6 +902,7 @@ mod tests {
 
     fn context() -> RequestContext {
         RequestContext {
+            account: None,
             req_id: "req_test".to_string(),
             provider: "opencode".to_string(),
             session_id: None,

@@ -457,14 +457,16 @@ fn usage_limit_from_payload_with_headers(
     let resets_in_seconds = numeric_value(error.get("resets_in_seconds"));
     let limiting_prefix =
         limiting_window_prefix(payload, response_headers, resets_in_seconds, resets_at);
-    let resets_at = resets_at.or_else(|| {
-        let prefix = limiting_prefix?;
-        header_number(
-            payload,
-            response_headers,
-            &format!("X-Codex-{prefix}-Reset-At"),
-        )
-    });
+    let resets_at = resets_at
+        .or_else(|| {
+            let prefix = limiting_prefix?;
+            header_number(
+                payload,
+                response_headers,
+                &format!("X-Codex-{prefix}-Reset-At"),
+            )
+        })
+        .or_else(|| (crate::rotation::now_ms() / 1_000).checked_add(resets_in_seconds?));
     let window = limiting_prefix.and_then(|prefix| {
         match header_number(
             payload,

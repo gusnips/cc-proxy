@@ -65,6 +65,20 @@ impl OpenCodeUsageService {
 }
 
 pub fn format_text(response: &OpenCodeUsageResponse, styled: bool) -> String {
+    format_text_at(
+        response,
+        styled,
+        jiff::Timestamp::now(),
+        &jiff::tz::TimeZone::system(),
+    )
+}
+
+fn format_text_at(
+    response: &OpenCodeUsageResponse,
+    styled: bool,
+    now: jiff::Timestamp,
+    tz: &jiff::tz::TimeZone,
+) -> String {
     let rows = [
         ("Rolling (5 hour)", response.usage.rolling.as_ref()),
         ("Weekly", response.usage.weekly.as_ref()),
@@ -74,28 +88,37 @@ pub fn format_text(response: &OpenCodeUsageResponse, styled: bool) -> String {
     for (label, window) in rows {
         output.push_str(&crate::usage::window_row(
             label,
-            window.and_then(|window| window.percent),
-            &format_window(window),
+            window
+                .and_then(|window| window.percent)
+                .map(|percent| (100.0 - percent).clamp(0.0, 100.0)),
+            &format_window(window, now, tz),
             styled,
         ));
     }
     output
 }
 
-fn format_window(window: Option<&OpenCodeUsageWindow>) -> String {
+fn format_window(
+    window: Option<&OpenCodeUsageWindow>,
+    now: jiff::Timestamp,
+    tz: &jiff::tz::TimeZone,
+) -> String {
     let Some(window) = window else {
         return "unavailable".to_string();
     };
 
     let mut fields = Vec::new();
     if let Some(percent) = window.percent {
-        fields.push(format!("{percent}% used"));
+        fields.push(format!("{}% left", (100.0 - percent).clamp(0.0, 100.0)));
     }
     if let Some(status) = window.status.as_deref() {
         fields.push(format!("status {status}"));
     }
     if let Some(reset_at) = window.resets_at.as_deref() {
-        fields.push(format!("resets {reset_at}"));
+        match reset_at.parse::<jiff::Timestamp>() {
+            Ok(reset) => fields.push(crate::usage::format_reset(reset, now, tz)),
+            Err(_) => fields.push(format!("resets {reset_at}")),
+        }
     }
 
     if fields.is_empty() {
@@ -261,13 +284,14 @@ mod tests {
 
     #[test]
     fn text_output_has_stable_window_order() {
+        let now: jiff::Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
         assert_eq!(
-            format_text(&response(), false),
+            format_text_at(&response(), false, now, &jiff::tz::TimeZone::UTC),
             concat!(
                 "OpenCode Go usage:\n",
-                "  Rolling (5 hour): 12.5% used, status ok, resets 2026-09-10T12:00:00Z\n",
-                "  Weekly: 82% used, status warning\n",
-                "  Monthly: 33% used, status ok, resets 2026-10-01T00:00:00Z"
+                "  Rolling (5 hour): 87.5% left, status ok, already reset (Sep 10 12:00)\n",
+                "  Weekly: 18% left, status warning\n",
+                "  Monthly: 67% left, status ok, already reset (Oct 1 00:00)"
             )
         );
     }

@@ -414,13 +414,11 @@ fn map_reasoning_effort(req: &MessagesRequest, model: &str) -> anyhow::Result<Op
     {
         return match effort {
             // Go's GLM takes only high and max, with no way to turn thinking
-            // off, so a caller who disabled thinking gets the least it offers
-            // rather than a 400.
-            "none" | "high" => Ok(Some("high".into())),
+            // off, so anything up to high gets the least it offers rather
+            // than a 400.
+            "none" | "low" | "medium" | "high" => Ok(Some("high".into())),
             "xhigh" | "max" => Ok(Some("max".into())),
-            other => anyhow::bail!(
-                "OpenCode Go model {model} does not support reasoning effort {other}; use high, xhigh, or max"
-            ),
+            _ => unreachable!("read_effort validates the effort"),
         };
     }
     if id.contains("deepseek-v4") {
@@ -434,12 +432,12 @@ fn map_reasoning_effort(req: &MessagesRequest, model: &str) -> anyhow::Result<Op
     }
     if id.contains("mimo") {
         return match effort {
-            // No off switch is mapped for MiMo here; low is its least.
+            // No off switch is mapped for MiMo here; low is its least and high
+            // its most, so anything outside is pulled inside rather than a 400.
             "none" => Ok(Some("low".into())),
             "low" | "medium" | "high" => Ok(Some(effort.into())),
-            other => anyhow::bail!(
-                "OpenCode Go model {model} does not support reasoning effort {other}; use low, medium, or high"
-            ),
+            "xhigh" | "max" => Ok(Some("high".into())),
+            _ => unreachable!("read_effort validates the effort"),
         };
     }
     // OpenCode exposes no selectable effort variants for the remaining chat
@@ -1406,6 +1404,28 @@ mod tests {
             }));
             let wire = serde_json::to_value(prepare_request(&req, model).unwrap()).unwrap();
             assert_eq!(wire["reasoning_effort"].as_str(), expected, "{model}");
+        }
+    }
+
+    #[test]
+    fn unsupported_effort_is_pulled_inside_the_model_range() {
+        for (model, effort, expected) in [
+            ("mimo-v2.6-flash-free", "xhigh", "high"),
+            ("mimo-v2.6-flash-free", "max", "high"),
+            ("glm-5.2", "low", "high"),
+            ("glm-5.2", "medium", "high"),
+            ("deepseek-v4.1-flash-free", "xhigh", "max"),
+        ] {
+            let req = request(json!({
+                "messages":[{"role":"user","content":"hi"}],
+                "output_config":{"effort":effort}
+            }));
+            let wire = serde_json::to_value(prepare_request(&req, model).unwrap()).unwrap();
+            assert_eq!(
+                wire["reasoning_effort"].as_str(),
+                Some(expected),
+                "{model} {effort}"
+            );
         }
     }
 

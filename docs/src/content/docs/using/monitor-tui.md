@@ -31,7 +31,7 @@ In an attached dashboard, `q` and `Ctrl-C` close the monitor immediately and lea
   uptime, the session and active request counts, the output tokens of the
   last four minutes, and the live tokens per second.
 - Sessions grouped by Claude Code session ID and project
-- Active request lifecycle and selected provider or model
+- Active request lifecycle, selected provider, saved account and model
 - Recent requests, HTTP status, elapsed time, and errors. A request that
   just finished glows for three seconds.
 - Each provider in its own color
@@ -50,11 +50,25 @@ In an attached dashboard, `q` and `Ctrl-C` close the monitor immediately and lea
 | `Esc`              | Close the top panel or detail view. On the main screen, close an attached monitor; in `start --monitor`, ask before stopping the proxy. |
 | `?`                | Toggle shortcut help                                                                                                                    |
 | `b`                | Toggle the setup overlay                                                                                                                |
-| `p`                | Toggle the Providers overlay: each provider's sign-in and plan usage                                                                    |
+| `p`                | Toggle local providers, saved accounts, usage and reset timers                                                                          |
 | `q`                | Detach an attached dashboard; in the built-in dashboard, confirm proxy shutdown                                                         |
 | `Ctrl-C`           | Detach an attached dashboard; in the built-in dashboard, start shutdown (press again to force exit)                                     |
 
-The request table changes columns as the terminal width changes.
+The request table changes columns as the terminal width changes. Saved account
+names appear before models. Request and session details show the full name.
+The name belongs to that request, not whichever account is current now.
+
+Press `p` to inspect local saved accounts. `[current]` marks the account chosen
+for new requests. Codex shows the signed-in email when the token carries one.
+Codex and Kimi rows show how much is left in each window on its own line, and
+when each window resets. Confirmed cooldowns show how long each account must
+wait, including model-specific limits. Grok and Antigravity usage percentages
+are not available; their confirmed cooldowns still appear.
+
+Up and Down scroll the panel. `r` refreshes it. Usage loads in the background
+and refreshes while the panel is open. A failed lookup says it is unavailable
+and names the CLI command to retry. This panel reads this computer's accounts,
+not a remote proxy's credentials when you attach through SSH.
 
 ## Plain logs
 

@@ -308,6 +308,7 @@ mod tests {
 
     fn ctx(monitor: Option<MonitorHandle>) -> RequestContext {
         RequestContext {
+            account: None,
             req_id: "req".into(),
             session_id: None,
             session_seq: None,

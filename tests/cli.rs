@@ -271,7 +271,7 @@ fn kimi_auth_status_reads_stored_auth() -> Result<(), Box<dyn std::error::Error>
     let mut cmd = Command::cargo_bin("cc-proxy")?;
     cmd.args(["auth", "status", "kimi"]);
     cmd.env("CCP_CONFIG_DIR", temp.path());
-    cmd.assert().success().stdout(contains("User: u"));
+    cmd.assert().success().stdout(contains("signed in as u"));
 
     let mut cmd = Command::cargo_bin("cc-proxy")?;
     cmd.arg("auth");
@@ -330,6 +330,69 @@ fn opencode_auth_login_stores_key_from_stdin() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
+fn top_level_login_and_logout_use_the_auth_handlers() -> Result<(), Box<dyn std::error::Error>> {
+    for login in [vec!["login", "opencode"], vec!["auth", "login", "opencode"]] {
+        let temp = TempDir::new()?;
+        let mut cmd = Command::cargo_bin("cc-proxy")?;
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.args(login).write_stdin("fake-key\n").assert().success();
+        let mut cmd = Command::cargo_bin("cc-proxy")?;
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.args(["logout", "opencode"]).assert().success();
+        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+            temp.path().join("config/config.json"),
+        )?)?;
+        assert!(config.pointer("/opencode/apiKey").is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn saved_accounts_can_be_switched_and_removed_without_signing_in()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let config = temp.path().join("config/codex");
+    std::fs::create_dir_all(config.join("accounts"))?;
+    let a = uuid::Uuid::new_v4().to_string();
+    let b = uuid::Uuid::new_v4().to_string();
+    let index = serde_json::json!({"current":"home", "accounts":[
+        {"id":a,"name":"home","identity":"acct-home"},
+        {"id":b,"name":"work","identity":"acct-work"}
+    ]});
+    std::fs::write(config.join("accounts.json"), index.to_string())?;
+    for (id, identity) in [(&a, "acct-home"), (&b, "acct-work")] {
+        std::fs::write(config.join("accounts").join(format!("{id}.json")), serde_json::json!({
+            "access":"do-not-print-me","refresh":"do-not-print-me","expires":4102444800000_u64,"accountId":identity
+        }).to_string())?;
+    }
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.env("XDG_STATE_HOME", temp.path().join("state"));
+        cmd.args(args).assert()
+    };
+    run(&["auth", "status", "codex"])
+        .success()
+        .stdout(contains("2 accounts"))
+        .stdout(contains("do-not-print-me").not());
+    run(&["login", "codex"])
+        .failure()
+        .stderr(contains("auth add codex"))
+        .stderr(contains("--replace"));
+    run(&["auth", "use", "codex", "work"])
+        .success()
+        .stdout(contains("now uses `work`"));
+    run(&["logout", "codex", "work"])
+        .success()
+        .stdout(contains("now uses `home`"));
+    assert!(!config.join("accounts").join(format!("{b}.json")).exists());
+    assert!(config.join("accounts").join(format!("{a}.json")).exists());
+    run(&["logout", "codex", "--all"]).success();
+    run(&["auth", "status", "codex"]).failure().code(1);
+    Ok(())
+}
+
+#[test]
 fn config_set_get_list_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
     let run = |args: &[&str]| {
@@ -380,6 +443,55 @@ fn config_edit_uses_editor() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn config_edit_runs_an_editor_that_has_arguments_and_a_path_with_spaces()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new()?;
+    let editors = temp.path().join("my editors");
+    std::fs::create_dir_all(&editors)?;
+    let seen = temp.path().join("seen.txt");
+    let editor = editors.join("ed.sh");
+    std::fs::write(
+        &editor,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", seen.display()),
+    )?;
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))?;
+
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    isolated_opencode_env(&mut cmd, &temp);
+    cmd.env("VISUAL", "").env(
+        "EDITOR",
+        format!("\"{}\" -w --name 'a b'", editor.display()),
+    );
+    cmd.args(["config", "edit"]).assert().success();
+
+    let config = temp.path().join("config").join("config.json");
+    assert_eq!(
+        std::fs::read_to_string(seen)?.lines().collect::<Vec<_>>(),
+        ["-w", "--name", "a b", config.to_str().unwrap()]
+    );
+    Ok(())
+}
+
+#[test]
+fn bare_config_prints_the_settings_list_when_it_is_not_a_terminal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let mut cmd = Command::cargo_bin("cc-proxy")?;
+    isolated_opencode_env(&mut cmd, &temp);
+    cmd.arg("config")
+        .write_stdin("")
+        .assert()
+        .success()
+        .stdout(contains("port = (default 18765)"))
+        .stdout(contains("codex.fullLane"))
+        .stdout(contains("\x1b").not());
+    Ok(())
+}
+
 #[test]
 fn update_check_with_pinned_version_is_offline() -> Result<(), Box<dyn std::error::Error>> {
     let current = format!("v{}", env!("CARGO_PKG_VERSION"));
@@ -405,9 +517,50 @@ fn write_usage_auth(config_dir: &std::path::Path, provider: &str, access: &str) 
     let auth = if provider == "codex" {
         serde_json::json!({"access": access, "refresh": "test-refresh", "expires": expires, "account_id": "acct_test"})
     } else {
-        serde_json::json!({"access": access, "refresh": "test-refresh", "expires": expires, "scope": "openid", "userId": "user_test"})
+        serde_json::json!({"access": access, "refresh": "test-refresh", "expires": expires, "scope": "openid", "userId": "user_test", "deviceId": "device_test"})
     };
     std::fs::write(dir.join("auth.json"), serde_json::to_vec(&auth).unwrap()).unwrap();
+}
+
+/// Writes independent saved sign-ins without changing the current account.
+fn write_usage_accounts(
+    config_dir: &std::path::Path,
+    provider: &str,
+    accounts: &[(&str, &str)],
+    current: &str,
+) {
+    let dir = config_dir.join(provider);
+    std::fs::create_dir_all(dir.join("accounts")).unwrap();
+    let saved: Vec<_> = accounts
+        .iter()
+        .map(|(name, access)| {
+            let id = uuid::Uuid::new_v4().to_string();
+            let second = *access == "second-access";
+            let identity = if second { "acct_second" } else { "acct_test" };
+            let auth = if provider == "codex" {
+                serde_json::json!({
+                    "access": access, "refresh": "test-refresh", "expires": 4102444800000_i64,
+                    "accountId": identity
+                })
+            } else {
+                serde_json::json!({
+                    "access": access, "refresh": "test-refresh", "expires": 4102444800000_i64,
+                    "userId": identity, "deviceId": if second { "device_second" } else { "device_test" }
+                })
+            };
+            std::fs::write(
+                dir.join("accounts").join(format!("{id}.json")),
+                auth.to_string(),
+            )
+            .unwrap();
+            serde_json::json!({"id": id, "name": name, "identity": identity})
+        })
+        .collect();
+    std::fs::write(
+        dir.join("accounts.json"),
+        serde_json::json!({"current": current, "accounts": saved}).to_string(),
+    )
+    .unwrap();
 }
 
 /// Serves the usage fixtures where ChatGPT and Kimi serve usage, but only to
@@ -420,14 +573,42 @@ fn serve_usage_fixtures() -> String {
 
     fn reply(headers: &HeaderMap, fixture: &str, required: (&str, &str)) -> (StatusCode, String) {
         let sent = |name: &str, value: &str| headers.get(name).is_some_and(|sent| sent == value);
-        if !sent("authorization", "Bearer test-access") || !sent(required.0, required.1) {
+        let second = sent("authorization", "Bearer second-access");
+        let required_value = if second && required.0 == "chatgpt-account-id" {
+            "acct_second"
+        } else {
+            required.1
+        };
+        if (!sent("authorization", "Bearer test-access") && !second)
+            || !sent(required.0, required_value)
+            || (required.0 == "x-msh-platform"
+                && !sent(
+                    "x-msh-device-id",
+                    if second {
+                        "device_second"
+                    } else {
+                        "device_test"
+                    },
+                ))
+        {
             return (StatusCode::UNAUTHORIZED, String::new());
         }
         let path = format!(
             "{}/tests/fixtures/usage/{fixture}",
             env!("CARGO_MANIFEST_DIR")
         );
-        (StatusCode::OK, std::fs::read_to_string(path).unwrap())
+        let mut body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        if second {
+            if fixture == "chatgpt.json" {
+                body["rate_limit"]["primary_window"]["used_percent"] = 85.into();
+                body["rate_limit"]["secondary_window"]["used_percent"] = 30.into();
+            } else {
+                body["limits"][0]["detail"]["used"] = "62".into();
+                body["usage"]["used"] = "410".into();
+            }
+        }
+        (StatusCode::OK, body.to_string())
     }
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -493,13 +674,13 @@ fn usage_shows_every_signed_in_plan_and_how_to_sign_in_to_the_rest()
     assert_eq!(
         String::from_utf8(output.stdout)?,
         concat!(
-            "Codex (plus)\n",
-            "  5-hour window: 45% used, already reset (Aug 9 17:00)\n",
-            "  Weekly: 7% used, already reset (Aug 15 00:00)\n",
+            "Codex `main` [current] (plus)\n",
+            "  5-hour window: 55% left, already reset (Aug 9 17:00)\n",
+            "  Weekly: 93% left, already reset (Aug 15 00:00)\n",
             "\n",
-            "Kimi (allegretto)\n",
-            "  5-hour window: 28% used, already reset (Aug 9 09:00)\n",
-            "  Weekly: 12% used, already reset (Aug 14 16:00)\n",
+            "Kimi `main` [current] (allegretto)\n",
+            "  5-hour window: 72% left, already reset (Aug 9 09:00)\n",
+            "  Weekly: 88% left, already reset (Aug 14 16:00)\n",
             "\n",
             "opencode: no API key set. Run `cc-proxy auth login opencode` or set OPENCODE_API_KEY.\n",
         )
@@ -517,16 +698,22 @@ fn usage_shows_every_signed_in_plan_and_how_to_sign_in_to_the_rest()
     assert_eq!(
         json,
         serde_json::json!({
-            "codex": {
-                "plan": "plus",
-                "five_hour": {"used_percent": 45.0, "resets_at_ms": 1786294800000_i64},
-                "weekly": {"used_percent": 7.0, "resets_at_ms": 1786752000000_i64}
-            },
-            "kimi": {
-                "plan": "allegretto",
-                "five_hour": {"used_percent": 28.0, "resets_at_ms": 1786266000000_i64},
-                "weekly": {"used_percent": 12.0, "resets_at_ms": 1786723200000_i64}
-            }
+            "codex": {"accounts": [{
+                "name": "main", "current": true,
+                "usage": {
+                    "plan": "plus",
+                    "five_hour": {"used_percent": 45.0, "resets_at_ms": 1786294800000_i64},
+                    "weekly": {"used_percent": 7.0, "resets_at_ms": 1786752000000_i64}
+                }
+            }]},
+            "kimi": {"accounts": [{
+                "name": "main", "current": true,
+                "usage": {
+                    "plan": "allegretto",
+                    "five_hour": {"used_percent": 28.0, "resets_at_ms": 1786266000000_i64},
+                    "weekly": {"used_percent": 12.0, "resets_at_ms": 1786723200000_i64}
+                }
+            }]}
         })
     );
     Ok(())
@@ -576,8 +763,134 @@ fn usage_with_a_rejected_sign_in_says_how_to_fix_it_and_exits_two()
         .code(2)
         .stdout("")
         .stderr(
-            "Codex didn't accept the sign-in when asked for usage. Run `cc-proxy auth login codex` to sign in again.\n",
+            "Codex account `main`: Codex didn't accept the sign-in when asked for usage. To replace this sign-in, run `cc-proxy auth login codex --replace --account main`.\n",
         );
+    Ok(())
+}
+
+#[test]
+fn usage_reads_each_saved_accounts_windows_without_switching_current()
+-> Result<(), Box<dyn std::error::Error>> {
+    let base_url = serve_usage_fixtures();
+    for (provider, name, first_used, second_used, reset) in [
+        ("codex", "Codex", 45.0, 85.0, 1786294800000_i64),
+        ("kimi", "Kimi", 28.0, 62.0, 1786266000000_i64),
+    ] {
+        let temp = TempDir::new()?;
+        let config = temp.path().join("config");
+        write_usage_accounts(
+            &config,
+            provider,
+            &[("home", "test-access"), ("work", "second-access")],
+            "work",
+        );
+        let index = config.join(provider).join("accounts.json");
+        let before = std::fs::read(&index)?;
+        let output = usage_command(&temp, &base_url)
+            .args(["usage", provider, "--json"])
+            .output()?;
+        assert!(output.status.success(), "{:?}", output);
+        assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let accounts = json[provider]["accounts"].as_array().unwrap();
+        assert_eq!(accounts.len(), 2);
+        for (account, saved_name, current, used) in [
+            (&accounts[0], "home", false, first_used),
+            (&accounts[1], "work", true, second_used),
+        ] {
+            assert_eq!(account["name"], saved_name);
+            assert_eq!(account["current"], current);
+            assert_eq!(account["usage"]["five_hour"]["used_percent"], used);
+            assert_eq!(account["usage"]["five_hour"]["resets_at_ms"], reset);
+            assert!(account["usage"]["weekly"]["resets_at_ms"].is_i64());
+        }
+        let text = usage_command(&temp, &base_url)
+            .args(["usage", provider])
+            .output()?;
+        assert!(text.status.success(), "{:?}", text);
+        let text = String::from_utf8(text.stdout)?;
+        assert!(text.contains(&format!("{name} `home` (")), "{text}");
+        assert!(
+            text.contains(&format!("{name} `work` [current] (")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("{:.0}% left", 100.0 - first_used)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("{:.0}% left", 100.0 - second_used)),
+            "{text}"
+        );
+        for hidden in [
+            "test-access",
+            "second-access",
+            "acct_test",
+            "acct_second",
+            "device_test",
+            "device_second",
+        ] {
+            assert!(!text.contains(hidden), "leaked {hidden}: {text}");
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(hidden));
+        }
+        assert_eq!(std::fs::read(index)?, before);
+    }
+    Ok(())
+}
+
+#[test]
+fn usage_keeps_healthy_accounts_when_a_saved_sign_in_is_rejected_missing_or_unreadable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let base_url = serve_usage_fixtures();
+    for provider in ["codex", "kimi"] {
+        for broken in ["rejected", "missing", "unreadable"] {
+            let temp = TempDir::new()?;
+            let config = temp.path().join("config");
+            write_usage_accounts(
+                &config,
+                provider,
+                &[("home", "revoked-access"), ("work", "second-access")],
+                "home",
+            );
+            let index = config.join(provider).join("accounts.json");
+            let before = std::fs::read(&index)?;
+            let saved: serde_json::Value = serde_json::from_slice(&before)?;
+            let id = saved["accounts"][0]["id"].as_str().unwrap();
+            let login = config
+                .join(provider)
+                .join("accounts")
+                .join(format!("{id}.json"));
+            match broken {
+                "missing" => std::fs::remove_file(login)?,
+                "unreadable" => std::fs::write(login, "{not json")?,
+                _ => {}
+            }
+            let replace = format!("cc-proxy auth login {provider} --replace --account home");
+            let text = usage_command(&temp, &base_url)
+                .args(["usage", provider])
+                .output()?;
+            assert_eq!(text.status.code(), Some(2), "{provider} {broken}");
+            assert!(String::from_utf8(text.stdout)?.contains("`work`"));
+            let error = String::from_utf8(text.stderr)?;
+            assert!(error.contains("account `home`"), "{error}");
+            assert!(error.contains(&replace), "{error}");
+            let output = usage_command(&temp, &base_url)
+                .args(["usage", provider, "--json"])
+                .output()?;
+            assert_eq!(output.status.code(), Some(2), "{provider} {broken}");
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            let accounts = json[provider]["accounts"].as_array().unwrap();
+            assert_eq!(accounts.len(), 2);
+            assert_eq!(accounts[0]["name"], "home");
+            assert_eq!(accounts[0]["current"], true);
+            assert!(accounts[0]["error"].as_str().unwrap().contains(&replace));
+            assert!(accounts[0].get("usage").is_none());
+            assert_eq!(accounts[1]["name"], "work");
+            assert_eq!(accounts[1]["current"], false);
+            assert!(accounts[1]["usage"]["five_hour"]["used_percent"].is_f64());
+            assert_eq!(std::fs::read(index)?, before);
+        }
+    }
     Ok(())
 }
 

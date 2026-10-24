@@ -38,10 +38,11 @@ impl<S: AuthStorage<StoredAuth>> GrokAuthManager<S> {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
             .build()?;
+        let refresh_lock = crate::auth::refresh_lock(&store.auth_path());
         Ok(Self {
             store,
             client,
-            refresh_lock: Arc::new(Mutex::new(())),
+            refresh_lock,
         })
     }
 
@@ -167,14 +168,49 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_stale_401_refreshes_reuse_the_rotated_access_token() {
-        let store = GrokTokenStore::new(InMemoryAuthStore::new());
+        let backing = InMemoryAuthStore::new();
+        let store = GrokTokenStore::new(backing.clone());
         store.save_auth(auth("rotated-access")).unwrap();
-        let manager = Arc::new(GrokAuthManager::new(store).unwrap());
+        let manager = GrokAuthManager::new(store).unwrap();
+        let peer = GrokAuthManager::new(GrokTokenStore::new(backing)).unwrap();
+        assert!(Arc::ptr_eq(&manager.refresh_lock, &peer.refresh_lock));
         let (first, second) = tokio::join!(
             manager.force_refresh("rejected-access"),
-            manager.force_refresh("rejected-access"),
+            peer.force_refresh("rejected-access"),
         );
         assert_eq!(first.unwrap().access, "rotated-access");
         assert_eq!(second.unwrap().access, "rotated-access");
+    }
+
+    #[tokio::test]
+    async fn account_refreshes_reread_their_own_login_after_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = crate::accounts::Accounts::in_dir("grok", dir.path().join("grok"));
+        for name in ["first", "second"] {
+            accounts
+                .install(name, None, &serde_json::to_value(auth(name)).unwrap(), None)
+                .unwrap();
+        }
+        let first_id = accounts.require("first").unwrap().id;
+        let second_id = accounts.require("second").unwrap().id;
+        let manager = GrokAuthManager::new(GrokTokenStore::new(accounts.store(&first_id))).unwrap();
+        let peer = GrokAuthManager::new(GrokTokenStore::new(accounts.store(&first_id))).unwrap();
+        let other = GrokAuthManager::new(GrokTokenStore::new(accounts.store(&second_id))).unwrap();
+        assert!(Arc::ptr_eq(&manager.refresh_lock, &peer.refresh_lock));
+        assert!(!Arc::ptr_eq(&manager.refresh_lock, &other.refresh_lock));
+
+        let guard = manager.refresh_lock.lock().await;
+        let pending = peer.force_refresh("first");
+        tokio::pin!(pending);
+        tokio::select! {
+            _ = &mut pending => panic!("the account refresh did not wait for its lock"),
+            _ = tokio::task::yield_now() => {}
+        }
+        // The other account needs no lock held by the first account.
+        assert_eq!(other.get_auth().await.unwrap().access, "second");
+        manager.store.save_auth(auth("rotated-first")).unwrap();
+        drop(guard);
+        assert_eq!(pending.await.unwrap().access, "rotated-first");
+        assert_eq!(other.store.load_auth().unwrap().unwrap().access, "second");
     }
 }

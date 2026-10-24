@@ -1,6 +1,7 @@
 //! `cc-proxy usage`: how much of each plan is used, read from each
 //! provider's own usage endpoint with the sign-in the proxy already holds.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use clap::ValueEnum;
@@ -9,6 +10,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::accounts::Accounts;
 use crate::config;
 use crate::providers::codex::auth::constants::CODEX_API_ENDPOINT;
 use crate::providers::codex::auth::manager::CodexAuthManager;
@@ -57,28 +59,25 @@ impl UsageProvider {
         }
     }
 
-    fn describe(self, failure: Failure) -> String {
+    fn describe(self, account: &str, failure: Failure) -> String {
         let name = self.name();
         let id = self.id();
-        match failure {
-            Failure::SignInUnusable => format!(
-                "cc-proxy couldn't use the saved {name} sign-in. It may have expired or been \
-                 revoked. Run `cc-proxy auth login {id}` to sign in again."
+        let replace = format!("cc-proxy auth login {id} --replace --account {account}");
+        let detail = match failure {
+            Failure::SignInUnusable => "cc-proxy couldn't read or renew this sign-in.".to_string(),
+            Failure::Setup(detail) => format!(
+                "cc-proxy couldn't build the usage request: {detail}. Check the provider settings."
             ),
-            Failure::Setup(detail) => {
-                format!("cc-proxy couldn't build the {name} usage request: {detail}.")
+            Failure::Rejected(401 | 403) => {
+                format!("{name} didn't accept the sign-in when asked for usage.")
             }
-            Failure::Rejected(401 | 403) => format!(
-                "{name} didn't accept the sign-in when asked for usage. Run \
-                 `cc-proxy auth login {id}` to sign in again."
-            ),
             Failure::Rejected(429) => format!(
-                "{name} is limiting requests and turned down the usage request. Wait a \
-                 minute and try again."
+                "{name} is limiting requests and turned down the usage request. Run \
+                 `cc-proxy usage {id}` again later."
             ),
             Failure::Rejected(status @ 500..) => format!(
-                "{name}'s usage request failed with HTTP {status}, a problem on {name}'s \
-                 side. Try again in a few minutes."
+                "The usage request failed with HTTP {status}, a problem on {name}'s \
+                 side. Run `cc-proxy usage {id}` again in a few minutes."
             ),
             Failure::Rejected(status) => format!(
                 "{name} turned down the usage request with HTTP {status}. If you changed \
@@ -86,18 +85,19 @@ impl UsageProvider {
             ),
             Failure::TimedOut => format!(
                 "{name} didn't answer the usage request within {} seconds. Check your \
-                 connection and try again.",
+                 connection and run `cc-proxy usage {id}` again.",
                 REQUEST_TIMEOUT.as_secs()
             ),
             Failure::Unreachable => format!(
                 "cc-proxy couldn't reach {name} to ask for usage. Check your internet \
-                 connection and try again."
+                 connection and run `cc-proxy usage {id}` again."
             ),
             Failure::Unreadable => format!(
                 "{name}'s usage reply came back in a format cc-proxy doesn't recognize. \
-                 Try again later; if it keeps happening, check for a cc-proxy update."
+                 Run `cc-proxy usage {id}` again later; if it keeps happening, check for a cc-proxy update."
             ),
-        }
+        };
+        format!("{name} account `{account}`: {detail} To replace this sign-in, run `{replace}`.")
     }
 }
 
@@ -132,51 +132,88 @@ struct Window {
     resets_at_ms: Option<i64>,
 }
 
+impl Window {
+    /// What is left to use, the way the source dashboards show it. The JSON
+    /// contract keeps `used_percent`; only the words people read flip.
+    fn remaining_percent(&self) -> f64 {
+        (100.0 - self.used_percent).clamp(0.0, 100.0)
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AccountUsage {
+    #[serde(skip)]
+    id: String,
+    name: String,
+    current: bool,
+    #[serde(flatten)]
+    result: AccountResult,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum AccountResult {
+    Usage { usage: PlanUsage },
+    Unavailable { error: String },
+}
+
+impl PlanUsage {
+    /// One line per window, so a dense row cannot hide the number that matters.
+    fn lines(&self, now: Timestamp, tz: &TimeZone) -> Vec<String> {
+        let window = |label: &str, window: Option<Window>| {
+            window.map(|window| {
+                let mut part = format!("{label} {:.0}% left", window.remaining_percent());
+                if let Some(reset) = window
+                    .resets_at_ms
+                    .and_then(|ms| Timestamp::from_millisecond(ms).ok())
+                {
+                    part.push_str(&format!(", {}", format_reset(reset, now, tz)));
+                }
+                part
+            })
+        };
+        [window("5h", self.five_hour), window("week", self.weekly)]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+}
+
 enum Report {
-    Plan(UsageProvider, PlanUsage),
+    Accounts(UsageProvider, Vec<AccountUsage>),
     /// OpenCode Go keeps its own shape: it has a monthly window and a status
     /// per window that the shared shape has no room for.
     OpenCode(Box<OpenCodeUsageResponse>),
 }
 
 impl Report {
-    /// The plan and its windows on one line, for the monitor.
-    fn headline(&self) -> String {
-        let used = |label: &str, percent: Option<f64>| {
-            percent.map(|percent| format!("{label} {percent:.0}%"))
-        };
-        let parts = match self {
-            Self::Plan(_, usage) => vec![
-                usage.plan.clone(),
-                used("5h", usage.five_hour.map(|window| window.used_percent)),
-                used("week", usage.weekly.map(|window| window.used_percent)),
-            ],
-            Self::OpenCode(response) => {
-                let usage = &response.usage;
-                let percent =
-                    |window: &Option<crate::providers::opencode::client::OpenCodeUsageWindow>| {
-                        window.as_ref().and_then(|window| window.percent)
-                    };
-                vec![
-                    used("5h", percent(&usage.rolling)),
-                    used("week", percent(&usage.weekly)),
-                    used("month", percent(&usage.monthly)),
-                ]
-            }
-        };
-        parts.into_iter().flatten().collect::<Vec<_>>().join(" · ")
-    }
-
     fn text(&self, now: Timestamp, tz: &TimeZone, styled: bool) -> String {
         match self {
-            Self::Plan(provider, usage) => format_plan(provider.name(), usage, now, tz, styled),
+            Self::Accounts(provider, accounts) => accounts
+                .iter()
+                .filter_map(|account| match &account.result {
+                    AccountResult::Usage { usage } => {
+                        let name = format!(
+                            "{} `{}`{}",
+                            provider.name(),
+                            account.name,
+                            if account.current { " [current]" } else { "" }
+                        );
+                        Some(format_plan(&name, usage, now, tz, styled))
+                    }
+                    AccountResult::Unavailable { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n"),
             Self::OpenCode(usage) => crate::providers::opencode::usage::format_text(usage, styled),
         }
     }
 
     fn json(&self) -> serde_json::Result<Value> {
         match self {
-            Self::Plan(_, usage) => serde_json::to_value(usage),
+            Self::Accounts(_, accounts) => {
+                Ok(serde_json::json!({"accounts": serde_json::to_value(accounts)?}))
+            }
             Self::OpenCode(usage) => serde_json::to_value(usage),
         }
     }
@@ -190,15 +227,7 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
         Some(provider) => vec![provider],
         None => UsageProvider::value_variants().to_vec(),
     };
-    let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let results = runtime.block_on(futures_util::future::join_all(
-        providers.iter().map(|provider| fetch(*provider, &client)),
-    ));
+    let results = fetch_reports(&providers)?;
 
     let now = Timestamp::now();
     let tz = TimeZone::system();
@@ -208,14 +237,28 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
     let mut by_provider = Map::new();
     for (provider, result) in providers.into_iter().zip(results) {
         match result {
-            Ok(Some(report)) if json => {
-                by_provider.insert(provider.id().to_string(), report.json()?);
+            Ok(Some(report)) => {
+                if let Report::Accounts(_, accounts) = &report {
+                    for account in accounts {
+                        if let AccountResult::Unavailable { error } = &account.result {
+                            eprintln!("{error}");
+                            code = 2;
+                        }
+                    }
+                }
+                if json {
+                    by_provider.insert(provider.id().to_string(), report.json()?);
+                } else {
+                    let text = report.text(now, &tz, styled);
+                    if !text.is_empty() {
+                        blocks.push(text);
+                    }
+                }
             }
-            Ok(Some(report)) => blocks.push(report.text(now, &tz, styled)),
             // Asked for by name, a missing sign-in fails the command.
             Ok(None) if only.is_some() => {
                 eprintln!("{}", provider.not_signed_in());
-                code = 1;
+                code = code.max(1);
             }
             // Keep stdout pure JSON for scripts.
             Ok(None) if json => eprintln!("{}", provider.not_signed_in()),
@@ -235,64 +278,176 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
     Ok(code)
 }
 
-/// One line per signed-in plan, keyed by provider id, for the monitor's
-/// Providers overlay. A lookup that fails reads "usage unavailable"; the
-/// overlay has no room for the reason, and `cc-proxy usage` gives it.
+/// Usage for providers without saved accounts. Account-aware providers use
+/// `account_usage_lines`, so the monitor never asks them twice in one refresh.
 pub fn headlines() -> Vec<(&'static str, String)> {
-    let Ok(client) = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build() else {
+    if config::opencode_api_key().is_none() {
         return Vec::new();
+    }
+    let results = fetch_reports(&[UsageProvider::OpenCode]);
+    let headline = match results {
+        Ok(results) => match results.into_iter().next() {
+            Some(Ok(Some(Report::OpenCode(response)))) => {
+                let usage = &response.usage;
+                let used = |label: &str,
+                            window: &Option<
+                    crate::providers::opencode::client::OpenCodeUsageWindow,
+                >| {
+                    window
+                        .as_ref()
+                        .and_then(|window| window.percent)
+                        .map(|percent| format!("{label} {percent:.0}%"))
+                };
+                [
+                    used("5h", &usage.rolling),
+                    used("week", &usage.weekly),
+                    used("month", &usage.monthly),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ")
+            }
+            Some(Ok(None)) => return Vec::new(),
+            _ => "usage unavailable".to_string(),
+        },
+        Err(error) => {
+            tracing::warn!(%error, "Could not start the OpenCode usage lookup");
+            "usage unavailable".to_string()
+        }
     };
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
-        return Vec::new();
-    };
-    let providers = UsageProvider::value_variants();
-    let results = runtime.block_on(futures_util::future::join_all(
-        providers.iter().map(|provider| fetch(*provider, &client)),
-    ));
-    providers
-        .iter()
-        .zip(results)
-        .filter_map(|(provider, result)| match result {
-            Ok(Some(report)) => Some((provider.id(), report.headline())),
-            Ok(None) => None,
-            Err(_) => Some((provider.id(), "usage unavailable".to_string())),
-        })
-        .collect()
+    vec![("opencode", headline)]
 }
 
-/// None means the provider isn't signed in.
+/// Usage per saved account for the monitor's Providers panel. The UUID is
+/// only a lookup key; the monitor shows the saved name, never the provider's
+/// account identity. Each window gets its own line. Call this on its
+/// background worker, not a request.
+pub fn account_usage_lines() -> HashMap<(String, String), Vec<String>> {
+    let mut lines = HashMap::new();
+    for provider in ["codex", "kimi", "grok", "antigravity"] {
+        let unavailable = if matches!(provider, "codex" | "kimi") {
+            vec![format!("usage unavailable; run cc-proxy usage {provider}")]
+        } else {
+            vec!["usage not supported".to_string()]
+        };
+        match Accounts::new(provider).list() {
+            Ok(accounts) => {
+                for account in accounts {
+                    lines.insert((provider.to_string(), account.id), unavailable.clone());
+                }
+            }
+            Err(error) => {
+                tracing::warn!(provider, %error, "Could not read saved accounts for usage");
+            }
+        }
+    }
+    let results = match fetch_reports(&[UsageProvider::Codex, UsageProvider::Kimi]) {
+        Ok(results) => results,
+        Err(error) => {
+            tracing::warn!(%error, "Could not start saved-account usage lookups");
+            return lines;
+        }
+    };
+    let now = Timestamp::now();
+    let tz = TimeZone::system();
+    for result in results {
+        match result {
+            Ok(Some(Report::Accounts(provider, accounts))) => {
+                for account in accounts {
+                    let account_lines = match account.result {
+                        AccountResult::Usage { usage } => usage.lines(now, &tz),
+                        AccountResult::Unavailable { .. } => {
+                            vec![format!(
+                                "usage unavailable; run cc-proxy usage {}",
+                                provider.id()
+                            )]
+                        }
+                    };
+                    lines.insert((provider.id().to_string(), account.id), account_lines);
+                }
+            }
+            Err(error) => tracing::warn!(%error, "Could not read saved-account usage"),
+            _ => {}
+        }
+    }
+    lines
+}
+
+fn fetch_reports(
+    providers: &[UsageProvider],
+) -> anyhow::Result<Vec<Result<Option<Report>, String>>> {
+    let client = reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    Ok(runtime.block_on(futures_util::future::join_all(
+        providers.iter().map(|provider| fetch(*provider, &client)),
+    )))
+}
+
+/// None means there are no saved accounts (or no OpenCode API key).
 async fn fetch(
     provider: UsageProvider,
     client: &reqwest::Client,
 ) -> Result<Option<Report>, String> {
-    let usage = match provider {
-        UsageProvider::Codex => codex(client).await,
-        UsageProvider::Kimi => kimi(client).await,
-        // OpenCode Go reports in its own shape and its own words.
+    let accounts = match provider {
+        UsageProvider::Codex => Accounts::open(provider.id(), &crate::providers::codex::CODEX_CLI),
+        UsageProvider::Kimi => Accounts::open(provider.id(), &crate::providers::kimi::KIMI_CLI),
         UsageProvider::OpenCode => return opencode().await,
-    };
-    match usage {
-        Ok(Some(usage)) if usage.five_hour.is_none() && usage.weekly.is_none() => {
-            Err(provider.describe(Failure::Unreadable))
-        }
-        Ok(usage) => Ok(usage.map(|usage| Report::Plan(provider, usage))),
-        Err(failure) => Err(provider.describe(failure)),
     }
-}
-
-async fn codex(client: &reqwest::Client) -> Result<Option<PlanUsage>, Failure> {
-    let manager = CodexAuthManager::new(codex_tokens::file_store());
-    if manager
-        .store
-        .load_auth()
-        .map_err(|_| Failure::SignInUnusable)?
-        .is_none()
-    {
+    .map_err(|error| format!("{}: {error:#}", provider.name()))?;
+    let list = accounts
+        .list()
+        .map_err(|error| format!("{}: {error:#}", provider.name()))?;
+    if list.is_empty() {
         return Ok(None);
     }
+    let current = accounts
+        .current()
+        .map_err(|error| format!("{}: {error:#}", provider.name()))?
+        .map(|account| account.id);
+    let usage = futures_util::future::join_all(list.into_iter().map(|account| {
+        let is_current = current.as_ref() == Some(&account.id);
+        async move {
+            let result = match fetch_account(provider, &account.id, client).await {
+                Ok(usage) => AccountResult::Usage { usage },
+                Err(failure) => AccountResult::Unavailable {
+                    error: provider.describe(&account.name, failure),
+                },
+            };
+            AccountUsage {
+                id: account.id,
+                name: account.name,
+                current: is_current,
+                result,
+            }
+        }
+    }))
+    .await;
+    Ok(Some(Report::Accounts(provider, usage)))
+}
+
+async fn fetch_account(
+    provider: UsageProvider,
+    id: &str,
+    client: &reqwest::Client,
+) -> Result<PlanUsage, Failure> {
+    let usage = match provider {
+        UsageProvider::Codex => codex(client, id).await?,
+        UsageProvider::Kimi => kimi(client, id).await?,
+        UsageProvider::OpenCode => return Err(Failure::Unreadable),
+    };
+    if usage.five_hour.is_none() && usage.weekly.is_none() {
+        return Err(Failure::Unreadable);
+    }
+    Ok(usage)
+}
+
+async fn codex(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure> {
+    let manager = CodexAuthManager::new(codex_tokens::account_store(id));
     // ponytail: a 401 is reported, not refreshed and retried. get_auth()
     // already renews a token that is about to expire, so a 401 here means
     // the sign-in itself is gone.
@@ -304,33 +459,28 @@ async fn codex(client: &reqwest::Client) -> Result<Option<PlanUsage>, Failure> {
         build_codex_usage_headers(&auth).map_err(|error| Failure::Setup(error.message))?;
     let url = codex_usage_endpoint(&config::codex_base_url(CODEX_API_ENDPOINT));
     let body = get_json(client, &url, headers).await?;
-    Ok(Some(parse_chatgpt(&body)))
+    Ok(parse_chatgpt(&body))
 }
 
-async fn kimi(client: &reqwest::Client) -> Result<Option<PlanUsage>, Failure> {
-    let manager = KimiAuthManager::new(kimi_tokens::file_store());
-    if manager
-        .store
-        .load_auth()
-        .map_err(|_| Failure::SignInUnusable)?
-        .is_none()
-    {
-        return Ok(None);
-    }
+async fn kimi(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure> {
+    let manager = KimiAuthManager::new(
+        kimi_tokens::for_request(Some(id)).map_err(|_| Failure::SignInUnusable)?,
+    );
     // The Kimi auth manager renews over a blocking client, which must not
     // run on the async runtime.
     let auth = tokio::task::spawn_blocking(move || manager.get_auth())
         .await
         .map_err(|_| Failure::SignInUnusable)?
         .map_err(|_| Failure::SignInUnusable)?;
-    let mut headers = common_headers().map_err(|error| Failure::Setup(error.to_string()))?;
+    let mut headers =
+        common_headers(&auth.device_id).map_err(|error| Failure::Setup(error.to_string()))?;
     let bearer = HeaderValue::from_str(&format!("Bearer {}", auth.access))
         .map_err(|_| Failure::Setup("the saved token isn't a valid header".into()))?;
     headers.insert(AUTHORIZATION, bearer);
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     let url = format!("{}/usages", config::kimi_base_url());
     let body = get_json(client, &url, headers).await?;
-    Ok(Some(parse_kimi(&body)))
+    Ok(parse_kimi(&body))
 }
 
 async fn opencode() -> Result<Option<Report>, String> {
@@ -516,7 +666,7 @@ fn format_plan(
     ] {
         output.push_str(&window_row(
             label,
-            window.as_ref().map(|window| window.used_percent),
+            window.as_ref().map(Window::remaining_percent),
             &format_window(window.as_ref(), now, tz),
             styled,
         ));
@@ -526,15 +676,16 @@ fn format_plan(
 
 const METER_CELLS: usize = 20;
 
-/// "\n  Weekly: 7% used, …". In a terminal the label is padded and a meter
-/// goes before the words, so every window's meter lines up.
-pub(crate) fn window_row(label: &str, percent: Option<f64>, text: &str, styled: bool) -> String {
+/// "\n  Weekly: 93% left, …". In a terminal the label is padded and a meter
+/// goes before the words, so every window's meter lines up. The meter empties
+/// and turns red as the allowance runs out.
+pub(crate) fn window_row(label: &str, remaining: Option<f64>, text: &str, styled: bool) -> String {
     if !styled {
         return format!("\n  {label}: {text}");
     }
-    let meter = percent.map_or_else(
+    let meter = remaining.map_or_else(
         || " ".repeat(METER_CELLS),
-        |percent| ui::meter(percent, METER_CELLS),
+        |remaining| ui::remaining_meter(remaining, METER_CELLS),
     );
     format!("\n  {label:<18}{meter}  {text}")
 }
@@ -543,20 +694,20 @@ fn format_window(window: Option<&Window>, now: Timestamp, tz: &TimeZone) -> Stri
     let Some(window) = window else {
         return "not reported".to_string();
     };
-    let used = format!("{}% used", window.used_percent);
+    let left = format!("{:.0}% left", window.remaining_percent());
     match window
         .resets_at_ms
         .and_then(|ms| Timestamp::from_millisecond(ms).ok())
     {
-        Some(reset) => format!("{used}, {}", format_reset(reset, now, tz)),
-        None => used,
+        Some(reset) => format!("{left}, {}", format_reset(reset, now, tz)),
+        None => left,
     }
 }
 
 /// "resets in 2h 10m (17:00)": the time left, then the local clock time,
 /// with the weekday when it isn't today and the date when it is a week or
 /// more away.
-fn format_reset(reset: Timestamp, now: Timestamp, tz: &TimeZone) -> String {
+pub(crate) fn format_reset(reset: Timestamp, now: Timestamp, tz: &TimeZone) -> String {
     let at = reset.to_zoned(tz.clone());
     let days_ahead = now
         .to_zoned(tz.clone())
@@ -739,8 +890,8 @@ mod tests {
             format_plan("Codex", &usage, now, &tz, false),
             concat!(
                 "Codex (plus)\n",
-                "  5-hour window: 45% used, resets in 2h 10m (17:00)\n",
-                "  Weekly: 7% used, resets in 4d 9h (Mon 00:00)"
+                "  5-hour window: 55% left, resets in 2h 10m (17:00)\n",
+                "  Weekly: 93% left, resets in 4d 9h (Mon 00:00)"
             )
         );
     }
@@ -755,7 +906,7 @@ mod tests {
         };
         assert_eq!(
             format_plan("Kimi", &usage, now, &TimeZone::UTC, false),
-            "Kimi\n  5-hour window: 12.5% used\n  Weekly: not reported"
+            "Kimi\n  5-hour window: 88% left\n  Weekly: not reported"
         );
     }
 
@@ -791,16 +942,38 @@ mod tests {
     }
 
     #[test]
-    fn failures_say_what_failed_and_what_to_do() {
-        let message = UsageProvider::Codex.describe(Failure::Rejected(401));
+    fn account_lines_show_what_is_left_without_guessing_missing_ones() {
+        let now = "2026-08-12T14:50:00Z".parse().unwrap();
+        let usage = PlanUsage {
+            plan: Some("plus".into()),
+            five_hour: window(45.0, ms("2026-08-12T17:00:00Z")),
+            weekly: window(7.0, ms("2026-08-17T00:00:00Z")),
+        };
         assert_eq!(
-            message,
-            "Codex didn't accept the sign-in when asked for usage. Run `cc-proxy auth login codex` to sign in again."
+            usage.lines(now, &TimeZone::UTC),
+            [
+                "5h 55% left, resets in 2h 10m (17:00)",
+                "week 93% left, resets in 4d 9h (Mon 00:00)"
+            ]
         );
-        let message = UsageProvider::Kimi.describe(Failure::Unreadable);
+        let usage = PlanUsage {
+            five_hour: window(28.0, None),
+            ..PlanUsage::default()
+        };
+        assert_eq!(usage.lines(now, &TimeZone::UTC), ["5h 72% left"]);
+    }
+
+    #[test]
+    fn failures_say_which_account_failed_and_how_to_replace_only_that_sign_in() {
+        let message = UsageProvider::Codex.describe("work", Failure::Rejected(401));
         assert_eq!(
             message,
-            "Kimi's usage reply came back in a format cc-proxy doesn't recognize. Try again later; if it keeps happening, check for a cc-proxy update."
+            "Codex account `work`: Codex didn't accept the sign-in when asked for usage. To replace this sign-in, run `cc-proxy auth login codex --replace --account work`."
+        );
+        let message = UsageProvider::Kimi.describe("home", Failure::Unreadable);
+        assert_eq!(
+            message,
+            "Kimi account `home`: Kimi's usage reply came back in a format cc-proxy doesn't recognize. Run `cc-proxy usage kimi` again later; if it keeps happening, check for a cc-proxy update. To replace this sign-in, run `cc-proxy auth login kimi --replace --account home`."
         );
     }
 }

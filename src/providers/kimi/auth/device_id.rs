@@ -23,11 +23,14 @@ fn legacy_device_id_path() -> PathBuf {
 
 pub fn get_device_id() -> Result<String, anyhow::Error> {
     for candidate in [device_id_path(), legacy_device_id_path()] {
-        if let Ok(raw) = fs::read_to_string(&candidate) {
-            let trimmed = raw.trim().to_string();
-            if !trimmed.is_empty() {
-                return Ok(trimmed);
-            }
+        match fs::read_to_string(&candidate) {
+            Ok(raw) if !raw.trim().is_empty() => return Ok(raw.trim().to_string()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => anyhow::bail!(
+                "Can't read the saved Kimi device ID at {}: {error}. Fix the file permissions, then try again.",
+                candidate.display()
+            ),
         }
     }
 

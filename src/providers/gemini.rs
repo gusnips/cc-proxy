@@ -35,20 +35,125 @@ pub const GEMINI_MODELS: &[&str] = &[
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
-    "gemini-3.1-pro",
-    "gemini-3-flash",
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
 ];
 
+fn model_ids() -> Vec<String> {
+    super::model_catalog::load("gemini").unwrap_or_else(|| {
+        GEMINI_MODELS
+            .iter()
+            .map(|model| (*model).to_string())
+            .collect()
+    })
+}
+
 pub fn advertised_models() -> Vec<String> {
-    let mut out = Vec::with_capacity(GEMINI_MODELS.len() * 2);
-    for model in GEMINI_MODELS {
-        out.push((*model).to_string());
-        out.push(format!("{MODEL_PREFIX}{model}"));
+    model_ids()
+        .into_iter()
+        .flat_map(|model| [format!("{MODEL_PREFIX}{model}"), model])
+        .collect()
+}
+
+pub fn catalog_models() -> Vec<String> {
+    super::model_catalog::load("gemini").unwrap_or_else(|| {
+        [
+            "gemini-4-argon",
+            "gemini-3.1-pro-preview",
+            "gemini-3.8-flash",
+        ]
+        .map(str::to_string)
+        .to_vec()
+    })
+}
+
+fn parse_models(body: &serde_json::Value) -> Vec<String> {
+    body["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry["supportedGenerationMethods"]
+                .as_array()
+                .is_some_and(|methods| {
+                    methods
+                        .iter()
+                        .any(|method| method.as_str() == Some("generateContent"))
+                })
+        })
+        .filter_map(|entry| entry["name"].as_str())
+        .map(|name| name.strip_prefix("models/").unwrap_or(name))
+        .filter(|id| {
+            id.starts_with("gemini-")
+                && ![
+                    "tts",
+                    "image",
+                    "embedding",
+                    "robotics",
+                    "computer-use",
+                    "customtools",
+                    "audio",
+                    "live",
+                ]
+                .iter()
+                .any(|word| id.contains(word))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn fetch_models(base_url: &str, key: &str) -> Result<Vec<String>> {
+    use anyhow::Context;
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let mut ids = Vec::new();
+    let mut page = String::new();
+    let mut seen_pages = std::collections::HashSet::new();
+    loop {
+        let body: serde_json::Value = client
+            .get(&url)
+            .query(&[("pageSize", "1000"), ("pageToken", page.as_str())])
+            .header("x-goog-api-key", key)
+            .send()
+            .context("Could not reach Gemini for its model list. Check your connection and try again.")?
+            .error_for_status()
+            .context("Gemini refused the model list request. Check your API key with `cc-proxy auth status gemini`.")?
+            .json()
+            .context("Gemini's model list was not JSON.")?;
+        ids.extend(parse_models(&body));
+        let Some(next) = body["nextPageToken"]
+            .as_str()
+            .filter(|token| !token.is_empty())
+        else {
+            break;
+        };
+        if !seen_pages.insert(next.to_string()) {
+            bail!(
+                "Gemini repeated a model-list page. The saved list has not changed. Try again later."
+            );
+        }
+        page = next.to_string();
     }
-    out.sort_unstable();
-    out
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        bail!("Gemini returned no chat models. The saved list has not changed.");
+    }
+    Ok(ids)
+}
+
+pub fn refresh_models() -> Result<Vec<String>> {
+    let Some(key) = config::gemini_api_key() else {
+        bail!("Gemini API key isn't configured. Run `cc-proxy auth login gemini` first.");
+    };
+    let ids = fetch_models(&config::gemini_base_url(), &key)?;
+    super::model_catalog::save("gemini", &ids)?;
+    Ok(ids)
 }
 
 pub fn resolve_model(raw: &str) -> Option<String> {
@@ -156,14 +261,14 @@ impl GeminiProvider {
         };
         capture_buffered_upstream(&ctx, &bytes, "json");
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
-        let value = match google::accumulate_response(&bytes, &message_id, requested) {
+        let value = match google::accumulate_response("Gemini", &bytes, &message_id, requested) {
             Ok(value) => value,
             Err(err) => {
-                return json_error(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    format!("Gemini response translation failed: {err}"),
-                );
+                return upstream_error::translation_error(
+                    err,
+                    "Gemini response translation failed",
+                )
+                .response();
             }
         };
         if let Some(traffic) = ctx.traffic.as_ref() {
@@ -185,11 +290,7 @@ impl Provider for GeminiProvider {
     }
 
     fn catalog(&self) -> Vec<String> {
-        vec![
-            "gemini-4-argon".to_string(),
-            "gemini-3.1-pro".to_string(),
-            "gemini-3.8-flash".to_string(),
-        ]
+        catalog_models()
     }
 
     fn cli(&self) -> &dyn CliHandlers {
@@ -311,6 +412,12 @@ impl CliHandlers for GeminiCli {
         }
         let path = config::save_gemini_api_key(&key)?;
         println!("Gemini API key saved to {}", path.display());
+        println!("Fetching Gemini's model list...");
+        if let Err(error) = refresh_models() {
+            eprintln!(
+                "The key is saved, but the model list could not be refreshed: {error:#}. Retry with `cc-proxy models refresh gemini`."
+            );
+        }
         Ok(())
     }
 
@@ -331,6 +438,7 @@ impl CliHandlers for GeminiCli {
     }
 
     fn logout(&self) -> Result<()> {
+        let _ = std::fs::remove_file(super::model_catalog::cache_file("gemini"));
         if config::clear_gemini_api_key()? {
             println!("Gemini stored key cleared.");
         } else {
@@ -341,3 +449,59 @@ impl CliHandlers for GeminiCli {
 }
 
 static GEMINI_CLI: GeminiCli = GeminiCli;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{registry::Registry, tiers};
+
+    #[test]
+    fn gemini_lists_and_forwards_the_real_preview_ids() {
+        let models = advertised_models();
+        for model in ["gemini-3.1-pro-preview", "gemini-3-flash-preview"] {
+            let qualified = format!("{MODEL_PREFIX}{model}");
+            assert!(models.contains(&model.to_string()));
+            assert!(models.contains(&qualified));
+            assert_eq!(resolve_model(model).as_deref(), Some(model));
+            assert_eq!(
+                resolve_model(&format!("{qualified}[1m]")).as_deref(),
+                Some(model)
+            );
+        }
+        for invalid in ["gemini-3.1-pro", "gemini-3-flash"] {
+            assert!(!models.contains(&invalid.to_string()));
+            assert!(!models.contains(&format!("{MODEL_PREFIX}{invalid}")));
+        }
+    }
+
+    #[test]
+    fn gemini_defaults_skip_previews_but_explicit_choices_keep_them() {
+        let registry = Registry::new();
+        let mut route = config::Route {
+            on: true,
+            provider: Some("gemini".into()),
+            ..config::Route::default()
+        };
+        for (tier, expected) in [
+            ("fable", "gemini-4-argon"),
+            ("opus", "gemini-4-argon"),
+            ("sonnet", "gemini-4-argon"),
+            ("haiku", "gemini-3.8-flash"),
+        ] {
+            assert_eq!(
+                tiers::resolve(&registry, &route, &format!("claude-{tier}-5-5")),
+                Ok(expected.to_string())
+            );
+        }
+        let preview = "gemini/gemini-3.1-pro-preview";
+        route
+            .tiers
+            .entry("gemini".into())
+            .or_default()
+            .insert("sonnet".into(), preview.into());
+        assert_eq!(
+            tiers::resolve(&registry, &route, "sonnet"),
+            Ok(preview.into())
+        );
+    }
+}

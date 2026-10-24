@@ -7,6 +7,7 @@ pub mod gemini;
 pub mod glm;
 pub mod grok;
 pub mod kimi;
+pub(crate) mod model_catalog;
 pub mod opencode;
 pub mod translate_shared;
 pub mod upstream_error;

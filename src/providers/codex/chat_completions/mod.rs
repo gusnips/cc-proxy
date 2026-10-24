@@ -2,7 +2,7 @@ pub mod request;
 pub mod response;
 pub mod stream;
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use axum::{
     Json,
@@ -14,11 +14,11 @@ use serde_json::{Value, json};
 
 use crate::provider::RequestContext;
 
-use super::client::{CodexError, CodexHttpClient};
+use super::client::{CodexClients, CodexError};
 use request::TranslatedRequest;
 
 pub struct ChatCompletionsBackend {
-    client: Arc<CodexHttpClient>,
+    clients: CodexClients,
 }
 
 impl Default for ChatCompletionsBackend {
@@ -30,24 +30,27 @@ impl Default for ChatCompletionsBackend {
 impl ChatCompletionsBackend {
     pub fn new() -> Self {
         Self {
-            client: Arc::new(CodexHttpClient::new()),
+            clients: CodexClients::new(),
         }
     }
 
     #[cfg(test)]
-    fn with_client(client: CodexHttpClient) -> Self {
+    fn with_client(client: super::client::CodexHttpClient) -> Self {
         Self {
-            client: Arc::new(client),
+            clients: CodexClients::fixed(std::sync::Arc::new(client)),
         }
     }
 
-    pub async fn handle(&self, request: TranslatedRequest, ctx: RequestContext) -> Response {
+    pub async fn handle(&self, request: TranslatedRequest, mut ctx: RequestContext) -> Response {
+        let client = match self.clients.get(&mut ctx) {
+            Ok(client) => client,
+            Err(error) => return codex_error_response(error),
+        };
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &request.model);
             monitor.upstream_started(&ctx.req_id);
         }
-        let upstream = match self
-            .client
+        let upstream = match client
             .post_native_responses(&request.upstream, &ctx, request.use_responses_lite, true)
             .await
         {
@@ -56,7 +59,7 @@ impl ChatCompletionsBackend {
         };
 
         if !upstream.status().is_success() {
-            return upstream_error_response(upstream, self.client.body_idle_timeout_ms()).await;
+            return upstream_error_response(upstream, client.body_idle_timeout_ms()).await;
         }
         if request.stream {
             return stream::streaming_response(
@@ -64,16 +67,15 @@ impl ChatCompletionsBackend {
                 ctx,
                 request.model,
                 request.include_usage,
-                self.client.body_idle_timeout_ms(),
+                client.body_idle_timeout_ms(),
             );
         }
 
         let headers = stream::response_headers(upstream.headers());
-        let bytes =
-            match collect_body(upstream, self.client.body_idle_timeout_ms(), Some(&ctx)).await {
-                Ok(bytes) => bytes,
-                Err(error) => return error.response(),
-            };
+        let bytes = match collect_body(upstream, client.body_idle_timeout_ms(), Some(&ctx)).await {
+            Ok(bytes) => bytes,
+            Err(error) => return error.response(),
+        };
         if let Some(traffic) = ctx.traffic.as_deref() {
             traffic.write_bytes("032-upstream-response-body.sse", &bytes);
         }
@@ -289,7 +291,7 @@ mod tests {
     use super::*;
     use crate::{
         monitor::{EndpointKind, MonitorHandle},
-        providers::codex::auth::token_store::StoredAuth,
+        providers::codex::{auth::token_store::StoredAuth, client::CodexHttpClient},
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -308,6 +310,7 @@ mod tests {
             session_id: Some("session".into()),
             session_seq: None,
             provider: "codex".into(),
+            account: None,
             traffic: None,
             monitor: Some(monitor),
         }

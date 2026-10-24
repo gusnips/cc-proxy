@@ -3,10 +3,94 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.15 (2026-10-23)
+
+- Changing saved Codex accounts no longer stops an existing conversation with a
+  400. cc-proxy drops reasoning that belongs to another saved login and
+  continues with the text and tool history. A foreign signature is never sent
+  to another account.
+- Auto-rotate now works on conversations that carry Codex reasoning. A 429
+  with a confirmed reset retries on another saved account inside the same
+  request, so the client does not pause. When every account is waiting, the
+  proxy still returns one 429 with the earliest reset.
+- `cc-proxy usage` and the monitor panel show how much is left in each window,
+  matching the provider dashboards. Each window gets its own line in the panel,
+  and terminal bars empty as the allowance runs out (yellow at 30% left, red at
+  10% left). OpenCode Go reset times use the same "resets in ..." wording as
+  Codex and Kimi.
+- The account list and `cc-proxy auth status codex` show the signed-in email
+  instead of the internal account ID when the token carries one.
+
+## v0.2.14 (2026-10-23)
+
+- Codex, Kimi, Grok and Antigravity can keep more than one saved login.
+  `cc-proxy auth add codex --name work` saves another account without
+  switching, `cc-proxy auth use codex work` switches when you want, and
+  `cc-proxy login codex --replace` signs the current account in again. Each
+  account has its own credential file, so a refresh for one never rewrites
+  another.
+- `auth.autoRotate` (off by default) lets a request try another saved account
+  when the one in use answers 429 with a provider-stated reset time. Each
+  account is tried once per request, confirmed waits survive a proxy restart,
+  and a stream that already started is never replayed. Antigravity model
+  quotas rotate; short capacity throttles do not.
+- Codex continuation, compaction and reasoning signatures are tied to the
+  saved login that created them. A signature from another account, or history
+  written by an older proxy version, needs a new conversation. Native
+  `/v1/responses` requests that name a conversation or carry encrypted history
+  are rejected because their account cannot be verified.
+- `cc-proxy config` with no subcommand opens a keyboard settings list: Up and
+  Down move, Left and Right change a value, Enter edits one, and a complex
+  setting opens `config.json` at its line. Every change saves at once.
+- `cc-proxy usage codex` and `cc-proxy usage kimi` report every saved account,
+  mark the current one, and keep a failed lookup visible without switching
+  accounts. Grok and Antigravity usage percentages stay unavailable.
+- The monitor shows the saved account used by each request. The local
+  Providers panel lists saved accounts with the current marker, provider
+  usage, reset times and confirmed waits, with scroll and `r` to refresh.
+
+## v0.2.13 (2026-10-23)
+
+- OpenCode Go and Zen no longer fail the turn when the requested reasoning
+  effort is outside what the model takes. MiMo `xhigh` and `max` run at
+  `high`, and GLM `low` and `medium` run at `high`, the least each model
+  offers.
+- The OpenCode Zen free-limit message ("Free usage limit reached ...") now
+  arrives as a limit error without retry, so the client stops instead of
+  looping, with the subscribe link kept in the message.
+
+## v0.2.12 (2026-10-22)
+
+- Antigravity now discovers the models your account can use from Cloud Code
+  Assist (`:fetchAvailableModels`), saves them to `antigravity/models.json`, and
+  collapses `-low`, `-medium` and `-high` families into one picker row per
+  model. Its Claude Opus and Claude Sonnet models now appear in
+  `cc-proxy models choose antigravity` and Claude Code's `/model` picker.
+- Antigravity's automatic Claude-name defaults now map `fable` to Claude Opus,
+  `opus` to Claude Sonnet, `sonnet` to Gemini Argon (or Pro) and `haiku` to
+  Gemini Flash. Request `output_config.effort` selects the matching Antigravity
+  variant (`none` and `low` use `low`, `medium` uses `medium`, and `high`,
+  `xhigh` and `max` use `high`).
+- `cc-proxy models refresh [provider|all]` now refreshes Antigravity, GitHub
+  Copilot, Gemini, OpenCode Go, OpenCode Zen and custom providers. A running
+  proxy reads refreshed catalogs without a restart, and failed refreshes keep
+  the previous saved list.
+
+## v0.2.11 (2026-10-22)
+
+- Fixed Sonnet requests routed to Gemini failing with a model-not-found error.
+  Gemini 3.1 Pro is now listed as `gemini-3.1-pro-preview`, the ID Google
+  serves. The existing preview filter keeps it out of automatic defaults:
+  Fable, Opus and Sonnet use Gemini 4 Argon; Haiku uses Gemini 3.8 Flash.
+- Gemini 3.1 Pro Preview, Gemini 4 Argon and Gemini 3.8 Flash now appear in
+  Claude Code's `/model` picker. You can still choose a preview model for any
+  Claude name with `cc-proxy models choose gemini`.
+- Corrected the Gemini 3 Flash model ID to `gemini-3-flash-preview`.
+
 ## v0.2.10 (2026-10-20)
 
 - Fixed `Invalid schema for function 'advisor': schema must be a JSON Schema of
-  'type: "object"', got 'type: null'` on `opencode-zen` (such as
+'type: "object"', got 'type: null'` on `opencode-zen` (such as
   `deepseek-v4.1-flash-free`) and other providers. Anthropic server-side
   `advisor_*` tools without `input_schema` are stripped at ingress and skipped
   in tool translation, and function tool schemas without a root `type` default

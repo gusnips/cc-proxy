@@ -65,6 +65,10 @@ enum Commands {
         #[command(subcommand)]
         command: Option<cc_proxy::provider::AuthCommand>,
     },
+    /// Sign in to a provider (same as `auth login`)
+    Login(cc_proxy::provider::LoginArgs),
+    /// Sign out of a provider (same as `auth logout`)
+    Logout(cc_proxy::provider::LogoutArgs),
     /// See or choose the model each Claude name uses, and list provider models
     Models {
         #[command(subcommand)]
@@ -95,10 +99,10 @@ enum Commands {
         #[command(subcommand)]
         command: Option<ServiceCommand>,
     },
-    /// View or change config.json values
+    /// View or change config.json values. With no subcommand, opens a settings screen
     Config {
         #[command(subcommand)]
-        command: ConfigCommand,
+        command: Option<ConfigCommand>,
     },
     /// Update the installed binary to the latest release
     Update {
@@ -217,9 +221,9 @@ enum ModelsCommand {
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Fetch a provider's live model list: GitHub Copilot and providers you added
+    /// Fetch a provider's live model list (or `all` to refresh every provider)
     Refresh {
-        /// Provider to refresh. Defaults to the one Claude Code goes to now
+        /// Provider to refresh, or `all`. Defaults to picking from a list
         provider: Option<String>,
     },
 }
@@ -359,14 +363,19 @@ fn run() -> Result<()> {
             }
         }
         Commands::Config { command } => match command {
-            ConfigCommand::Get { key } => cc_proxy::config_keys::run_config_get(&key),
-            ConfigCommand::Set { key, value } => {
+            None => {
+                cc_proxy::config_keys::run_config_screen()?;
+                route::refresh_model_labels();
+                Ok(())
+            }
+            Some(ConfigCommand::Get { key }) => cc_proxy::config_keys::run_config_get(&key),
+            Some(ConfigCommand::Set { key, value }) => {
                 cc_proxy::config_keys::run_config_set(&key, &value)?;
                 route::refresh_model_labels();
                 Ok(())
             }
-            ConfigCommand::List => cc_proxy::config_keys::run_config_list(),
-            ConfigCommand::Edit => {
+            Some(ConfigCommand::List) => cc_proxy::config_keys::run_config_list(),
+            Some(ConfigCommand::Edit) => {
                 cc_proxy::config_keys::run_config_edit()?;
                 route::refresh_model_labels();
                 Ok(())
@@ -383,6 +392,8 @@ fn run() -> Result<()> {
             run_service_command(command.unwrap_or(ServiceCommand::Status))
         }
         Commands::Auth { command } => run_auth_cli(command),
+        Commands::Login(args) => run_auth_cli(Some(cc_proxy::provider::AuthCommand::Login(args))),
+        Commands::Logout(args) => run_auth_cli(Some(cc_proxy::provider::AuthCommand::Logout(args))),
         Commands::Provider { command } => match command.unwrap_or(ProviderCommand::List) {
             ProviderCommand::Add {
                 name,
@@ -947,7 +958,12 @@ fn print_all_auth_status(registry: &Registry) -> Result<()> {
             any_signed_in = true;
         }
         let label = ui::strong(&id, ui::provider_color(&id), styled);
-        println!("{label}: {}", state.describe());
+        let summary = match provider.cli().accounts() {
+            Some(support) => cc_proxy::auth_cli::AccountCli::open(&id, support)?.summary(),
+            None => None,
+        }
+        .unwrap_or_else(|| state.describe());
+        println!("{label}: {summary}");
     }
     if !any_signed_in {
         std::process::exit(1);
@@ -971,13 +987,19 @@ fn run_auth_cli(command: Option<cc_proxy::provider::AuthCommand>) -> Result<()> 
             if let Err(err) = provider.cli().status() {
                 println!("{err}");
                 if err.to_string() == "Not authenticated" {
+                    println!("Run `cc-proxy login {name}` to sign in.");
                     std::process::exit(1);
                 }
                 std::process::exit(2);
             }
             Ok(())
         }
-        AuthCommand::Login { provider, device } => {
+        AuthCommand::Login(cc_proxy::provider::LoginArgs {
+            provider,
+            device,
+            replace,
+            account,
+        }) => {
             let name = pick_auth_provider(
                 &registry,
                 provider.as_deref(),
@@ -986,7 +1008,20 @@ fn run_auth_cli(command: Option<cc_proxy::provider::AuthCommand>) -> Result<()> 
             let provider = registry
                 .provider(&name)
                 .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
-            let result = if device {
+            let result = if let Some(support) = provider.cli().accounts() {
+                cc_proxy::auth_cli::AccountCli::open(&name, support)?.login(
+                    &cc_proxy::auth_cli::LoginOptions {
+                        device,
+                        replace,
+                        account,
+                    },
+                )
+            } else if account.is_some() {
+                anyhow::bail!(
+                    "{} keeps one login. Leave out `--account` to sign in again.",
+                    ui::provider_name(&name)
+                );
+            } else if device {
                 provider.cli().device()
             } else {
                 provider.cli().login()
@@ -996,6 +1031,44 @@ fn run_auth_cli(command: Option<cc_proxy::provider::AuthCommand>) -> Result<()> 
                 std::process::exit(2);
             }
             Ok(())
+        }
+        AuthCommand::Add {
+            provider,
+            name: account,
+            device,
+        } => {
+            let name = pick_auth_provider(
+                &registry,
+                provider.as_deref(),
+                "Which provider do you want to add an account to?",
+            )?;
+            let provider = registry
+                .provider(&name)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
+            let support = provider.cli().accounts().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} keeps one login. Run `cc-proxy auth login {name}` to sign in again.",
+                    ui::provider_name(&name)
+                )
+            })?;
+            cc_proxy::auth_cli::AccountCli::open(&name, support)?.add(account.as_deref(), device)
+        }
+        AuthCommand::Use { provider, account } => {
+            let name = pick_auth_provider(
+                &registry,
+                provider.as_deref(),
+                "Which provider do you want to switch accounts for?",
+            )?;
+            let provider = registry
+                .provider(&name)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
+            let support = provider.cli().accounts().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} keeps one login. There is no other saved account to switch to.",
+                    ui::provider_name(&name)
+                )
+            })?;
+            cc_proxy::auth_cli::AccountCli::open(&name, support)?.use_account(account.as_deref())
         }
         AuthCommand::Device { provider } => {
             let name = pick_auth_provider(
@@ -1012,7 +1085,11 @@ fn run_auth_cli(command: Option<cc_proxy::provider::AuthCommand>) -> Result<()> 
             }
             Ok(())
         }
-        AuthCommand::Logout { provider } => {
+        AuthCommand::Logout(cc_proxy::provider::LogoutArgs {
+            provider,
+            account,
+            all,
+        }) => {
             let name = pick_auth_provider(
                 &registry,
                 provider.as_deref(),
@@ -1021,7 +1098,17 @@ fn run_auth_cli(command: Option<cc_proxy::provider::AuthCommand>) -> Result<()> 
             let provider = registry
                 .provider(&name)
                 .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
-            provider.cli().logout()?;
+            if let Some(support) = provider.cli().accounts() {
+                cc_proxy::auth_cli::AccountCli::open(&name, support)?
+                    .logout(account.as_deref(), all)?;
+            } else if account.is_some() {
+                anyhow::bail!(
+                    "{} keeps one login. Leave out the account name to sign out.",
+                    ui::provider_name(&name)
+                );
+            } else {
+                provider.cli().logout()?;
+            }
             Ok(())
         }
     }
@@ -1153,6 +1240,21 @@ mod tests {
             vec!["cc-proxy", "auth", "login", "opencode"],
             vec!["cc-proxy", "auth", "login", "codex", "--device"],
             vec!["cc-proxy", "auth", "device", "codex"],
+            vec!["cc-proxy", "login", "codex"],
+            vec!["cc-proxy", "login", "codex", "--device"],
+            vec![
+                "cc-proxy",
+                "login",
+                "codex",
+                "--replace",
+                "--account",
+                "work",
+            ],
+            vec!["cc-proxy", "logout", "codex"],
+            vec!["cc-proxy", "logout", "codex", "work"],
+            vec!["cc-proxy", "logout", "codex", "--all"],
+            vec!["cc-proxy", "auth", "add", "codex", "--name", "work"],
+            vec!["cc-proxy", "auth", "use", "codex", "work"],
             vec!["cc-proxy", "auth", "logout", "kimi"],
             vec!["cc-proxy", "use"],
             vec!["cc-proxy", "use", "kimi"],

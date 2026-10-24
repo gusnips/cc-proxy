@@ -10,8 +10,8 @@ Kimi uses the OpenAI-style chat completions endpoint at `https://api.kimi.ai/cod
 Use a **Kimi account with Kimi Code access**. Authentication is an RFC 8628 device-code flow:
 
 ```sh
-cc-proxy kimi auth login
-cc-proxy kimi auth status
+cc-proxy login kimi
+cc-proxy auth status kimi
 ```
 
 The login prints a verification URL and user code, then polls until authorization completes. Access tokens have a short lifetime and are refreshed before expiry. A persistent device ID is created with the Kimi credential because it is bound into the issued token.
@@ -49,6 +49,6 @@ When the OpenAI routes are enabled, Kimi models work with both `POST /v1/chat/co
 
 ## Limitations and troubleshooting
 
-Account access and rate limits come from Kimi. HTTP 429 is returned to Claude Code with `retry-after`. If login succeeds but requests return 401, inspect token expiry with `kimi auth status`, then log in again. Preserve the Kimi device ID alongside the credential when copying a configuration directory.
+Account access and rate limits come from Kimi. HTTP 429 is returned to Claude Code with `retry-after`. If login succeeds but requests return 401, inspect token expiry with `cc-proxy auth status kimi`, then log in again. Preserve the Kimi device ID alongside the credential when copying a configuration directory.
 
 The proxy estimates count-tokens locally rather than asking Kimi. See [Compatibility and limitations](/reference/compatibility-and-limitations/) for shared boundaries.

@@ -15,6 +15,8 @@
 //! five production classifiers. Keep them in step rather than inventing new
 //! wordings here.
 
+mod google;
+
 use std::sync::LazyLock;
 
 use http::StatusCode;
@@ -64,7 +66,21 @@ pub fn from_http(
         0 => format!("{provider} upstream request failed"),
         _ => format!("{provider} upstream returned HTTP {status}"),
     });
-    provider_error(kind, Some(status), message, retry_after)
+    let mut failure = provider_error(kind, Some(status), message, retry_after);
+    if status == 429 && provider == "Antigravity" {
+        failure.rotation_hint = Some(crate::rotation::RotationHint::Stay);
+    }
+    if status == 429
+        && let Ok(payload) = serde_json::from_str::<Value>(body)
+    {
+        google::normalize(
+            &mut failure,
+            payload.get("error").unwrap_or(&payload),
+            provider,
+            crate::rotation::now_ms(),
+        );
+    }
+    failure
 }
 
 /// A failure the upstream reported inside a stream that had already answered
@@ -96,12 +112,14 @@ pub fn from_stream(error: &Value, provider: &str) -> ProviderError {
             Value::String(text) => Some(text.clone()),
             _ => None,
         });
-    provider_error(
+    let mut failure = provider_error(
         classify(status, &body),
         status,
         message,
         retry_after.as_deref(),
-    )
+    );
+    google::normalize(&mut failure, error, provider, crate::rotation::now_ms());
+    failure
 }
 
 fn provider_error(
@@ -219,6 +237,12 @@ pub fn classify(status: Option<u16>, text: &str) -> FailureKind {
     }
     if client_error && ENTITLEMENT.is_match(text) {
         return FailureKind::Entitlement;
+    }
+    if (status == Some(429) || status.is_none())
+        && let Ok(payload) = serde_json::from_str::<Value>(text)
+        && let Some(kind) = google::kind(payload.get("error").unwrap_or(&payload))
+    {
+        return kind;
     }
     if client_error && QUOTA.is_match(text) {
         return FailureKind::Quota;
@@ -535,6 +559,67 @@ mod tests {
         let throttle = from_http(429, "", Some("12"), "GLM").response();
         assert_eq!(throttle.headers()[http::header::RETRY_AFTER], "12");
         assert!(throttle.headers().get("x-should-retry").is_none());
+    }
+
+    #[test]
+    fn opencode_zen_free_limit_is_quota_without_retry() {
+        let body = r#"{"error":{"message":"Server is temporarily limiting requests (not your usage limit) · Free usage limit reached. Subscribe to OpenCode Go to keep going: https://opencode.ai/go"}}"#;
+        for status in [400, 429] {
+            let failure = from_http(status, body, None, "OpenCode Go");
+            assert_eq!(failure.status, StatusCode::TOO_MANY_REQUESTS, "{status}");
+            assert_eq!(failure.should_retry, Some(false), "{status}");
+        }
+    }
+
+    #[test]
+    fn google_per_minute_quota_uses_its_retry_delay_not_the_spent_quota_prose() {
+        let body = json!({"error": {
+            "code": 429, "status": "RESOURCE_EXHAUSTED",
+            "message": "You exceeded your current quota, please check your plan and billing details",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [
+                    {"quotaId": "GenerateRequestsPerMinutePerProjectPerModel"}
+                ]},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "22.5s"}
+            ]
+        }});
+        let error = from_http(429, &body.to_string(), None, "Gemini");
+        assert_eq!(error.should_retry, None);
+        assert_eq!(error.retry_after.as_deref(), Some("23"));
+    }
+
+    #[test]
+    fn antigravity_rotates_quota_but_never_a_capacity_throttle() {
+        for (reason, quota) in [("QUOTA_EXHAUSTED", true), ("RATE_LIMIT_EXCEEDED", false)] {
+            let body = json!({"error": {
+                "code": 429, "status": "RESOURCE_EXHAUSTED", "message": "Resource has been exhausted",
+                "details": [
+                    {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": reason,
+                     "domain": "cloudcode-pa.googleapis.com", "metadata": {
+                         "model": "claude-sonnet", "quotaResetDelay": "1h46m42.432658549s"
+                     }},
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "6402.432658549s"}
+                ]
+            }});
+            let error = from_http(429, &body.to_string(), None, "Antigravity");
+            assert_eq!(error.retry_after.as_deref(), Some("6403"));
+            assert_eq!(error.should_retry, quota.then_some(false));
+            assert!(
+                matches!(
+                    error.rotation_hint,
+                    Some(crate::rotation::RotationHint::RetryAt {
+                        per_model: true,
+                        ..
+                    })
+                ) == quota
+            );
+            if !quota {
+                assert!(matches!(
+                    error.rotation_hint,
+                    Some(crate::rotation::RotationHint::Stay)
+                ));
+            }
+        }
     }
 
     #[test]

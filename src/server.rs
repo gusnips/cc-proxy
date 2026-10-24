@@ -451,12 +451,10 @@ fn claude_model_entries(registry: &Registry, route: &crate::config::Route) -> Ve
         .collect()
 }
 
-/// Anthropic-shaped model listing so Claude Code's gateway model discovery
-/// (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) finds the proxy's models.
-/// Claude Code only adds entries whose id starts with `claude` or `anthropic`,
-/// so while routing is on, one `claude-<tier>` entry per tier leads the list
-/// and is what its `/model` picker shows. Raw provider ids follow, for other
-/// Anthropic-compatible clients.
+/// Anthropic-shaped model listing for gateway discovery. Current Claude Code
+/// keeps IDs containing `claude` or `anthropic`; older versions required a
+/// prefix. Our replacement `modelPicker` lists provider IDs explicitly, since
+/// it hides discovery results. Raw IDs also serve other compatible clients.
 async fn handler_models(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ModelsQuery>,
@@ -708,6 +706,7 @@ async fn handler_transcription(State(state): State<Arc<AppState>>, req: Request<
         }
     };
     let context = RequestContext {
+        account: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: None,
@@ -883,6 +882,7 @@ async fn dispatch_image_request(
         monitor.provider_selected(&req_id, "codex", &model, None);
     }
     let context = RequestContext {
+        account: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: None,
@@ -1146,6 +1146,7 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
         }
     }
     let context = RequestContext {
+        account: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: current.map(|session| session.seq),
@@ -1373,6 +1374,7 @@ async fn handler_chat_completions(
         }
     }
     let context = RequestContext {
+        account: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: current.map(|session| session.seq),
@@ -1872,6 +1874,7 @@ async fn dispatch_request(
     }
 
     let context = RequestContext {
+        account: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: current.map(|s| s.seq),
@@ -1883,17 +1886,17 @@ async fn dispatch_request(
     let response = if count_tokens {
         provider.handle_count_tokens(body, context).await
     } else {
-        provider
-            .handle_messages_with_conversation_identity(
-                body,
-                context,
-                if auto_review_route.is_some() {
-                    None
-                } else {
-                    conversation_identity
-                },
-            )
-            .await
+        crate::rotation::execute(
+            provider.as_ref(),
+            body,
+            context,
+            if auto_review_route.is_some() {
+                None
+            } else {
+                conversation_identity
+            },
+        )
+        .await
     };
     log_request_completed(
         &log,
@@ -2429,11 +2432,9 @@ mod opencode_account_tests {
         assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("OPENCODE_API_KEY")
+        assert_eq!(
+            value["error"]["message"].as_str().unwrap(),
+            "OpenCode Go has no API key. Run `cc-proxy auth login opencode` to add one."
         );
     }
 }

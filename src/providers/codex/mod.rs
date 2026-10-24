@@ -20,7 +20,8 @@ use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::anthropic::error::json_error;
@@ -35,9 +36,7 @@ use crate::retry::{compute_backoff_delay, should_retry_status, sleep};
 
 use self::auth::browser_login::run_browser_login;
 use self::auth::device::DeviceAuthClient;
-use self::auth::manager::CodexAuthManager;
-use self::auth::token_store::file_store;
-use self::client::CodexHttpClient;
+use self::client::{CodexClients, CodexHttpClient};
 use self::compaction::{
     CompactionAttempt, CompactionError, abort_compaction_attempt, activate_compaction,
     apply_compaction_replay, begin_compaction, request_compaction, store_compaction,
@@ -70,11 +69,56 @@ use self::translate::stream::translate_stream_bytes_with_traffic;
 // ---------------------------------------------------------------------------
 
 pub(crate) fn clear_session_compaction(session_id: &str) {
-    compaction::clear_compaction(session_id);
+    compaction::clear_compactions_with_prefix(&state_session_prefix(session_id));
+}
+
+fn state_session_prefix(session_id: &str) -> String {
+    format!(
+        "{}:",
+        serde_json::to_string(session_id).expect("session ID serializes")
+    )
+}
+
+fn state_session_key(account: Option<&str>, session_id: &str) -> String {
+    format!(
+        "{}{}",
+        state_session_prefix(session_id),
+        account.unwrap_or("missing")
+    )
+}
+
+fn compaction_session_id(owner: Option<&ConversationIdentity>) -> Option<String> {
+    owner.map(|owner| match owner {
+        ConversationIdentity::Main(session) => format!("{session}:main"),
+        ConversationIdentity::Agent(session, agent) => format!(
+            "{session}:agent:{}",
+            serde_json::to_string(agent).expect("agent ID serializes"),
+        ),
+    })
+}
+
+fn account_conversation_identity(
+    account: Option<&str>,
+    owner: ConversationIdentity,
+) -> ConversationIdentity {
+    match owner {
+        ConversationIdentity::Main(session) => {
+            ConversationIdentity::Main(state_session_key(account, &session))
+        }
+        ConversationIdentity::Agent(session, agent) => {
+            ConversationIdentity::Agent(state_session_key(account, &session), agent)
+        }
+    }
+}
+
+struct SessionAccount {
+    id: String,
+    namespace: String,
 }
 
 pub struct CodexProvider {
-    client: Arc<CodexHttpClient>,
+    clients: CodexClients,
+    session_accounts: Mutex<HashMap<String, SessionAccount>>,
 }
 
 impl Default for CodexProvider {
@@ -86,9 +130,92 @@ impl Default for CodexProvider {
 impl CodexProvider {
     pub fn new() -> Self {
         Self {
-            client: Arc::new(CodexHttpClient::new()),
+            clients: CodexClients::new(),
+            session_accounts: Mutex::new(HashMap::new()),
         }
     }
+
+    fn pin_session_account(&self, ctx: &RequestContext) -> String {
+        let account = ctx.account.as_deref().unwrap_or("missing");
+        let Some(session) = &ctx.session_id else {
+            return account.to_string();
+        };
+        let mut accounts = self
+            .session_accounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = accounts.get(session) {
+            if current.id == account {
+                return current.namespace.clone();
+            }
+            let key = state_session_key(Some(&current.namespace), session);
+            compaction::clear_compactions_with_prefix(&format!("{key}:"));
+            continuation::clear_continuations_for_session(&key);
+            websocket::invalidate_codex_websocket_pool_session(&key);
+        }
+        // ponytail: bound the tracker like the continuation registry. A new
+        // generation on return also isolates requests still finishing after a switch.
+        if accounts.len() >= 10_000
+            && !accounts.contains_key(session)
+            && let Some(evicted) = accounts.keys().next().cloned()
+        {
+            accounts.remove(&evicted);
+        }
+        let namespace = format!("{account}:{}", uuid::Uuid::new_v4());
+        accounts.insert(
+            session.clone(),
+            SessionAccount {
+                id: account.to_string(),
+                namespace: namespace.clone(),
+            },
+        );
+        namespace
+    }
+}
+
+/// Replay bound to one saved login must not travel to another. Drop only the
+/// unverifiable reasoning blocks: text, tool calls and tool results still carry
+/// the conversation, so a switched account continues instead of hitting a 400.
+fn strip_unverifiable_reasoning(body: &mut MessagesRequest, account: Option<&str>) -> usize {
+    use translate::reasoning_signature::{
+        decode_reasoning_signature, is_proxy_reasoning_signature, signature_account,
+    };
+    let mut dropped = 0;
+    let mut emptied = Vec::new();
+    for (index, message) in body.messages.iter_mut().enumerate() {
+        let Some(blocks) = message.content.as_array_mut() else {
+            continue;
+        };
+        let before = blocks.len();
+        blocks.retain(|block| {
+            let raw = block
+                .get("encrypted_content")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.is_empty());
+            let signature = block
+                .get("signature")
+                .and_then(serde_json::Value::as_str)
+                .filter(|signature| is_proxy_reasoning_signature(signature));
+            let owned = signature.is_some_and(|signature| {
+                account.is_some()
+                    && signature_account(signature) == account
+                    && decode_reasoning_signature(signature).is_some()
+            });
+            let drop = raw || (signature.is_some() && !owned);
+            if drop {
+                dropped += 1;
+            }
+            !drop
+        });
+        if blocks.len() < before && blocks.is_empty() {
+            emptied.push(index);
+        }
+    }
+    // An assistant turn that held only reasoning has nothing left to send.
+    for index in emptied.into_iter().rev() {
+        body.messages.remove(index);
+    }
+    dropped
 }
 
 fn transport_for_request(
@@ -105,10 +232,44 @@ fn transport_for_request(
 impl CodexProvider {
     async fn handle_messages_inner(
         &self,
+        mut body: MessagesRequest,
+        mut ctx: RequestContext,
+        conversation_identity: Option<ConversationIdentity>,
+    ) -> Response {
+        let client = match self.clients.get(&mut ctx) {
+            Ok(client) => client,
+            Err(error) => return map_codex_error_to_response(&error),
+        };
+        let dropped = strip_unverifiable_reasoning(&mut body, ctx.account.as_deref());
+        if dropped > 0 {
+            tracing::warn!(
+                req_id = %ctx.req_id,
+                account = ctx.account.as_deref().unwrap_or("none"),
+                blocks = dropped,
+                "dropped Codex reasoning from another saved login"
+            );
+        }
+        let namespace = self.pin_session_account(&ctx);
+        let state_owner = conversation_identity
+            .as_ref()
+            .cloned()
+            .map(|owner| account_conversation_identity(Some(&namespace), owner));
+        let account = ctx.account.clone();
+        let response = self
+            .handle_messages_with_client(client, body, ctx, conversation_identity, state_owner)
+            .await;
+        rate_limits::stamp_response(account.as_deref(), response)
+    }
+
+    async fn handle_messages_with_client(
+        &self,
+        client: Arc<CodexHttpClient>,
         body: MessagesRequest,
         ctx: RequestContext,
         conversation_identity: Option<ConversationIdentity>,
+        state_owner: Option<ConversationIdentity>,
     ) -> Response {
+        let state_session_id = compaction_session_id(state_owner.as_ref());
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let want_stream = body.stream;
         let model = body.model.as_deref().unwrap_or("gpt-6-sol");
@@ -156,7 +317,7 @@ impl CodexProvider {
             if let Some(monitor) = ctx.monitor.as_ref() {
                 monitor.upstream_started(&ctx.req_id);
             }
-            let search_response = match self.client.post_search(&search_request, &ctx).await {
+            let search_response = match client.post_search(&search_request, &ctx).await {
                 Ok(response) => response,
                 Err(error) => {
                     log.warn(
@@ -231,12 +392,12 @@ impl CodexProvider {
         let compact_boundary = is_compact_messages_request(&body);
         let server_compaction_enabled = config::codex_server_compaction();
         let mut compaction_attempt = None;
-        if !server_compaction_enabled && let Some(session_id) = ctx.session_id.as_deref() {
+        if !server_compaction_enabled && let Some(session_id) = state_session_id.as_deref() {
             compaction::clear_compaction(session_id);
         }
         if server_compaction_enabled
             && compact_boundary
-            && let Some(session_id) = ctx.session_id.as_deref()
+            && let Some(session_id) = state_session_id.as_deref()
         {
             let attempt = begin_compaction(session_id, &translated.model);
             compaction_attempt = Some(attempt);
@@ -251,7 +412,7 @@ impl CodexProvider {
             }
             let mut compaction_ctx = ctx.clone();
             compaction_ctx.monitor = None;
-            match request_compaction(self.client.as_ref(), &translated, &compaction_ctx).await {
+            match request_compaction(client.as_ref(), &translated, &compaction_ctx).await {
                 Ok(native_history) => {
                     if store_compaction(session_id, attempt, native_history) {
                         log_compaction_event(
@@ -291,7 +452,7 @@ impl CodexProvider {
             }
         } else if server_compaction_enabled
             && !compact_boundary
-            && let Some(replay) = apply_compaction_replay(ctx.session_id.as_deref(), &translated)
+            && let Some(replay) = apply_compaction_replay(state_session_id.as_deref(), &translated)
         {
             translated = replay.request;
             compaction_attempt = Some(replay.attempt);
@@ -300,7 +461,7 @@ impl CodexProvider {
         // Check continuation
         let previous_response_id_enabled = config::codex_previous_response_id();
         let continuation = continuation_candidate_for_owner(
-            conversation_identity.as_ref(),
+            state_owner.as_ref(),
             &translated,
             previous_response_id_enabled,
         );
@@ -339,7 +500,6 @@ impl CodexProvider {
         );
 
         // Post to upstream with continuation
-        let client = self.client.clone();
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.upstream_started(&ctx.req_id);
         }
@@ -386,7 +546,7 @@ impl CodexProvider {
         let upstream = loop {
             if retry_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 abort_request_state(
-                    ctx.session_id.as_deref(),
+                    state_session_id.as_deref(),
                     &request_continuation,
                     compaction_attempt,
                 );
@@ -415,7 +575,7 @@ impl CodexProvider {
                             ),
                         ])),
                     );
-                    abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+                    abort_compaction_attempt(state_session_id.as_deref(), compaction_attempt);
                     abort_continuation_for_owner(&request_continuation);
                     return map_codex_error_to_response(&e);
                 }
@@ -443,7 +603,7 @@ impl CodexProvider {
             .await
             {
                 abort_request_state(
-                    ctx.session_id.as_deref(),
+                    state_session_id.as_deref(),
                     &request_continuation,
                     compaction_attempt,
                 );
@@ -452,7 +612,7 @@ impl CodexProvider {
             attempt += 1;
         };
         if let Some(failure) = events::first_event_failure(&upstream.body) {
-            abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+            abort_compaction_attempt(state_session_id.as_deref(), compaction_attempt);
             abort_continuation_for_owner(&request_continuation);
             return map_codex_event_failure_to_response(&failure);
         }
@@ -481,10 +641,11 @@ impl CodexProvider {
                 model,
                 estimated_input_tokens,
                 ctx.traffic.as_deref(),
+                ctx.account.as_deref(),
             ) {
                 Ok(b) => b,
                 Err(e) => {
-                    abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+                    abort_compaction_attempt(state_session_id.as_deref(), compaction_attempt);
                     abort_continuation_for_owner(&request_continuation);
                     return map_codex_failure_to_response(&format!(
                         "Stream translation error: {e}"
@@ -502,7 +663,7 @@ impl CodexProvider {
                 );
             }
             update_continuation_from_upstream(
-                ctx.session_id.as_deref(),
+                state_session_id.as_deref(),
                 &request_continuation,
                 compaction_attempt,
                 &translated,
@@ -523,6 +684,7 @@ impl CodexProvider {
                 &message_id,
                 model,
                 ctx.traffic.as_deref(),
+                ctx.account.as_deref(),
             ) {
                 Ok(json) => {
                     if let Some(monitor) = ctx.monitor.as_ref() {
@@ -534,7 +696,7 @@ impl CodexProvider {
                         );
                     }
                     update_continuation_from_upstream(
-                        ctx.session_id.as_deref(),
+                        state_session_id.as_deref(),
                         &request_continuation,
                         compaction_attempt,
                         &translated,
@@ -545,7 +707,7 @@ impl CodexProvider {
                     (StatusCode::OK, Json(json)).into_response()
                 }
                 Err(e) => {
-                    abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+                    abort_compaction_attempt(state_session_id.as_deref(), compaction_attempt);
                     abort_continuation_for_owner(&request_continuation);
                     map_codex_failure_to_response(&format!("Accumulation error: {e}"))
                 }
@@ -573,7 +735,7 @@ impl Provider for CodexProvider {
     }
 
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
-        rate_limits::stamp_response(self.handle_messages_inner(body, ctx, None).await)
+        self.handle_messages_inner(body, ctx, None).await
     }
 
     async fn handle_messages_with_conversation_identity(
@@ -582,10 +744,8 @@ impl Provider for CodexProvider {
         ctx: RequestContext,
         conversation_identity: Option<ConversationIdentity>,
     ) -> Response {
-        rate_limits::stamp_response(
-            self.handle_messages_inner(body, ctx, conversation_identity)
-                .await,
-        )
+        self.handle_messages_inner(body, ctx, conversation_identity)
+            .await
     }
 
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
@@ -757,6 +917,7 @@ async fn live_stream_response(
     transport: config::CodexTransport,
     successful_tool_tail: bool,
 ) -> Response {
+    let state_session_id = compaction_session_id(continuation.owner());
     let model = model.to_string();
     let request_continuation = continuation.clone();
     // Counts consecutive empty-completion retries specifically (not connection retries):
@@ -765,7 +926,7 @@ async fn live_stream_response(
     let mut empty_completion_attempts = 0_u32;
     let mut cleanup = LiveRequestStateCleanup::new(
         request_continuation.clone(),
-        ctx.session_id.clone(),
+        state_session_id,
         compaction.attempt,
     );
     let mut attempt = 0_u32;
@@ -1039,12 +1200,14 @@ async fn live_stream_response_once(
     compaction: LiveStreamCompaction,
     accept_empty: bool,
 ) -> LiveStreamStart {
+    let state_session_id = compaction_session_id(request_continuation.owner());
     let estimated_input_tokens = count_translated_tokens(&request_body);
     let mut translator = LiveStreamTranslator::with_estimated_input_tokens(
         message_id,
         model.to_string(),
         estimated_input_tokens,
-    );
+    )
+    .with_account(ctx.account.as_deref());
     let mut upstream_sse_body = Vec::new();
     // Keep protocol framing private until real output makes a transparent retry unsafe.
     // Every branch that consumes pending_chunk returns, so it is never flushed twice.
@@ -1062,7 +1225,7 @@ async fn live_stream_response_once(
             Ok(None) => break,
             Err(()) => {
                 abort_request_state(
-                    ctx.session_id.as_deref(),
+                    state_session_id.as_deref(),
                     &request_continuation,
                     compaction.attempt,
                 );
@@ -1076,7 +1239,7 @@ async fn live_stream_response_once(
             Err(err) => {
                 if err.origin == client::CodexErrorOrigin::Http {
                     abort_request_state(
-                        ctx.session_id.as_deref(),
+                        state_session_id.as_deref(),
                         &request_continuation,
                         compaction.attempt,
                     );
@@ -1086,7 +1249,7 @@ async fn live_stream_response_once(
                     return provider_retry(&upstream_events, err);
                 }
                 abort_request_state(
-                    ctx.session_id.as_deref(),
+                    state_session_id.as_deref(),
                     &request_continuation,
                     compaction.attempt,
                 );
@@ -1100,7 +1263,7 @@ async fn live_stream_response_once(
             generation_started = true;
         }
         append_upstream_sse_payload(&mut upstream_sse_body, &payload);
-        record_rate_limit_telemetry(&payload);
+        record_rate_limit_telemetry(ctx.account.as_deref(), &payload);
         let (chunk, terminal) = match translate_live_stream_payload(&mut translator, &payload, None)
         {
             Ok(result) => result,
@@ -1110,7 +1273,7 @@ async fn live_stream_response_once(
                 // Report it once, with the reset clock upstream supplied.
                 if let Some(limit) = events::usage_limit_from_event(&payload) {
                     abort_request_state(
-                        ctx.session_id.as_deref(),
+                        state_session_id.as_deref(),
                         &request_continuation,
                         compaction.attempt,
                     );
@@ -1136,7 +1299,7 @@ async fn live_stream_response_once(
                         );
                     }
                     abort_request_state(
-                        ctx.session_id.as_deref(),
+                        state_session_id.as_deref(),
                         &request_continuation,
                         compaction.attempt,
                     );
@@ -1145,7 +1308,7 @@ async fn live_stream_response_once(
                     ));
                 }
                 abort_request_state(
-                    ctx.session_id.as_deref(),
+                    state_session_id.as_deref(),
                     &request_continuation,
                     compaction.attempt,
                 );
@@ -1168,7 +1331,7 @@ async fn live_stream_response_once(
             record_live_stream_progress(&ctx, &pending_chunk);
             if terminal {
                 update_continuation_from_upstream(
-                    ctx.session_id.as_deref(),
+                    state_session_id.as_deref(),
                     &request_continuation,
                     compaction.attempt,
                     &request_body,
@@ -1192,7 +1355,7 @@ async fn live_stream_response_once(
         }
         if terminal {
             update_continuation_from_upstream(
-                ctx.session_id.as_deref(),
+                state_session_id.as_deref(),
                 &request_continuation,
                 compaction.attempt,
                 &request_body,
@@ -1404,11 +1567,12 @@ fn remaining_live_stream_response(
     mut upstream_sse_body: Vec<u8>,
     compaction: LiveStreamCompaction,
 ) -> Response {
+    let state_session_id = compaction_session_id(request_continuation.owner());
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     tokio::spawn(async move {
         if tx.send(Ok(Bytes::from(first_chunk))).await.is_err() {
             abort_request_state(
-                ctx.session_id.as_deref(),
+                state_session_id.as_deref(),
                 &request_continuation,
                 compaction.attempt,
             );
@@ -1429,7 +1593,7 @@ fn remaining_live_stream_response(
                 biased;
                 _ = tx.closed() => {
                     abort_request_state(
-                        ctx.session_id.as_deref(),
+                        state_session_id.as_deref(),
                         &request_continuation,
                         compaction.attempt,
                     );
@@ -1442,7 +1606,7 @@ fn remaining_live_stream_response(
                         record_live_stream_progress(&ctx, &chunk);
                         if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
                             abort_request_state(
-                                ctx.session_id.as_deref(),
+                                state_session_id.as_deref(),
                                 &request_continuation,
                                 compaction.attempt,
                             );
@@ -1473,7 +1637,7 @@ fn remaining_live_stream_response(
             match item {
                 Ok(payload) => {
                     append_upstream_sse_payload(&mut upstream_sse_body, &payload);
-                    record_rate_limit_telemetry(&payload);
+                    record_rate_limit_telemetry(ctx.account.as_deref(), &payload);
                     let (chunk, terminal) = match translate_live_stream_payload(
                         &mut translator,
                         &payload,
@@ -1482,7 +1646,7 @@ fn remaining_live_stream_response(
                         Ok(result) => result,
                         Err(message) => {
                             abort_request_state(
-                                ctx.session_id.as_deref(),
+                                state_session_id.as_deref(),
                                 &request_continuation,
                                 compaction.attempt,
                             );
@@ -1515,7 +1679,7 @@ fn remaining_live_stream_response(
                         record_live_stream_progress(&ctx, &chunk);
                         if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
                             abort_request_state(
-                                ctx.session_id.as_deref(),
+                                state_session_id.as_deref(),
                                 &request_continuation,
                                 compaction.attempt,
                             );
@@ -1524,7 +1688,7 @@ fn remaining_live_stream_response(
                     }
                     if terminal {
                         update_continuation_from_upstream(
-                            ctx.session_id.as_deref(),
+                            state_session_id.as_deref(),
                             &request_continuation,
                             compaction.attempt,
                             &request_body,
@@ -1552,7 +1716,7 @@ fn remaining_live_stream_response(
                             record_live_stream_progress(&ctx, &chunk);
                             if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
                                 abort_request_state(
-                                    ctx.session_id.as_deref(),
+                                    state_session_id.as_deref(),
                                     &request_continuation,
                                     compaction.attempt,
                                 );
@@ -1563,7 +1727,7 @@ fn remaining_live_stream_response(
                             let can_retry = tokio::select! {
                                 biased;
                                 _ = tx.closed() => {
-                                    abort_request_state(ctx.session_id.as_deref(), &request_continuation, compaction.attempt);
+                                    abort_request_state(state_session_id.as_deref(), &request_continuation, compaction.attempt);
                                     return;
                                 }
                                 ready = wait_for_recovery_retry(reconnect.attempts, MAX_RETRYABLE_LIVE_STREAM_RETRIES, &mut reconnect.deadline, err.retry_after.as_deref(), Some(&ctx)) => ready,
@@ -1576,7 +1740,7 @@ fn remaining_live_stream_response(
                             let result = tokio::select! {
                                 biased;
                                 _ = tx.closed() => {
-                                    abort_request_state(ctx.session_id.as_deref(), &request_continuation, compaction.attempt);
+                                    abort_request_state(state_session_id.as_deref(), &request_continuation, compaction.attempt);
                                     return;
                                 }
                                 result = await_recovery(reconnect.client.stream_codex_websocket_events_for_owner(&request_body, &ctx, Some(&retry_continuation)), reconnect.deadline) => result,
@@ -1603,7 +1767,7 @@ fn remaining_live_stream_response(
                         }
                     }
                     abort_request_state(
-                        ctx.session_id.as_deref(),
+                        state_session_id.as_deref(),
                         &request_continuation,
                         compaction.attempt,
                     );
@@ -1654,9 +1818,9 @@ fn append_upstream_sse_payload(buffer: &mut Vec<u8>, payload: &serde_json::Value
 /// Keeps the quota numbers a `codex.rate_limits` event carries, so the response
 /// to the request after this one can pass them to the client. Every other event
 /// leaves the snapshot alone.
-fn record_rate_limit_telemetry(payload: &serde_json::Value) {
+fn record_rate_limit_telemetry(account: Option<&str>, payload: &serde_json::Value) {
     if payload.get("type").and_then(|value| value.as_str()) == Some("codex.rate_limits") {
-        rate_limits::record(rate_limits::event_headers(payload));
+        rate_limits::record(account, rate_limits::event_headers(payload));
     }
 }
 
@@ -1691,7 +1855,7 @@ fn empty_buffered_completion_error() -> client::CodexError {
 fn is_empty_codex_success_completion(upstream_sse: &[u8]) -> bool {
     use self::translate::reducer::{ReducerEvent, TERM_COMPLETED, TERM_DONE};
 
-    let Ok(events) = self::translate::reducer::reduce_upstream_bytes(upstream_sse) else {
+    let Ok(events) = self::translate::reducer::reduce_upstream_bytes(upstream_sse, None) else {
         return false;
     };
     let mut saw_success_terminal = false;
@@ -1889,7 +2053,7 @@ fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
         );
     }
 
-    (
+    let mut response = (
         headers,
         json_error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -1897,12 +2061,31 @@ fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
             &limit.message,
         ),
     )
-        .into_response()
+        .into_response();
+    if let Some(until_ms) = limit.resets_at.and_then(|at| at.checked_mul(1_000))
+        && until_ms > crate::rotation::now_ms()
+    {
+        response
+            .extensions_mut()
+            .insert(crate::rotation::RotationHint::RetryAt {
+                until_ms,
+                per_model: false,
+            });
+    }
+    response
 }
 
 fn map_codex_error_to_response(err: &client::CodexError) -> Response {
     if let Some(limit) = err.usage_limit.as_ref() {
-        return usage_limit_response(limit);
+        let mut response = usage_limit_response(limit);
+        if let Some(retry_after) = err.retry_after.as_deref()
+            && let Ok(value) = HeaderValue::from_str(retry_after)
+        {
+            response
+                .headers_mut()
+                .insert(http::header::RETRY_AFTER, value);
+        }
+        return response;
     }
     if err.detail.as_deref() == Some(websocket::WEBSOCKET_QUOTA_REACHED_DETAIL) {
         let mut response = json_error(
@@ -2018,103 +2201,66 @@ fn codex_error_message(err: &client::CodexError) -> &str {
 
 pub(crate) struct CodexCli;
 
+impl crate::accounts::AccountSupport for CodexCli {
+    fn sign_in(&self, device: bool) -> Result<serde_json::Value, anyhow::Error> {
+        let tokens = if device {
+            DeviceAuthClient::new().run()?
+        } else {
+            run_browser_login()?
+        };
+        Ok(serde_json::to_value(auth::manager::initial_auth(&tokens)?)?)
+    }
+
+    fn identity(&self, login: &serde_json::Value) -> Option<String> {
+        let auth: auth::token_store::StoredAuth = serde_json::from_value(login.clone()).ok()?;
+        auth.account_id
+    }
+
+    fn state(&self, login: &serde_json::Value) -> crate::provider::AuthState {
+        match serde_json::from_value::<auth::token_store::StoredAuth>(login.clone()) {
+            Ok(stored) => crate::provider::AuthState::SignedIn {
+                account: auth::jwt::extract_email(&stored.access).or(stored.account_id),
+                expires_ms: Some(stored.expires),
+            },
+            Err(_) => crate::provider::AuthState::Missing,
+        }
+    }
+
+    fn single_login(&self) -> Box<dyn crate::auth::AuthStorage<serde_json::Value>> {
+        Box::new(auth::token_store::single_login_store())
+    }
+}
+
 impl CliHandlers for CodexCli {
     fn auth_state(&self) -> crate::provider::AuthState {
-        match file_store().load_auth().ok().flatten() {
-            Some(auth) => crate::provider::AuthState::SignedIn {
-                account: auth.account_id,
-                expires_ms: Some(auth.expires),
-            },
-            None => crate::provider::AuthState::Missing,
-        }
+        crate::accounts::Accounts::current_state("codex", self)
     }
 
     fn login(&self) -> Result<(), anyhow::Error> {
-        let tokens = run_browser_login()?;
-        let store = file_store();
-        let manager = CodexAuthManager::new(store);
-        let saved = manager.persist_initial_tokens(&tokens)?;
-        print!(
-            "{}",
-            format_auth_saved_output(&manager.store.auth_path(), saved.account_id.as_deref())
-        );
-        Ok(())
+        crate::auth_cli::AccountCli::open("codex", self)?.login(&Default::default())
     }
 
     fn device(&self) -> Result<(), anyhow::Error> {
-        let tokens = DeviceAuthClient::new().run()?;
-        let store = file_store();
-        let manager = CodexAuthManager::new(store);
-        let saved = manager.persist_initial_tokens(&tokens)?;
-        print!(
-            "{}",
-            format_auth_saved_output(&manager.store.auth_path(), saved.account_id.as_deref())
-        );
-        Ok(())
+        crate::auth_cli::AccountCli::open("codex", self)?.login(&crate::auth_cli::LoginOptions {
+            device: true,
+            ..Default::default()
+        })
     }
 
     fn status(&self) -> Result<(), anyhow::Error> {
-        let store = file_store();
-        let stored = store.load_auth()?;
-        match stored {
-            Some(auth) => {
-                println!(
-                    "Account: {}",
-                    auth.account_id.as_deref().unwrap_or("(none)")
-                );
-                println!("{}", format_expiry(auth.expires, now_ms()));
-                println!("Storage: {}", store.auth_path());
-                Ok(())
-            }
-            None => {
-                anyhow::bail!("Not authenticated");
-            }
-        }
+        crate::auth_cli::AccountCli::open("codex", self)?.status()
     }
 
     fn logout(&self) -> Result<(), anyhow::Error> {
-        let store = file_store();
-        store.clear_auth()?;
-        println!("Logged out");
-        Ok(())
+        crate::auth_cli::AccountCli::open("codex", self)?.logout(None, false)
+    }
+
+    fn accounts(&self) -> Option<&dyn crate::accounts::AccountSupport> {
+        Some(self)
     }
 }
 
 pub(crate) static CODEX_CLI: CodexCli = CodexCli;
-
-// ---------------------------------------------------------------------------
-// CLI helpers
-// ---------------------------------------------------------------------------
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-fn format_expiry(expires: u64, now: u64) -> String {
-    let remaining = (i128::from(expires) - i128::from(now)).div_euclid(1000);
-    let iso = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(expires) * 1_000_000)
-        .ok()
-        .and_then(|dt| {
-            let fmt = time::format_description::parse_borrowed::<2>(
-                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z",
-            )
-            .ok()?;
-            dt.format(&fmt).ok()
-        })
-        .unwrap_or_else(|| "invalid".to_string());
-    format!("Expires: {iso} (in {remaining}s)")
-}
-
-fn format_auth_saved_output(auth_path: &str, account_id: Option<&str>) -> String {
-    let mut out = format!("Auth saved in {auth_path}\n");
-    if let Some(account_id) = account_id {
-        out.push_str(&format!("Account: {account_id}\n"));
-    }
-    out
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -2128,6 +2274,214 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     use super::*;
+
+    #[test]
+    fn unverifiable_reasoning_is_dropped_and_portable_history_survives() {
+        use translate::reasoning_signature::{ReasoningReplay, encode_reasoning_signature};
+        let own = encode_reasoning_signature(
+            &ReasoningReplay {
+                id: "rs_a".into(),
+                encrypted_content: "from-a".into(),
+            },
+            Some("account-a"),
+        )
+        .unwrap();
+        let body = serde_json::json!([
+            {"role":"user","content":"ping"},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"mine","signature":own},
+                {"type":"text","text":"kept"}
+            ]},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"legacy","signature":"ccp:codex:v1:cnNfMQ:opaque"},
+                {"type":"reasoning","encrypted_content":"unknown"},
+                {"type":"compaction","encrypted_content":"unknown"},
+                {"type":"tool_use","id":"call","name":"Read","input":{"encrypted_content":"ordinary tool input"}}
+            ]}
+        ]);
+
+        let mut own_body = request_with_tail(body.clone());
+        assert_eq!(
+            strip_unverifiable_reasoning(&mut own_body, Some("account-a")),
+            3
+        );
+        assert!(
+            own_body.messages[1]
+                .content
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| {
+                    block.get("signature").and_then(serde_json::Value::as_str) == Some(own.as_str())
+                }),
+            "the account's own signature stays"
+        );
+        let mut other = request_with_tail(body);
+        assert_eq!(
+            strip_unverifiable_reasoning(&mut other, Some("account-b")),
+            4
+        );
+
+        let content =
+            |request: &MessagesRequest, index: usize| request.messages[index].content.clone();
+        assert!(content(&other, 1).as_array().unwrap().iter().any(|block| {
+            block.get("type").and_then(serde_json::Value::as_str) == Some("text")
+        }));
+        assert!(content(&other, 2).as_array().unwrap().iter().any(|block| {
+            block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
+        }));
+        assert!(
+            !content(&other, 2)
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| { block.get("signature").is_some() })
+        );
+        // An assistant turn with nothing but foreign reasoning disappears
+        // instead of becoming an empty message upstream.
+        let mut only_reasoning = request_with_tail(serde_json::json!([
+            {"role":"assistant","content":[{"type":"reasoning","encrypted_content":"unknown"}]},
+            {"role":"user","content":"next"}
+        ]));
+        assert_eq!(
+            strip_unverifiable_reasoning(&mut only_reasoning, Some("account-a")),
+            1
+        );
+        assert_eq!(only_reasoning.messages.len(), 1);
+        assert_eq!(
+            only_reasoning.messages[0].content,
+            serde_json::json!("next")
+        );
+        // A raw provider block without a saved login cannot stay either.
+        let mut none = request_with_tail(serde_json::json!([
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"mine","signature":"not-proxy"},
+                {"type":"reasoning","encrypted_content":"unknown"}
+            ]}
+        ]));
+        assert_eq!(strip_unverifiable_reasoning(&mut none, None), 1);
+        assert_eq!(
+            none.messages[0].content.as_array().unwrap().len(),
+            1,
+            "a signature from another product is not ours to strip"
+        );
+    }
+
+    #[test]
+    fn a_future_quota_reset_is_an_internal_rotation_deadline() {
+        let until = crate::rotation::now_ms() / 1000 + 60;
+        let limit = events::CodexUsageLimit {
+            message: "limit".into(),
+            resets_at: Some(until),
+            window: None,
+        };
+        let response = usage_limit_response(&limit);
+        assert!(
+            matches!(response.extensions().get::<crate::rotation::RotationHint>(),
+            Some(crate::rotation::RotationHint::RetryAt { until_ms, per_model: false }) if *until_ms == until * 1000)
+        );
+        assert!(!response.headers().contains_key(http::header::RETRY_AFTER));
+        let past = events::CodexUsageLimit {
+            resets_at: Some(1),
+            ..limit
+        };
+        assert!(
+            usage_limit_response(&past)
+                .extensions()
+                .get::<crate::rotation::RotationHint>()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn saved_accounts_isolate_native_state_and_switch_back_starts_portable() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        let _compaction_guard = compaction::lock_compaction_registry_for_tests();
+        let provider = CodexProvider::new();
+        let mut ctx = live_test_context("account-isolation");
+        ctx.account = Some("sign-in-a".to_string());
+        let namespace_a = provider.pin_session_account(&ctx);
+        let owner_a = account_conversation_identity(
+            Some(&namespace_a),
+            ConversationIdentity::Main("account-isolation".into()),
+        );
+        let key_a = compaction_session_id(Some(&owner_a)).unwrap();
+        let first = live_test_request("one");
+        let reservation_a = continuation_candidate_for_owner(Some(&owner_a), &first, true);
+        record_continuation_for_owner(&reservation_a, &first, Some("response-a"), Some(11), &[]);
+        let attempt_a = begin_compaction(&key_a, &first.model);
+        assert!(store_compaction(
+            &key_a,
+            attempt_a,
+            vec![translate::request::ResponsesInputItem::Compaction {
+                encrypted_content: "account-a-only".into(),
+            }]
+        ));
+        let summary = "portable summary with enough detail to identify the conversation";
+        let output = vec![translate::request::ResponsesInputItem::Message {
+            role: "assistant".into(),
+            content: vec![translate::request::ResponsesContentPart::OutputText {
+                text: summary.into(),
+            }],
+        }];
+        assert!(activate_compaction(
+            Some(&key_a),
+            Some(attempt_a),
+            &first.model,
+            &output
+        ));
+        let mut next = live_test_request(summary);
+        next.input.extend(live_test_request("continue").input);
+        assert!(apply_compaction_replay(Some(&key_a), &next).is_some());
+        let sibling = account_conversation_identity(
+            Some(&namespace_a),
+            ConversationIdentity::Agent("account-isolation".into(), "child".into()),
+        );
+        let sibling_key = compaction_session_id(Some(&sibling)).unwrap();
+        assert_ne!(key_a, sibling_key);
+        assert!(apply_compaction_replay(Some(&sibling_key), &next).is_none());
+        assert!(compaction_session_id(None).is_none());
+
+        ctx.account = Some("sign-in-b".into());
+        let namespace_b = provider.pin_session_account(&ctx);
+        let owner_b = account_conversation_identity(
+            Some(&namespace_b),
+            ConversationIdentity::Main("account-isolation".into()),
+        );
+        let key_b = compaction_session_id(Some(&owner_b)).unwrap();
+        assert_ne!(key_a, key_b);
+        let other = continuation_candidate_for_owner(Some(&owner_b), &next, true);
+        assert!(other.candidate().previous_response_id.is_none());
+        assert!(other.origin_socket_id().is_none());
+        assert!(apply_compaction_replay(Some(&key_b), &next).is_none());
+
+        ctx.account = Some("sign-in-a".into());
+        let returned_namespace = provider.pin_session_account(&ctx);
+        assert_ne!(namespace_a, returned_namespace);
+        let returned_owner = account_conversation_identity(
+            Some(&returned_namespace),
+            ConversationIdentity::Main("account-isolation".into()),
+        );
+        let returned_key = compaction_session_id(Some(&returned_owner)).unwrap();
+        record_continuation_for_owner(&reservation_a, &first, Some("late-a"), Some(11), &[]);
+        assert!(!store_compaction(&key_a, attempt_a, Vec::new()));
+        assert!(apply_compaction_replay(Some(&key_a), &next).is_none());
+        let returned = continuation_candidate_for_owner(Some(&returned_owner), &next, true);
+        assert!(returned.candidate().previous_response_id.is_none());
+        assert!(returned.origin_socket_id().is_none());
+        let late_attempt = begin_compaction(&key_a, &first.model);
+        assert!(store_compaction(&key_a, late_attempt, Vec::new()));
+        assert!(apply_compaction_replay(Some(&returned_key), &next).is_none());
+        assert_eq!(ctx.session_id.as_deref(), Some("account-isolation"));
+        clear_session_compaction("account-isolation");
+        for namespace in [&namespace_a, &namespace_b, &returned_namespace] {
+            continuation::clear_continuations_for_session(&state_session_key(
+                Some(namespace),
+                "account-isolation",
+            ));
+        }
+    }
 
     #[test]
     fn compact_boundary_uses_http_without_rerouting_ordinary_websocket_requests() {
@@ -2174,6 +2528,7 @@ mod tests {
 
     fn live_test_context(session_id: &str) -> RequestContext {
         RequestContext {
+            account: None,
             req_id: format!("request-{session_id}"),
             session_id: Some(session_id.to_string()),
             session_seq: None,
@@ -2434,6 +2789,7 @@ mod tests {
         )
         .unwrap();
         let ctx = RequestContext {
+            account: None,
             req_id: "empty-terminal".to_string(),
             session_id: None,
             session_seq: None,
@@ -2863,6 +3219,7 @@ mod tests {
             crate::monitor::EndpointKind::Messages,
         );
         let ctx = RequestContext {
+            account: None,
             req_id: "request".to_string(),
             session_id: None,
             session_seq: None,
@@ -2895,6 +3252,7 @@ mod tests {
         )
         .unwrap();
         let ctx = RequestContext {
+            account: None,
             req_id: "incremental-http".to_string(),
             session_id: None,
             session_seq: None,
@@ -3019,41 +3377,6 @@ mod tests {
         assert!(!models.contains(&"gpt-5.4-mini".to_string()));
     }
 
-    #[test]
-    fn format_auth_saved_output_with_account() {
-        assert_eq!(
-            format_auth_saved_output("/tmp/auth.json", Some("acct_1")),
-            "Auth saved in /tmp/auth.json\nAccount: acct_1\n"
-        );
-    }
-
-    #[test]
-    fn format_auth_saved_output_without_account() {
-        assert_eq!(
-            format_auth_saved_output("/tmp/auth.json", None),
-            "Auth saved in /tmp/auth.json\n"
-        );
-    }
-
-    #[test]
-    fn format_expiry_with_future_expiry() {
-        // 2100-01-01T00:00:00Z in ms
-        let expires = 4102444800000;
-        let now = 4102444790000; // 10s before
-        let output = format_expiry(expires, now);
-        assert!(output.starts_with("Expires: 2100-01-01T00:00:00.000Z (in "));
-        assert!(output.ends_with("s)"));
-    }
-
-    #[test]
-    fn format_expiry_with_past_expiry() {
-        // 2000-01-01T00:00:00Z in ms
-        let expires = 946684800000;
-        let now = 946684810000; // 10s after
-        let output = format_expiry(expires, now);
-        assert!(output.starts_with("Expires: 2000-01-01T00:00:00.000Z (in -"));
-    }
-
     fn orphan_tool_output_event() -> serde_json::Value {
         serde_json::json!({
             "type": "error",
@@ -3097,7 +3420,10 @@ mod tests {
             }
         });
         let provider = CodexProvider {
-            client: authenticated_live_test_client(format!("http://{addr}/responses")),
+            clients: CodexClients::fixed(authenticated_live_test_client(format!(
+                "http://{addr}/responses"
+            ))),
+            session_accounts: Mutex::new(HashMap::new()),
         };
         let body: MessagesRequest = serde_json::from_value(serde_json::json!({
             "model":"gpt-6-astra", "stream":true,
@@ -3460,7 +3786,10 @@ mod tests {
         websocket::invalidate_codex_websocket_pool_owner(&owner);
         let request = live_test_request("one");
         let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
-        let compaction_attempt = begin_compaction(session_id, &request.model);
+        let compaction_attempt = begin_compaction(
+            &compaction_session_id(Some(&owner)).unwrap(),
+            &request.model,
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3500,7 +3829,7 @@ mod tests {
 
         assert!(!continuation::is_current_turn_for_owner(&continuation));
         assert!(!store_compaction(
-            session_id,
+            &compaction_session_id(Some(&owner)).unwrap(),
             compaction_attempt,
             Vec::new()
         ));
@@ -3633,7 +3962,10 @@ mod tests {
         websocket::invalidate_codex_websocket_pool_owner(&owner);
         let request = live_test_request("one");
         let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
-        let compaction_attempt = begin_compaction(session_id, &request.model);
+        let compaction_attempt = begin_compaction(
+            &compaction_session_id(Some(&owner)).unwrap(),
+            &request.model,
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3694,7 +4026,7 @@ mod tests {
 
         assert!(!continuation::is_current_turn_for_owner(&continuation));
         assert!(!store_compaction(
-            session_id,
+            &compaction_session_id(Some(&owner)).unwrap(),
             compaction_attempt,
             Vec::new()
         ));
@@ -3768,7 +4100,10 @@ mod tests {
         websocket::invalidate_codex_websocket_pool_owner(&owner);
         let request = live_test_request("one");
         let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
-        let compaction_attempt = begin_compaction(session_id, &request.model);
+        let compaction_attempt = begin_compaction(
+            &compaction_session_id(Some(&owner)).unwrap(),
+            &request.model,
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3833,7 +4168,7 @@ mod tests {
             .expect("socket-close acknowledgement sender dropped");
         assert!(!continuation::is_current_turn_for_owner(&continuation));
         assert!(!store_compaction(
-            session_id,
+            &compaction_session_id(Some(&owner)).unwrap(),
             compaction_attempt,
             Vec::new()
         ));
@@ -3953,7 +4288,10 @@ mod tests {
         websocket::invalidate_codex_websocket_pool_owner(&owner);
         let request = live_test_request("one");
         let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
-        let compaction_attempt = begin_compaction(session_id, &request.model);
+        let compaction_attempt = begin_compaction(
+            &compaction_session_id(Some(&owner)).unwrap(),
+            &request.model,
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -4017,7 +4355,7 @@ mod tests {
 
         assert!(!continuation::is_current_turn_for_owner(&continuation));
         assert!(!store_compaction(
-            session_id,
+            &compaction_session_id(Some(&owner)).unwrap(),
             compaction_attempt,
             Vec::new()
         ));

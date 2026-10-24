@@ -7,14 +7,12 @@ use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::anthropic::schema::{CountTokensResponse, MessagesRequest};
 use crate::provider::{
     CliHandlers, Generation, GenerationBody, Provider, ProviderError, ProviderErrorKind,
     RequestContext,
 };
-use crate::providers::kimi::auth::token_store::file_store;
 use crate::providers::kimi::translate::model_allowlist::{
     KIMI_DEFAULT_MODEL, assert_routable_model, resolve_model,
 };
@@ -35,13 +33,6 @@ const KIMI: ChatUpstream = ChatUpstream {
     tool_names: &[],
 };
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 pub struct KimiProvider;
 
 impl Default for KimiProvider {
@@ -60,8 +51,9 @@ impl KimiProvider {
     async fn send(
         &self,
         body: &MessagesRequest,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(reqwest::Response, String), ProviderError> {
+        ctx.pin_account(&KIMI_CLI)?;
         let requested = body.model.as_deref().unwrap_or(KIMI_DEFAULT_MODEL);
         let resolved = resolve_model(requested);
         assert_routable_model(&resolved).map_err(|error| {
@@ -90,7 +82,7 @@ impl KimiProvider {
             monitor.upstream_started(&ctx.req_id);
         }
         let response = client::KimiHttpClient::new()
-            .post_kimi(&translated)
+            .post_kimi(&translated, ctx.account.as_deref())
             .await
             .map_err(|error| kimi_error(&error))?;
         Ok((response, resolved))
@@ -99,9 +91,9 @@ impl KimiProvider {
     async fn buffered_response(
         &self,
         body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<serde_json::Value, ProviderError> {
-        let (response, _) = self.send(&body, &ctx).await?;
+        let (response, _) = self.send(&body, &mut ctx).await?;
         let bytes = response
             .bytes()
             .await
@@ -172,10 +164,10 @@ impl Provider for KimiProvider {
     async fn generate_anthropic_stream(
         &self,
         mut body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<Generation, ProviderError> {
         body.stream = true;
-        let (response, resolved_model) = self.send(&body, &ctx).await?;
+        let (response, resolved_model) = self.send(&body, &mut ctx).await?;
         let model = body.model.unwrap_or_else(|| KIMI_DEFAULT_MODEL.to_string());
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
         Ok(Generation {
@@ -216,62 +208,62 @@ fn kimi_error(err: &client::KimiError) -> ProviderError {
 
 pub(crate) struct KimiCli;
 
-impl CliHandlers for KimiCli {
-    fn auth_state(&self) -> crate::provider::AuthState {
-        match file_store().load_auth().ok().flatten() {
-            Some(auth) => crate::provider::AuthState::SignedIn {
+impl crate::accounts::AccountSupport for KimiCli {
+    fn sign_in(&self, _device: bool) -> anyhow::Result<serde_json::Value> {
+        let device_id = uuid::Uuid::new_v4().simple().to_string();
+        let tokens = auth::login::run_device_login(&device_id)?;
+        Ok(serde_json::to_value(auth::manager::initial_auth(
+            &tokens, device_id,
+        )?)?)
+    }
+
+    fn identity(&self, login: &serde_json::Value) -> Option<String> {
+        let auth: auth::token_store::StoredAuth = serde_json::from_value(login.clone()).ok()?;
+        auth.user_id
+            .or_else(|| auth::jwt::extract_user_id(&auth.access))
+    }
+
+    fn state(&self, login: &serde_json::Value) -> crate::provider::AuthState {
+        match serde_json::from_value::<auth::token_store::StoredAuth>(login.clone()) {
+            Ok(auth) => crate::provider::AuthState::SignedIn {
                 account: auth.user_id,
                 expires_ms: Some(auth.expires),
             },
-            None => crate::provider::AuthState::Missing,
+            Err(_) => crate::provider::AuthState::Missing,
         }
     }
 
-    fn login(&self) -> Result<(), anyhow::Error> {
-        let tokens = auth::login::run_device_login()?;
-        let store = file_store();
-        let manager = auth::manager::KimiAuthManager::new(store);
-        let saved = manager.persist_initial_tokens(&tokens)?;
-        println!("Auth saved in {}", manager.store.auth_path());
-        if let Some(ref uid) = saved.user_id {
-            println!("User: {uid}");
-        }
-        println!("Authentication complete");
-        Ok(())
+    fn single_login(&self) -> Box<dyn crate::auth::AuthStorage<serde_json::Value>> {
+        Box::new(auth::token_store::single_login_store())
+    }
+}
+
+impl CliHandlers for KimiCli {
+    fn auth_state(&self) -> crate::provider::AuthState {
+        crate::accounts::Accounts::current_state("kimi", self)
     }
 
-    fn device(&self) -> Result<(), anyhow::Error> {
-        self.login()
+    fn login(&self) -> anyhow::Result<()> {
+        crate::auth_cli::AccountCli::open("kimi", self)?.login(&Default::default())
     }
 
-    fn status(&self) -> Result<(), anyhow::Error> {
-        let store = file_store();
-        let stored = store.load_auth()?;
-        match stored {
-            Some(auth) => {
-                println!("Auth path: {}", store.auth_path());
-                println!("Authenticated: true");
-                if let Some(ref uid) = auth.user_id {
-                    println!("User: {uid}");
-                }
-                if let Some(ref scope) = auth.scope {
-                    println!("Scope: {scope}");
-                }
-                let remaining = auth.expires.saturating_sub(now_ms()) / 1000;
-                println!("Expires in {remaining}s");
-                Ok(())
-            }
-            None => {
-                anyhow::bail!("Not authenticated");
-            }
-        }
+    fn device(&self) -> anyhow::Result<()> {
+        crate::auth_cli::AccountCli::open("kimi", self)?.login(&crate::auth_cli::LoginOptions {
+            device: true,
+            ..Default::default()
+        })
     }
 
-    fn logout(&self) -> Result<(), anyhow::Error> {
-        let store = file_store();
-        store.clear_auth()?;
-        println!("Logged out");
-        Ok(())
+    fn status(&self) -> anyhow::Result<()> {
+        crate::auth_cli::AccountCli::open("kimi", self)?.status()
+    }
+
+    fn logout(&self) -> anyhow::Result<()> {
+        crate::auth_cli::AccountCli::open("kimi", self)?.logout(None, false)
+    }
+
+    fn accounts(&self) -> Option<&dyn crate::accounts::AccountSupport> {
+        Some(self)
     }
 }
 

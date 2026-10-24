@@ -51,7 +51,7 @@ struct TranscriptionResponse<'a> {
 }
 
 pub struct CodexTranscriptionBackend {
-    client: std::sync::Arc<super::client::CodexHttpClient>,
+    clients: super::client::CodexClients,
     base_url: String,
     limiter: std::sync::Arc<tokio::sync::Semaphore>,
 }
@@ -59,7 +59,7 @@ pub struct CodexTranscriptionBackend {
 impl CodexTranscriptionBackend {
     pub fn new() -> Self {
         Self {
-            client: std::sync::Arc::new(super::client::CodexHttpClient::new()),
+            clients: super::client::CodexClients::new(),
             base_url: TRANSCRIPTION_BASE_URL.to_string(),
             limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
         }
@@ -71,7 +71,7 @@ impl CodexTranscriptionBackend {
         base_url: String,
     ) -> Self {
         Self {
-            client,
+            clients: super::client::CodexClients::fixed(client),
             base_url: base_url.trim_end_matches('/').to_string(),
             limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
         }
@@ -80,7 +80,7 @@ impl CodexTranscriptionBackend {
     pub async fn handle(
         &self,
         input: PreparedTranscription,
-        ctx: crate::provider::RequestContext,
+        mut ctx: crate::provider::RequestContext,
     ) -> Response {
         let _permit = match self.limiter.clone().try_acquire_owned() {
             Ok(permit) => permit,
@@ -93,11 +93,14 @@ impl CodexTranscriptionBackend {
                 });
             }
         };
+        let client = match self.clients.get(&mut ctx) {
+            Ok(client) => client,
+            Err(error) => return transcription_transport_error_response(error),
+        };
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.upstream_started(&ctx.req_id);
         }
-        let upstream = match self
-            .client
+        let upstream = match client
             .post_transcription(&self.base_url, &input, &ctx)
             .await
         {
@@ -124,7 +127,7 @@ impl CodexTranscriptionBackend {
             copy_safe_headers(&headers, response.headers_mut());
             return response;
         }
-        let body = match collect_response_body(upstream, self.client.body_idle_timeout_ms()).await {
+        let body = match collect_response_body(upstream, client.body_idle_timeout_ms()).await {
             Ok(body) => body,
             Err(error) => return transcription_error_response(error),
         };
@@ -308,7 +311,9 @@ fn transcription_transport_error_response(error: super::client::CodexError) -> R
     };
     let mut response = transcription_error_response(TranscriptionRequestError {
         status,
-        message: if error.status == 0 {
+        message: if error.origin == super::client::CodexErrorOrigin::Auth {
+            error.detail.unwrap_or(error.message)
+        } else if error.status == 0 {
             "Codex transcription service is unavailable".to_string()
         } else {
             format!("Codex transcription service returned HTTP {}", error.status)
@@ -370,6 +375,7 @@ mod tests {
             session_id: None,
             session_seq: None,
             provider: "codex".to_string(),
+            account: None,
             traffic: None,
             monitor: None,
         }

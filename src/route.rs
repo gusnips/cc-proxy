@@ -103,7 +103,7 @@ fn picker_models(registry: &Registry, target: &str) -> Vec<String> {
         .iter()
         .map(|tier| (*tier).to_string())
         .collect();
-    let whole_catalog = target == "antigravity"
+    let whole_catalog = matches!(target, "antigravity" | "gemini")
         || registry
             .provider(target)
             .is_some_and(|handler| handler.aggregator());
@@ -271,6 +271,26 @@ mod tests {
                 models: (0..models).map(|i| format!("vendor/model-{i}")).collect(),
             },
         ))
+    }
+
+    #[test]
+    fn gemini_picker_offers_the_preview_without_making_it_a_default() {
+        let registry =
+            Registry::from_providers([
+                Arc::new(crate::providers::gemini::GeminiProvider::new()) as Arc<dyn Provider>
+            ]);
+        assert_eq!(
+            picker_models(&registry, "gemini"),
+            [
+                "fable",
+                "opus",
+                "sonnet",
+                "haiku",
+                "gemini-3.1-pro-preview",
+                "gemini-3.8-flash",
+                "gemini-4-argon",
+            ]
+        );
     }
 
     #[test]
