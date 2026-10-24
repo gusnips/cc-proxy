@@ -24,6 +24,10 @@ description: Release notes for cc-proxy.
   opencode CLI does, opening the verification URL with the code embedded and
   polling for the token. The bare `opencode.ai/zen` page plus manual API key
   paste is gone.
+- When every saved account is rate-limited, the proxy now waits for the first
+  one to free up (up to two minutes) and continues the request on it, so the
+  agent turn survives short resets instead of dying on a 429. Longer waits
+  still return a 429 with the earliest reset for the client to retry.
 - Claude models on Antigravity no longer fail every tool call with
   `tools.N.custom.input_schema` 400s. `anyOf`/`oneOf` unions in tool schemas
   (e.g. SendMessage's nested message shape) collapse or widen away before

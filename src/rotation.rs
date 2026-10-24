@@ -141,6 +141,12 @@ fn retry_deadline(response: &Response, now: u64) -> Option<(u64, bool)> {
         .map(|until| (until, false))
 }
 
+/// Longest one request waits for the first cooling account instead of
+/// answering 429. Short resets ride out inside the request so the agent turn
+/// keeps going; anything longer surfaces as a 429 with the earliest reset,
+/// which the client retries on its own.
+const MAX_ROTATION_WAIT_MS: u64 = 120_000;
+
 /// Current account first, then the saved order. Every account gets at most one
 /// provider call per request, even if a very short cooldown expires meanwhile.
 fn eligible<'a>(
@@ -165,6 +171,32 @@ fn eligible<'a>(
         .filter(ready)
         .find(|a| a.id == current)
         .or_else(|| list.iter().find(ready))
+}
+
+/// Earliest time any account stops cooling down, or `None` when nothing is
+/// cooling. Per account the longest matching cooldown wins; across accounts
+/// the first one to lapse wins.
+fn first_release(
+    list: &[Account],
+    cooldowns: &[Cooldown],
+    provider: &str,
+    model: &str,
+    now: u64,
+) -> Option<u64> {
+    list.iter()
+        .filter_map(|a| {
+            cooldowns
+                .iter()
+                .filter(|c| {
+                    c.provider == provider
+                        && c.account == a.id
+                        && c.model.as_deref().is_none_or(|m| m == model)
+                        && c.until_ms > now
+                })
+                .map(|c| c.until_ms)
+                .max()
+        })
+        .min()
 }
 
 fn all_limited(
@@ -265,6 +297,7 @@ async fn execute_with(
 ) -> Response {
     let mut tried = HashSet::new();
     let mut last_response = None;
+    let mut waited = false;
     let model = body.model.as_deref().unwrap_or_default();
     loop {
         let selection = (|| -> Result<_> {
@@ -301,6 +334,44 @@ async fn execute_with(
             Err(error) => return storage_error(error),
         };
         let Some(next) = next else {
+            // Nothing ready: hold the request until the first account frees
+            // up (once per request, bounded), so the turn continues on it
+            // instead of dying on a 429.
+            if !waited {
+                let now = now_ms();
+                if let Some(until) =
+                    first_release(&list, &snapshot, provider.name(), model, now)
+                    && until > now
+                {
+                    let wait = until - now;
+                    if wait <= MAX_ROTATION_WAIT_MS {
+                        waited = true;
+                        crate::logging::create_logger("auth").info(
+                            "account_wait",
+                            Some(serde_json::Map::from_iter([
+                                ("provider".into(), serde_json::json!(provider.name())),
+                                ("waitMs".into(), serde_json::json!(wait)),
+                                ("reqId".into(), serde_json::json!(&context.req_id)),
+                            ])),
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                        let fresh = match cooldowns.read() {
+                            Ok(entries) => entries,
+                            Err(error) => return storage_error(error),
+                        };
+                        let now = now_ms();
+                        tried.retain(|id| {
+                            fresh.iter().any(|c| {
+                                c.provider == provider.name()
+                                    && c.account == *id
+                                    && c.model.as_deref().is_none_or(|m| m == model)
+                                    && c.until_ms > now
+                            })
+                        });
+                        continue;
+                    }
+                }
+            }
             return all_limited(&list, &snapshot, provider.name(), model, now)
                 .or(last_response)
                 .unwrap_or_else(|| {
@@ -353,6 +424,8 @@ mod tests {
     struct Fake {
         calls: Mutex<Vec<String>>,
         limited: Vec<String>,
+        once: Vec<String>,
+        seen: Mutex<HashSet<String>>,
         retry: Option<&'static str>,
         status: StatusCode,
     }
@@ -390,8 +463,13 @@ mod tests {
         async fn handle_messages(&self, _: MessagesRequest, ctx: RequestContext) -> Response {
             let id = ctx.account.unwrap();
             self.calls.lock().unwrap().push(id.clone());
+            let mut fail = self.limited.contains(&id);
+            if self.once.contains(&id) && !self.seen.lock().unwrap().contains(&id) {
+                self.seen.lock().unwrap().insert(id.clone());
+                fail = true;
+            }
             let mut response = Response::new(axum::body::Body::from("reply"));
-            if self.limited.contains(&id) {
+            if fail {
                 *response.status_mut() = self.status;
                 if let Some(retry) = self.retry {
                     response
@@ -440,6 +518,8 @@ mod tests {
         Fake {
             calls: Mutex::new(vec![]),
             limited,
+            once: Vec::new(),
+            seen: Mutex::new(HashSet::new()),
             retry,
             status,
         }
@@ -467,6 +547,24 @@ mod tests {
             *fake.calls.lock().unwrap(),
             [list[0].id.clone(), list[1].id.clone(), list[1].id.clone()]
         );
+    }
+
+    #[tokio::test]
+    async fn all_limited_waits_for_the_first_release_and_continues() {
+        let (_dir, accounts, cooldowns, list) = fixture();
+        let fake = Fake {
+            calls: Mutex::new(vec![]),
+            limited: Vec::new(),
+            once: list.iter().map(|a| a.id.clone()).collect(),
+            seen: Mutex::new(HashSet::new()),
+            retry: Some("2"),
+            status: StatusCode::TOO_MANY_REQUESTS,
+        };
+        let response = call(&fake, &accounts, &cooldowns).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        // Both accounts 429 once, the request waits ~2s for the first
+        // release, then continues on the freed account.
+        assert_eq!(fake.calls.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]
