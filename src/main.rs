@@ -83,7 +83,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Attach a read-only dashboard to a running proxy
+    /// Open accounts, rotation controls and live activity for a running proxy
     Monitor {
         #[arg(long)]
         url: Option<reqwest::Url>,
@@ -325,7 +325,7 @@ fn run() -> Result<()> {
                 client,
                 url.clone(),
             ))?;
-            tui::run_attached_monitor(|| monitor.snapshot(), url.to_string())?;
+            tui::run_attached_monitor(|| monitor.snapshot(), url.to_string(), !from_flag)?;
             Ok(())
         }
         Commands::Models { command } => {
@@ -566,6 +566,7 @@ fn heals_first(command: &Commands) -> bool {
             }
             | Commands::Version
             | Commands::Demo
+            | Commands::Monitor { url: Some(_) }
             | Commands::Claude { .. }
     )
 }
@@ -763,7 +764,7 @@ fn serve_with_monitor(target: Option<&str>, port: Option<u16>) -> Result<()> {
     let local_addr = listener.local_addr()?;
     let ip = local_addr.ip().to_string();
     set_route(pick, &daemon::client_url(&ip, local_addr.port()))?;
-    let monitor_listen_url = listen_url(&ip, local_addr.port());
+    let monitor_listen_url = daemon::client_url(&ip, local_addr.port());
     let server_monitor = monitor.clone();
     let server_task = runtime.spawn(async move {
         let result = server::serve_listener(listener, Some(server_monitor), async move {
@@ -1301,6 +1302,13 @@ mod tests {
         let command = cli.command.unwrap();
         assert!(matches!(command, Commands::Claude { .. }));
         assert!(!heals_first(&command));
+    }
+
+    #[test]
+    fn explicit_monitor_connections_never_heal_local_routing() {
+        let cli = Cli::try_parse_from(["cc-proxy", "monitor", "--url", "http://127.0.0.1:19999"])
+            .unwrap();
+        assert!(!heals_first(&cli.command.unwrap()));
     }
 
     #[test]

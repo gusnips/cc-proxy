@@ -1,3 +1,4 @@
+mod controls;
 mod layout;
 mod providers;
 
@@ -17,7 +18,7 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -25,7 +26,7 @@ use jiff::{Timestamp, Zoned, tz::TimeZone};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
@@ -86,15 +87,21 @@ pub fn run_monitor(
 pub fn run_attached_monitor(
     snapshot: impl FnMut() -> SnapshotUpdate,
     listen_url: String,
+    local: bool,
 ) -> Result<MonitorExit, anyhow::Error> {
     let setup_text = format!(
-        "Attached to {listen_url}\nClosing this dashboard leaves the proxy running.\nConfigure providers and authentication in the proxy service."
+        "Attached to {listen_url}\nClosing the monitor leaves the proxy running.\nUse the Accounts tab to manage a local proxy. Explicit --url connections are read-only."
     );
     run_monitor_loop(
         snapshot,
         UiSession {
             listen_url,
             setup_text,
+            accounts_mode: if local {
+                providers::Mode::Local
+            } else {
+                providers::Mode::Remote
+            },
             shutdown: None,
             shutdown_complete: None,
         },
@@ -108,6 +115,7 @@ pub fn run_mock_monitor(port: u16, registry: &Registry) -> Result<(), anyhow::Er
         UiSession {
             listen_url: "mock://tui-demo".to_string(),
             setup_text: mock_setup_text(port, registry),
+            accounts_mode: providers::Mode::Demo,
             shutdown: None,
             shutdown_complete: None,
         },
@@ -118,6 +126,7 @@ pub fn run_mock_monitor(port: u16, registry: &Registry) -> Result<(), anyhow::Er
 struct UiSession {
     listen_url: String,
     setup_text: String,
+    accounts_mode: providers::Mode,
     shutdown: Option<oneshot::Sender<()>>,
     shutdown_complete: Option<mpsc::Receiver<()>>,
 }
@@ -127,6 +136,7 @@ impl From<MonitorUiConfig<'_>> for UiSession {
         Self {
             setup_text: setup_text(config.port, config.registry),
             listen_url: config.listen_url,
+            accounts_mode: providers::Mode::Local,
             shutdown: config.shutdown,
             shutdown_complete: config.shutdown_complete,
         }
@@ -144,12 +154,18 @@ fn run_monitor_loop(
         setup_text: config.setup_text,
         show_setup: false,
         show_help: false,
-        show_providers: false,
-        providers: ProvidersPanel::default(),
+        page: if config.accounts_mode == providers::Mode::Remote {
+            Page::Activity
+        } else {
+            Page::Accounts
+        },
+        accounts_mode: config.accounts_mode,
+        providers: ProvidersPanel::new(config.accounts_mode),
         detail: None,
         focus: FocusPane::Sessions,
         selected: 0,
         recent_selected: 0,
+        connected: true,
         tick: 0,
         phase: MonitorPhase::Running,
         shutdown: config.shutdown,
@@ -177,9 +193,10 @@ fn run_monitor_events(
     loop {
         let update = snapshot();
         let state = update.snapshot();
+        app.connected = update.connection_error().is_none();
         app.clamp_selection(state.sessions.len(), state.recent.len());
         app.tick = app.tick.wrapping_add(1);
-        if app.show_providers {
+        if app.page == Page::Accounts {
             app.providers.refresh();
         }
         terminal.draw(|frame| {
@@ -204,7 +221,7 @@ fn run_monitor_events(
         }
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
-                Event::Key(key) => match key.code {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Char('q') if app.is_attached() => return Ok(MonitorExit::Detached),
                     KeyCode::Char('c')
                         if app.is_attached() && key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -226,18 +243,31 @@ fn run_monitor_events(
                         app.cancel_shutdown_confirmation()
                     }
                     _ if app.phase == MonitorPhase::ConfirmingShutdown => {}
+                    KeyCode::Esc => {
+                        if let Some(exit) = app.handle_escape() {
+                            return Ok(exit);
+                        }
+                    }
                     KeyCode::Char('q') => app.request_shutdown_confirmation(),
                     KeyCode::Char('?') => app.show_help = !app.show_help,
+                    _ if app.show_help => {}
                     KeyCode::Char('b') => app.show_setup = !app.show_setup,
-                    KeyCode::Char('p') => app.show_providers = !app.show_providers,
-                    KeyCode::Down | KeyCode::Char('j') if app.show_providers => {
-                        app.providers.scroll(true)
+                    _ if app.show_setup => {}
+                    _ if app.page == Page::Accounts && app.providers.menu_open() => {
+                        if let Some(action) = app.providers.press(key.code) {
+                            run_account_action(terminal, app, state, action)?;
+                        }
                     }
-                    KeyCode::Up | KeyCode::Char('k') if app.show_providers => {
-                        app.providers.scroll(false)
+                    KeyCode::Char('1') | KeyCode::Char('p') => app.page = Page::Accounts,
+                    KeyCode::Char('2') => app.page = Page::Activity,
+                    KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                        app.page = app.page.next();
                     }
-                    KeyCode::Char('r') if app.show_providers => app.providers.retry(),
-                    KeyCode::Tab => app.focus = app.focus.next(),
+                    _ if app.page == Page::Accounts => {
+                        if let Some(action) = app.providers.press(key.code) {
+                            run_account_action(terminal, app, state, action)?;
+                        }
+                    }
                     KeyCode::Down => app.move_down(state.sessions.len(), state.recent.len(), true),
                     KeyCode::Char('j') => {
                         app.move_down(state.sessions.len(), state.recent.len(), false)
@@ -246,8 +276,6 @@ fn run_monitor_events(
                     KeyCode::Char('k') => {
                         app.move_up(state.sessions.len(), state.recent.len(), false)
                     }
-                    KeyCode::Right => app.focus = FocusPane::Recent,
-                    KeyCode::Left => app.focus = FocusPane::Sessions,
                     KeyCode::Enter => {
                         app.detail = match app.focus {
                             FocusPane::Sessions if !state.sessions.is_empty() => {
@@ -257,11 +285,6 @@ fn run_monitor_events(
                                 Some(DetailView::Request)
                             }
                             _ => None,
-                        }
-                    }
-                    KeyCode::Esc => {
-                        if let Some(exit) = app.handle_escape() {
-                            return Ok(exit);
                         }
                     }
                     _ => {}
@@ -279,11 +302,17 @@ enum FocusPane {
     Recent,
 }
 
-impl FocusPane {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Page {
+    Accounts,
+    Activity,
+}
+
+impl Page {
     fn next(self) -> Self {
         match self {
-            Self::Sessions => Self::Recent,
-            Self::Recent => Self::Sessions,
+            Self::Accounts => Self::Activity,
+            Self::Activity => Self::Accounts,
         }
     }
 }
@@ -306,12 +335,14 @@ struct MonitorApp {
     setup_text: String,
     show_setup: bool,
     show_help: bool,
-    show_providers: bool,
+    page: Page,
+    accounts_mode: providers::Mode,
     providers: ProvidersPanel,
     detail: Option<DetailView>,
     focus: FocusPane,
     selected: usize,
     recent_selected: usize,
+    connected: bool,
     tick: usize,
     phase: MonitorPhase,
     shutdown: Option<oneshot::Sender<()>>,
@@ -325,11 +356,11 @@ impl MonitorApp {
     fn handle_escape(&mut self) -> Option<MonitorExit> {
         if self.show_help {
             self.show_help = false;
-        } else if self.show_providers {
-            self.show_providers = false;
         } else if self.show_setup {
             self.show_setup = false;
-        } else if self.detail.take().is_none() {
+        } else if self.page == Page::Accounts && self.providers.close_menu() {
+            // Back from an action goes to the same account.
+        } else if self.page != Page::Activity || self.detail.take().is_none() {
             if self.is_attached() {
                 return Some(MonitorExit::Detached);
             }
@@ -456,54 +487,81 @@ pub(crate) fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, any
     Ok(terminal)
 }
 
+pub(crate) fn suspend_terminal() -> anyhow::Result<()> {
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen)?;
+    Ok(())
+}
+
+pub(crate) fn resume_terminal(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> anyhow::Result<()> {
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    terminal.clear()?;
+    Ok(())
+}
+
+fn run_account_action(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut MonitorApp,
+    state: &MonitorSnapshot,
+    action: controls::Action,
+) -> anyhow::Result<()> {
+    match app.accounts_mode {
+        providers::Mode::Remote => return Ok(()),
+        providers::Mode::Demo => {
+            app.providers.preview_action(&action);
+            return Ok(());
+        }
+        providers::Mode::Local => {}
+    }
+    if !app.connected {
+        app.providers.finish_action(Err(anyhow::anyhow!("The proxy connection is lost. Wait for it to reconnect before changing accounts or routing")));
+        return Ok(());
+    }
+    terminal.draw(|frame| {
+        render(frame, app, state);
+        let area = frame.area();
+        frame.render_widget(
+            Paragraph::new(" Saving...").style(Style::default().fg(TEAL).bg(BG)),
+            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        );
+    })?;
+    if action.needs_terminal() {
+        suspend_terminal()?;
+    }
+    let result = action.run(&app.listen_url);
+    if action.needs_terminal() {
+        // Always restore the monitor, including a cancelled sign-in.
+        resume_terminal(terminal)?;
+    }
+    app.providers.finish_action(result);
+    Ok(())
+}
+
 fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorSnapshot) {
     let area = frame.area();
     frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
-    let root = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Percentage(30),
-            Constraint::Percentage(20),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    render_header(frame, root[0], app, state);
-    match app.detail {
-        Some(DetailView::Session) => render_session_detail(frame, root[1], state, app.selected),
-        Some(DetailView::Request) => {
-            render_request_detail(frame, root[1], state, app.recent_selected)
-        }
-        None => render_sessions(
-            frame,
-            root[1],
-            &state.sessions,
-            app.selected,
-            app.focus == FocusPane::Sessions,
-            state.snapshot_at,
-        ),
+    let [header, tabs, body, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    render_header(frame, header, app, state);
+    render_tabs(frame, tabs, app.page);
+    if app.page == Page::Accounts {
+        app.providers.render(frame, body);
+    } else {
+        render_activity(frame, body, app, state);
     }
-    render_active(frame, root[2], &state.active, app.tick);
-    render_recent(
-        frame,
-        root[3],
-        &state.recent,
-        app.recent_selected,
-        app.focus == FocusPane::Recent,
-        state.snapshot_at,
-    );
-    render_events(frame, root[4], &state.recent);
-    render_footer(frame, root[5], app);
+    render_footer(frame, footer, app);
 
     if app.show_setup {
         render_setup_overlay(frame, area, &app.setup_text);
-    }
-    if app.show_providers {
-        providers::render_overlay(frame, area, &app.providers);
     }
     if app.show_help {
         render_help_overlay(frame, area, app.is_attached());
@@ -515,6 +573,72 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
     }
 }
 
+fn render_tabs(frame: &mut ratatui::Frame<'_>, area: Rect, page: Page) {
+    let tabs = [
+        (Page::Accounts, " 1 Accounts "),
+        (Page::Activity, " 2 Activity "),
+    ];
+    frame.render_widget(
+        Paragraph::new(Line::from(
+            tabs.into_iter()
+                .map(|(tab, label)| {
+                    Span::styled(
+                        label,
+                        if page == tab {
+                            Style::default()
+                                .fg(TEAL)
+                                .bg(SELECTED_BG)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(DIM_WHITE)
+                        },
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )),
+        area,
+    );
+}
+
+fn render_activity(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &mut MonitorApp,
+    state: &MonitorSnapshot,
+) {
+    let root = Layout::vertical([
+        Constraint::Percentage(30),
+        Constraint::Percentage(20),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+    ])
+    .split(area);
+    match app.detail {
+        Some(DetailView::Session) => render_session_detail(frame, root[0], state, app.selected),
+        Some(DetailView::Request) => {
+            render_request_detail(frame, root[0], state, app.recent_selected)
+        }
+        None => render_sessions(
+            frame,
+            root[0],
+            &state.sessions,
+            app.selected,
+            app.focus == FocusPane::Sessions,
+            state.snapshot_at,
+        ),
+    }
+    render_active(frame, root[1], &state.active, app.tick);
+    render_recent(
+        frame,
+        root[2],
+        &state.recent,
+        app.recent_selected,
+        app.focus == FocusPane::Recent,
+        state.snapshot_at,
+    );
+    render_events(frame, root[3], &state.recent);
+}
+
 fn render_header(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -522,6 +646,42 @@ fn render_header(
     state: &MonitorSnapshot,
 ) {
     let (face, mood) = header_face(app, state);
+    if app.page == Page::Accounts {
+        let status = if app.phase == MonitorPhase::ShuttingDown {
+            "Shutting down"
+        } else if !app.connected {
+            "Disconnected: retrying"
+        } else if app.accounts_mode == providers::Mode::Demo {
+            "Demo: no proxy connection"
+        } else if mood == Mood::Unsure {
+            "Recent request failed (2 Activity)"
+        } else if state.active.is_empty() {
+            "Ready for requests"
+        } else {
+            "Serving requests"
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!(" {face} cc-proxy "),
+                    Style::default()
+                        .fg(BG)
+                        .bg(mood.color())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "  {status}  {} active  up {}",
+                        state.active.len(),
+                        ui::duration(state.uptime)
+                    ),
+                    Style::default().fg(WHITE),
+                ),
+            ])),
+            area,
+        );
+        return;
+    }
     let label = Style::default().fg(DIM);
     let value = Style::default().fg(WHITE).add_modifier(Modifier::BOLD);
     let left = Line::from(vec![
@@ -602,7 +762,7 @@ fn header_face(app: &MonitorApp, state: &MonitorSnapshot) -> (&'static str, Mood
     });
     if app.phase == MonitorPhase::ShuttingDown {
         (Mood::Asleep.face(), Mood::Asleep)
-    } else if recent_error {
+    } else if !app.connected || recent_error {
         (Mood::Unsure.face(), Mood::Unsure)
     } else if !state.active.is_empty() {
         (["•ω•", "•o•"][app.tick % 2], Mood::Awake)
@@ -1725,36 +1885,22 @@ fn detail_line<'a>(label: &'static str, value: impl Into<String>, value_color: C
 }
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
-    let keys = [
-        ("Esc", "back / close"),
-        (
-            "q",
-            if app.is_attached() {
-                "close"
-            } else {
-                "stop proxy"
-            },
-        ),
-        ("?", "help"),
-        ("b", "setup"),
-        ("p", "accounts/providers"),
-        ("↑↓ j k", "navigate"),
-        ("Tab", "pane"),
-        ("Enter", "open"),
-    ];
-    let mut spans = vec![Span::raw(" ")];
-    for (key, label) in keys {
-        spans.push(Span::styled(
-            format!(" {key} "),
-            Style::default().fg(WHITE).bg(SELECTED_BG),
-        ));
-        spans.push(Span::styled(
-            format!(" {label}  "),
-            Style::default().fg(DIM),
-        ));
-    }
+    let hint = if app.page == Page::Accounts && app.providers.menu_open() {
+        " Esc back · ↑/↓ choose · Enter run · q close"
+    } else if area.width < 80 {
+        " q close · ↑↓ move · Enter · PgDn · ?"
+    } else if app.page == Page::Accounts {
+        " ←/→ or Tab tabs · ↑/↓ move · Enter actions · PgUp/PgDn details · r refresh · ? help · q close"
+    } else {
+        " ←/→ or Tab tabs · ↑/↓ move between panes · j/k move in pane · Enter details · Esc back · ? help · q close"
+    };
+    let hint = if app.is_attached() {
+        hint.to_string()
+    } else {
+        hint.replace("q close", "q stop proxy")
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(BG)),
+        Paragraph::new(hint).style(Style::default().fg(TEAL).bg(BG)),
         area,
     );
 }
@@ -1833,8 +1979,8 @@ fn render_shutdown_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, tick: usi
 }
 
 fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: bool) {
-    let width = 48.min(area.width.saturating_sub(4)).max(24);
-    let height = 12.min(area.height.saturating_sub(2)).max(8);
+    let width = 64.min(area.width);
+    let height = 16.min(area.height);
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -1869,11 +2015,14 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ),
         ("?", "toggle help"),
         ("b", "toggle setup"),
-        ("p", "accounts, usage and reset timers"),
-        ("arrows", "navigate rows and panes"),
-        ("j / k", "previous / next row"),
-        ("Tab", "switch pane"),
-        ("Enter", "open detail"),
+        ("1 / p", "providers, accounts and rotation"),
+        ("2", "sessions, requests and errors"),
+        ("← / → / Tab", "switch tab"),
+        ("↑ / ↓", "move between rows and activity panes"),
+        ("j / k", "move down / up within a pane"),
+        ("Enter", "choose an action or open details"),
+        ("PgUp/PgDn", "scroll account details"),
+        ("r", "refresh accounts and usage"),
         (
             "Esc",
             if attached {
@@ -2679,12 +2828,14 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
-            show_providers: false,
-            providers: ProvidersPanel::default(),
+            page: Page::Activity,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
             recent_selected: 0,
+            connected: true,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -2873,12 +3024,14 @@ mod tests {
             setup_text: String::new(),
             show_setup: true,
             show_help: true,
-            show_providers: true,
-            providers: ProvidersPanel::default(),
+            page: Page::Activity,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
             detail: Some(DetailView::Request),
             focus: FocusPane::Sessions,
             selected: 0,
             recent_selected: 0,
+            connected: true,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -2886,9 +3039,6 @@ mod tests {
         };
         assert_eq!(app.handle_escape(), None);
         assert!(!app.show_help);
-        assert!(app.show_providers && app.show_setup && app.detail.is_some());
-        assert_eq!(app.handle_escape(), None);
-        assert!(!app.show_providers);
         assert!(app.show_setup && app.detail.is_some());
         assert_eq!(app.handle_escape(), None);
         assert!(!app.show_setup);
@@ -2907,12 +3057,14 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
-            show_providers: false,
-            providers: ProvidersPanel::default(),
+            page: Page::Activity,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
             recent_selected: 0,
+            connected: true,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: Some(shutdown_tx),
@@ -2955,12 +3107,14 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
-            show_providers: false,
-            providers: ProvidersPanel::default(),
+            page: Page::Activity,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
             recent_selected: 0,
+            connected: true,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: Some(shutdown_tx),
@@ -2987,12 +3141,14 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
-            show_providers: false,
-            providers: ProvidersPanel::default(),
+            page: Page::Activity,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
             recent_selected: 0,
+            connected: true,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3017,12 +3173,14 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
-            show_providers: false,
-            providers: ProvidersPanel::default(),
+            page: Page::Activity,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
             recent_selected: 0,
+            connected: true,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3044,12 +3202,14 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
-            show_providers: false,
-            providers: ProvidersPanel::default(),
+            page: Page::Activity,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 10,
             recent_selected: 10,
+            connected: true,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3072,12 +3232,14 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
-            show_providers: false,
-            providers: ProvidersPanel::default(),
+            page: Page::Activity,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 1,
             recent_selected: 0,
+            connected: true,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3100,12 +3262,14 @@ mod tests {
             setup_text: String::new(),
             show_setup: false,
             show_help: false,
-            show_providers: false,
-            providers: ProvidersPanel::default(),
+            page: Page::Activity,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 1,
             recent_selected: 0,
+            connected: true,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,

@@ -8,14 +8,9 @@
 //! to undo when you close the screen.
 
 use anyhow::Result;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
+    Frame,
     layout::{Constraint, Layout},
     style::{Modifier, Style},
     text::{Line, Span},
@@ -523,19 +518,6 @@ fn saved_line(key: &ConfigKey, applied: &Applied) -> String {
     line
 }
 
-fn suspend() -> Result<()> {
-    disable_raw_mode()?;
-    execute!(std::io::stdout(), LeaveAlternateScreen)?;
-    Ok(())
-}
-
-fn resume(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
-    enable_raw_mode()?;
-    execute!(std::io::stdout(), EnterAlternateScreen)?;
-    terminal.clear()?;
-    Ok(())
-}
-
 pub(super) fn run() -> Result<()> {
     let mut screen = Screen::new(Disk);
     let mut terminal = crate::tui::setup_terminal()?;
@@ -553,10 +535,10 @@ pub(super) fn run() -> Result<()> {
             Outcome::Stay => {}
             Outcome::Quit => return Ok(()),
             Outcome::OpenFile(at) => {
-                suspend()?;
+                crate::tui::suspend_terminal()?;
                 let result = super::editor::open(at);
                 // Back on the screen even when the editor never started.
-                resume(&mut terminal)?;
+                crate::tui::resume_terminal(&mut terminal)?;
                 screen.edited(result);
             }
         }
@@ -568,7 +550,7 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
 
-    use ratatui::backend::TestBackend;
+    use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
 

@@ -10,7 +10,7 @@ A local proxy that lets Claude Code run on those plans. It starts in the backgro
 
 ## Why this one
 
-It uses plans people already pay for, not API keys. One command switches provider, and open windows follow within seconds. It writes only the `env` block of Claude Code's `settings.json`, and `cc-proxy use claude` puts everything back.
+It uses plans people already pay for and can also save API keys. One command switches provider, and open windows follow within seconds. It writes only the `env` block of Claude Code's `settings.json`, and `cc-proxy use claude` puts everything back.
 
 ## How people use it
 
@@ -18,8 +18,8 @@ Daily: run `claude` through the proxy. Rare: sign in, switch provider, choose mo
 
 ## What it can and can't do
 
-- Real: sign in with a browser or a device code, route by model name, translate streaming and tool calls, show usage for each saved Codex or Kimi account, identify request accounts in the live monitor, update itself.
-- Limits: saved accounts and opt-in rotation for Codex, Kimi, Grok and Antigravity. No fallback between different providers. Encrypted Codex history stays with its account. Each provider controls its own plans, model access and terms; unofficial clients can carry account risk (the README says so).
+- Real: sign in with a browser, device code or API key, route by model name, translate streaming and tool calls, show usage for each saved Codex or Kimi account, choose providers and accounts in the monitor, manage rotation and provider fallback, update itself.
+- Limits: rotation and provider fallback apply to Messages requests before output starts and only after a provider confirms a reset time. Encrypted Codex history stays with its account. Each provider controls its own plans, model access and terms; unofficial clients can carry account risk (the README says so). Explicit monitor `--url` connections are read-only.
 - Open: account-aware refresh and rotation for Copilot and Cursor.
 
 ## Voice and brand

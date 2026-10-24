@@ -67,6 +67,16 @@ pub fn activate(provider: &str, base_url: &str) -> Result<()> {
     config_keys::write_values([
         ("route.on", serde_json::Value::Bool(true)),
         ("route.provider", provider.into()),
+        (
+            "route.fallback",
+            serde_json::json!(
+                config::route()
+                    .fallback
+                    .into_iter()
+                    .filter(|name| name != provider)
+                    .collect::<Vec<_>>()
+            ),
+        ),
     ])?;
     refresh_model_labels();
     Ok(())
