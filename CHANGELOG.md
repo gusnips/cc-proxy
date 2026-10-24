@@ -3,6 +3,20 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.3.1 (2026-10-24)
+
+- `cc-proxy monitor` opens Accounts first. Use the arrows and Enter to choose
+  providers and saved logins, add an account, change the fallback order or turn
+  account rotation on or off. Changes apply without restarting the proxy.
+- The Activity tab keeps sessions, live requests, errors and token details.
+  Press `1` or `2` to switch tabs, or use Left, Right or Tab.
+- Selected accounts show usage and confirmed wait timers. Small terminals put
+  details below the list and show usage first. Failed actions keep their cause
+  and a retry; losing the proxy connection pauses changes.
+- Explicit `monitor --url` connections stay read-only and never read or change
+  this computer's accounts. Demo mode uses simulated accounts, so trying an
+  action cannot change real logins or settings.
+
 ## v0.3.0 (2026-10-24)
 
 - A spent account no longer reaches Claude Code as a generic 429. The proxy
@@ -55,8 +69,7 @@ description: Release notes for cc-proxy.
 
 ## v0.2.15 (2026-10-23)
 
-- Changing saved Codex accounts no longer stops an existing conversation with a
-  400. cc-proxy drops reasoning that belongs to another saved login and
+- Changing saved Codex accounts no longer stops an existing conversation with a 400. cc-proxy drops reasoning that belongs to another saved login and
   continues with the text and tool history. A foreign signature is never sent
   to another account.
 - Auto-rotate now works on conversations that carry Codex reasoning. A 429
