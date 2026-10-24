@@ -713,7 +713,7 @@ impl CliHandlers for OpenCodeCli {
     }
 
     fn login(&self) -> anyhow::Result<()> {
-        let url = "https://opencode.ai/zen";
+        let url = "https://opencode.ai/console/account";
         println!("Open {url} to get your OpenCode Go API key.");
         let _ = crate::browser::open(url);
         println!("Paste your OpenCode Go API key (input is hidden) and press Enter:");
