@@ -764,48 +764,49 @@ pub fn opencode_base_url() -> String {
     resolve_opencode_config(&env, &paths::config_dir()).base_url
 }
 
-pub fn opencode_zen_api_key_source() -> Option<&'static str> {
+/// The environment variable that pins the Zen credential, if one is set.
+pub fn opencode_zen_env_key_source() -> Option<&'static str> {
     let env: HashMap<_, _> = std::env::vars().collect();
     if env
         .get("CCP_OPENCODE_ZEN_API_KEY")
-        .is_some_and(|v| !v.is_empty())
+        .is_some_and(|v| !v.trim().is_empty())
     {
         return Some("CCP_OPENCODE_ZEN_API_KEY");
     }
     if env
         .get("OPENCODE_ZEN_API_KEY")
-        .is_some_and(|v| !v.is_empty())
-    {
-        return Some("OPENCODE_ZEN_API_KEY");
-    }
-    let file = read_file_config(&paths::config_dir()).and_then(|f| f.opencode_zen);
-    if file
-        .and_then(|c| c.api_key)
         .is_some_and(|v| !v.trim().is_empty())
     {
-        return Some("config.json");
+        return Some("OPENCODE_ZEN_API_KEY");
     }
     None
 }
 
-pub fn opencode_zen_api_key() -> Option<String> {
-    let env: HashMap<_, _> = std::env::vars().collect();
-    if let Some(v) = env
-        .get("CCP_OPENCODE_ZEN_API_KEY")
+/// The environment key, for a provider that reads it directly.
+pub fn opencode_zen_env_key() -> Option<String> {
+    std::env::var(opencode_zen_env_key_source()?)
+        .ok()
         .filter(|v| !v.trim().is_empty())
-    {
-        return Some(v.clone());
-    }
-    if let Some(v) = env
-        .get("OPENCODE_ZEN_API_KEY")
-        .filter(|v| !v.trim().is_empty())
-    {
-        return Some(v.clone());
-    }
+}
+
+/// The key kept in `config.json`, ignoring the environment. This is the login
+/// Zen had before accounts existed, and what the migration moves into `main`.
+pub fn opencode_zen_saved_key() -> Option<String> {
     read_file_config(&paths::config_dir())
         .and_then(|f| f.opencode_zen)
         .and_then(|c| c.api_key)
         .filter(|v| !v.trim().is_empty())
+}
+
+pub fn opencode_zen_api_key_source() -> Option<&'static str> {
+    if let Some(source) = opencode_zen_env_key_source() {
+        return Some(source);
+    }
+    opencode_zen_saved_key().map(|_| "config.json")
+}
+
+pub fn opencode_zen_api_key() -> Option<String> {
+    opencode_zen_env_key().or_else(opencode_zen_saved_key)
 }
 
 pub fn opencode_zen_base_url() -> String {

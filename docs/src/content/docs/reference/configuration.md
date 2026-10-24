@@ -81,8 +81,9 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 
 ## Saved accounts and auto-rotate
 
-Codex, Kimi, Grok and Antigravity can keep more than one login. Add an account with
-`cc-proxy auth add codex`, then choose it with `cc-proxy auth use codex`.
+Codex, Kimi, Grok, Antigravity and OpenCode Zen can keep more than one login.
+Add an account with `cc-proxy auth add codex`, then choose it with
+`cc-proxy auth use codex`.
 These commands do not restart the proxy. After signing in to Antigravity,
 run `cc-proxy models refresh antigravity` to fetch the current account's model
 list. Adding another account does not replace that shared list.

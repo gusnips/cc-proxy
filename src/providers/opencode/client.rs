@@ -156,10 +156,16 @@ impl OpenCodeClient {
     /// This client, sending no key. OpenCode Zen's free tier needs none and
     /// refuses a stale one with "Invalid credential".
     pub fn anonymous(&self) -> Self {
+        self.with_key(None)
+    }
+
+    /// This client, sending `api_key` on every request instead of whatever
+    /// source it was built with. Used for the account a request selected.
+    pub fn with_key(&self, api_key: Option<String>) -> Self {
         Self {
             client: self.client.clone(),
             base_url: self.base_url.clone(),
-            api_key: Box::new(|| None),
+            api_key: Box::new(move || api_key.clone()),
         }
     }
 
@@ -964,6 +970,31 @@ mod tests {
         send().await.unwrap().into_bytes().await.unwrap();
         server.abort();
         assert_eq!(seen.lock().unwrap()[0].x_api_key, "saved-later");
+    }
+
+    #[tokio::test]
+    async fn a_request_can_carry_the_token_of_the_account_it_selected() {
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let (address, server) = serve_capture(seen.clone()).await;
+        let client =
+            OpenCodeClient::new(format!("http://{address}"), Some("original".to_string())).unwrap();
+        client
+            .with_key(Some("account-token".to_string()))
+            .post(
+                EndpointKind::Messages,
+                &serde_json::json!({"model": "claude-opus-5-5", "messages": []}),
+                false,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .into_bytes()
+            .await
+            .unwrap();
+        server.abort();
+
+        assert_eq!(seen.lock().unwrap()[0].x_api_key, "account-token");
     }
 
     #[tokio::test]

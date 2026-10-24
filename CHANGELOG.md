@@ -3,6 +3,23 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.17 (2026-10-24)
+
+- `cc-proxy auth login opencode-zen` now opens the Console's device approval
+  page. The Console returns that page as a path relative to its origin
+  (`/console/device?user_code=…`), and the previous fix glued it onto the
+  console path, producing `/console/console/device` and landing on the wrong
+  page. It is resolved the same way the browser resolves it, matching
+  OpenCode's own client and tabrunner.
+- OpenCode Zen keeps more than one account. `cc-proxy auth add opencode-zen`
+  signs in another one, `cc-proxy auth use opencode-zen <name>` switches, and
+  with `auth.autoRotate` on, a rate-limited account hands the turn to the next
+  saved one. Each account keeps its own token and refresh token, and a token
+  about to expire is renewed before the request goes out. A key in
+  `CCP_OPENCODE_ZEN_API_KEY` / `OPENCODE_ZEN_API_KEY` still pins the credential
+  and turns rotation off. An API key already saved in `config.json` becomes the
+  `main` account on first use.
+
 ## v0.2.16 (2026-10-24)
 
 - `cc-proxy update --force` reinstalls the latest release even when the

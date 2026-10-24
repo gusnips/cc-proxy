@@ -5,6 +5,7 @@ pub mod messages;
 pub mod model;
 pub mod responses;
 pub mod usage;
+pub mod zen;
 
 use std::sync::Arc;
 
@@ -113,14 +114,26 @@ impl OpenCodeProvider {
         self.zen.then_some(body.anthropic_beta.as_deref()).flatten()
     }
 
-    /// OpenCode Zen's free models take no key, and refuse a stale one.
-    fn client_for(&self, model_id: &str) -> Result<Arc<OpenCodeClient>, String> {
+    /// OpenCode Zen's free models take no key, and refuse a stale one. Every
+    /// other Zen call carries the selected account's token, so switching
+    /// accounts switches the key.
+    async fn client_for(
+        &self,
+        model_id: &str,
+        account: Option<&str>,
+    ) -> Result<Arc<OpenCodeClient>, String> {
         let client = self.client()?;
-        Ok(if self.zen && model::is_zen_free_model(model_id) {
-            Arc::new(client.anonymous())
-        } else {
-            client
-        })
+        if !self.zen {
+            return Ok(client);
+        }
+        if model::is_zen_free_model(model_id) {
+            return Ok(Arc::new(client.anonymous()));
+        }
+        match zen::access_token(account).await {
+            Ok(Some(token)) => Ok(Arc::new(client.with_key(Some(token)))),
+            Ok(None) => Ok(client),
+            Err(error) => Err(format!("can't read the Zen sign-in: {error:#}")),
+        }
     }
 
     fn prepare_chat(
@@ -141,8 +154,13 @@ impl OpenCodeProvider {
     async fn buffered_messages_response(
         &self,
         mut body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Response {
+        if self.zen
+            && let Err(error) = ctx.pin_account(&OPENCODE_ZEN_CLI)
+        {
+            return error.response();
+        }
         let requested_model = body.model.clone().unwrap_or_default();
         let requested = requested_model.as_str();
         let Some(spec) = self.resolve_spec(requested) else {
@@ -151,7 +169,7 @@ impl OpenCodeProvider {
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, spec.id.as_str());
         }
-        let client = match self.client_for(&spec.id) {
+        let client = match self.client_for(&spec.id, ctx.account.as_deref()).await {
             Ok(client) => client,
             Err(error) => return invalid_configuration_response(error),
         };
@@ -389,8 +407,11 @@ impl Provider for OpenCodeProvider {
     async fn generate_anthropic_stream(
         &self,
         mut body: MessagesRequest,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<Generation, ProviderError> {
+        if self.zen {
+            ctx.pin_account(&OPENCODE_ZEN_CLI)?;
+        }
         body.stream = true;
         let requested_model = body.model.clone().unwrap_or_default();
         let requested = requested_model.as_str();
@@ -401,13 +422,16 @@ impl Provider for OpenCodeProvider {
                 format!("Unsupported {} model: {requested}", self.label()),
             )
         })?;
-        let client = self.client_for(&spec.id).map_err(|error| {
-            ProviderError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ProviderErrorKind::Api,
-                format!("Invalid {} configuration: {error}", self.label()),
-            )
-        })?;
+        let client = self
+            .client_for(&spec.id, ctx.account.as_deref())
+            .await
+            .map_err(|error| {
+                ProviderError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ProviderErrorKind::Api,
+                    format!("Invalid {} configuration: {error}", self.label()),
+                )
+            })?;
 
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, spec.id.as_str());
@@ -766,118 +790,78 @@ static OPENCODE_CLI: OpenCodeCli = OpenCodeCli;
 
 struct OpenCodeZenCli;
 
+impl crate::accounts::AccountSupport for OpenCodeZenCli {
+    fn sign_in(&self, _device: bool) -> anyhow::Result<serde_json::Value> {
+        // Zen has one sign-in: the Console's device code, which carries the
+        // approval URL. There is no browser redirect or key paste.
+        let login = zen::login()?;
+        Ok(serde_json::to_value(login)?)
+    }
+
+    fn identity(&self, login: &serde_json::Value) -> Option<String> {
+        let auth: zen::StoredAuth = serde_json::from_value(login.clone()).ok()?;
+        zen::identity(&auth)
+    }
+
+    fn state(&self, login: &serde_json::Value) -> crate::provider::AuthState {
+        match serde_json::from_value::<zen::StoredAuth>(login.clone()) {
+            Ok(auth) => crate::provider::AuthState::SignedIn {
+                account: zen::identity(&auth),
+                expires_ms: (auth.expires_at_ms > 0).then_some(auth.expires_at_ms),
+            },
+            Err(_) => crate::provider::AuthState::Missing,
+        }
+    }
+
+    fn single_login(&self) -> Box<dyn crate::auth::AuthStorage<serde_json::Value>> {
+        Box::new(zen::LegacyKeyStore::new())
+    }
+
+    fn pinned_credentials(&self) -> Option<&'static str> {
+        crate::config::opencode_zen_env_key_source()
+    }
+}
+
 impl CliHandlers for OpenCodeZenCli {
     fn auth_state(&self) -> crate::provider::AuthState {
-        if crate::config::opencode_zen_api_key().is_some() {
-            crate::provider::AuthState::KeySaved
-        } else {
-            crate::provider::AuthState::Missing
+        if crate::config::opencode_zen_env_key_source().is_some() {
+            return crate::provider::AuthState::KeySaved;
         }
+        crate::accounts::Accounts::current_state("opencode-zen", self)
     }
 
     fn login(&self) -> anyhow::Result<()> {
-        // Zen signs in with Console OAuth like the opencode CLI does; the
-        // verification URL carries the code, so no API key paste is needed.
-        self.device()
+        crate::auth_cli::AccountCli::open("opencode-zen", self)?.login(&Default::default())
     }
 
     fn device(&self) -> anyhow::Result<()> {
-        use std::time::{Duration, Instant};
-        let console = std::env::var("CCP_OPENCODE_CONSOLE_URL")
-            .unwrap_or_else(|_| "https://opencode.ai/console".to_string());
-        let console = console.trim_end_matches('/');
-        let client = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .user_agent("opencode/latest/2.0.32/cli")
-            .build()?;
-        let device: serde_json::Value = client
-            .post(format!("{console}/auth/device/code"))
-            .header("Accept", "application/json")
-            .json(&serde_json::json!({
-                "client_id": "opencode-cli",
-                "supports_org_scope": true
-            }))
-            .send()?
-            .error_for_status()?
-            .json()?;
-        let device_code = device["device_code"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing device_code from OpenCode Console"))?;
-        let user_code = device["user_code"].as_str().unwrap_or_default();
-        // The console returns a relative path here
-        // (`/console/device?user_code=...&client_id=...`); resolve it against
-        // the console base so the browser gets an absolute URL.
-        let raw_uri = device["verification_uri_complete"]
-            .as_str()
-            .or_else(|| device["verification_uri"].as_str())
-            .unwrap_or("https://opencode.ai/console");
-        let uri = if raw_uri.starts_with("http://") || raw_uri.starts_with("https://") {
-            raw_uri.to_string()
-        } else {
-            format!("{console}{raw_uri}")
-        };
-        let interval = device["interval"].as_u64().unwrap_or(5).max(1);
-        let expires_in = device["expires_in"].as_u64().unwrap_or(600);
-
-        println!("Open this URL to sign in to OpenCode Console:");
-        println!("  {uri}");
-        if !user_code.is_empty() {
-            println!("Enter code: {user_code}");
-        }
-        let _ = crate::browser::open(&uri);
-
-        let deadline = Instant::now() + Duration::from_secs(expires_in);
-        let mut wait = Duration::from_secs(interval);
-        while Instant::now() < deadline {
-            std::thread::sleep(wait);
-            let resp = client
-                .post(format!("{console}/auth/device/token"))
-                .header("Accept", "application/json")
-                .json(&serde_json::json!({
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                    "device_code": device_code,
-                    "client_id": "opencode-cli"
-                }))
-                .send()?;
-            let body: serde_json::Value = resp.json().unwrap_or_default();
-            if let Some(token) = body["access_token"].as_str().filter(|s| !s.is_empty()) {
-                let path = crate::config::save_opencode_zen_api_key(token)?;
-                println!(
-                    "Signed in to OpenCode Zen. Token saved to {}",
-                    path.display()
-                );
-                return Ok(());
-            }
-            match body["error"].as_str() {
-                Some("authorization_pending") => continue,
-                Some("slow_down") => {
-                    wait += Duration::from_secs(5);
-                }
-                Some(err) => anyhow::bail!("OpenCode device sign-in failed: {err}"),
-                None => anyhow::bail!("Unexpected response from OpenCode Console"),
-            }
-        }
-        anyhow::bail!("OpenCode device sign-in timed out")
+        crate::auth_cli::AccountCli::open("opencode-zen", self)?.login(
+            &crate::auth_cli::LoginOptions {
+                device: true,
+                ..Default::default()
+            },
+        )
     }
 
     fn status(&self) -> anyhow::Result<()> {
-        let Some(source) = crate::config::opencode_zen_api_key_source() else {
-            anyhow::bail!("Not authenticated");
-        };
-        println!("API key configured: true");
-        println!("Source: {source}");
+        crate::auth_cli::AccountCli::open("opencode-zen", self)?.status()?;
         println!("Base URL: {}", crate::config::opencode_zen_base_url());
         Ok(())
     }
 
     fn logout(&self) -> anyhow::Result<()> {
-        if crate::config::clear_opencode_zen_api_key()? {
-            println!("OpenCode Zen stored key cleared.");
-        } else {
-            println!("No stored OpenCode Zen key in config.json.");
+        crate::auth_cli::AccountCli::open("opencode-zen", self)?.logout(None, false)?;
+        if crate::config::opencode_zen_env_key_source().is_some() {
+            println!(
+                "Unset {} to stop using the environment key.",
+                crate::config::opencode_zen_env_key_source().unwrap_or("OPENCODE_ZEN_API_KEY")
+            );
         }
         Ok(())
+    }
+
+    fn accounts(&self) -> Option<&dyn crate::accounts::AccountSupport> {
+        Some(self)
     }
 }
 
@@ -916,6 +900,14 @@ mod tests {
     fn context_with_session(session_id: &str) -> RequestContext {
         RequestContext {
             session_id: Some(session_id.to_string()),
+            ..context()
+        }
+    }
+
+    /// Zen keeps its own accounts, so the request must say `opencode-zen`.
+    fn zen_context() -> RequestContext {
+        RequestContext {
+            provider: "opencode-zen".to_string(),
             ..context()
         }
     }
@@ -1409,7 +1401,7 @@ mod tests {
         };
 
         let free = provider
-            .handle_messages(request("opencode-zen/glm-5.3-flash-free"), context())
+            .handle_messages(request("opencode-zen/glm-5.3-flash-free"), zen_context())
             .await;
         assert_eq!(free.status(), StatusCode::OK);
         let free = axum::body::to_bytes(free.into_body(), usize::MAX)
@@ -1419,7 +1411,7 @@ mod tests {
         // The model called OpenCode's `read`; Claude Code gets its own `Read`.
         assert_eq!(free["content"][0]["name"], "Read");
         let paid = provider
-            .handle_messages(request("opencode-zen/glm-5.3"), context())
+            .handle_messages(request("opencode-zen/glm-5.3"), zen_context())
             .await;
         assert_eq!(paid.status(), StatusCode::OK);
         server.abort();
@@ -1501,7 +1493,7 @@ mod tests {
         };
 
         let zen_reply = zen
-            .handle_messages(request("opencode-zen/claude-haiku-5-5"), context())
+            .handle_messages(request("opencode-zen/claude-haiku-5-5"), zen_context())
             .await;
         assert_eq!(zen_reply.status(), StatusCode::OK);
         let go_reply = go
