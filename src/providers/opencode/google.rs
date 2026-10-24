@@ -409,6 +409,56 @@ fn cut_ref_loops(schema: &Value, target: &str, safe: bool) -> Value {
     Value::Object(out)
 }
 
+/// Merges `anyOf` branches that only narrow a string enum, the one union
+/// shape CCA's Claude bridge carries over intact. Anything else widens away
+/// (returns `None`, caller emits no union).
+fn merge_string_enum_union(branches: &[Value]) -> Option<Map<String, Value>> {
+    let first_ty = branches.first()?.get("type").and_then(Value::as_str);
+    if first_ty == Some("null") {
+        return None;
+    }
+    if !branches
+        .iter()
+        .all(|b| b.get("type").and_then(Value::as_str) == first_ty)
+    {
+        return None;
+    }
+    let mut merged: Vec<String> = Vec::new();
+    for branch in branches {
+        let obj = branch.as_object()?;
+        for key in obj.keys() {
+            if key == "enum" {
+                continue;
+            }
+            if key == "type" && first_ty.is_some() {
+                continue;
+            }
+            return None;
+        }
+        let enums = obj.get("enum").and_then(Value::as_array)?;
+        for value in enums {
+            let Some(s) = value.as_str() else {
+                continue;
+            };
+            if !merged.iter().any(|e| e == s) {
+                merged.push(s.to_string());
+            }
+        }
+    }
+    if merged.is_empty() {
+        return None;
+    }
+    let mut out = Map::new();
+    if let Some(ty) = first_ty {
+        out.insert("type".to_string(), Value::String(ty.to_string()));
+    }
+    out.insert(
+        "enum".to_string(),
+        Value::Array(merged.into_iter().map(Value::String).collect()),
+    );
+    Some(out)
+}
+
 /// Sanitizes a JSON Schema to the subset Google's `parameters` field accepts
 /// (`type`, `nullable`, `description`, `format`, `enum`, `properties`,
 /// `items`, `required`, `anyOf`). Only Cloud Code Assist gets this dialect.
@@ -417,6 +467,9 @@ fn clean_json_schema(value: &Value) -> Value {
         return json!({ "type": "object" });
     };
     let mut out = Map::new();
+    // Set when a union widens away: the node stays deliberately unconstrained
+    // (an empty schema is valid), so the `type: string` fallback must not fire.
+    let mut widened = false;
     let mut nullable = map
         .get("nullable")
         .and_then(Value::as_bool)
@@ -512,10 +565,15 @@ fn clean_json_schema(value: &Value) -> Value {
         .or_else(|| map.get("oneOf"))
         .and_then(Value::as_array)
     {
+        // CCA's Claude bridge turns `anyOf` branches into an invalid
+        // `input_schema`, so a union either collapses (nullable or a merged
+        // string enum) or widens away entirely. No `anyOf` is ever emitted.
         let mut branches = Vec::new();
+        let mut saw_null = false;
         for branch in any_of {
             if branch.get("type").and_then(Value::as_str) == Some("null") {
                 out.insert("nullable".to_string(), Value::Bool(true));
+                saw_null = true;
                 continue;
             }
             branches.push(clean_json_schema(branch));
@@ -527,10 +585,18 @@ fn clean_json_schema(value: &Value) -> Value {
                 }
             }
         } else if !branches.is_empty() {
-            out.insert("anyOf".to_string(), Value::Array(branches));
+            if let Some(merged) = merge_string_enum_union(&branches) {
+                for (k, v) in merged {
+                    out.entry(k).or_insert(v);
+                }
+            } else {
+                widened = true;
+            }
+        } else if saw_null {
+            widened = true;
         }
     }
-    if !out.contains_key("type") && !out.contains_key("anyOf") {
+    if !widened && !out.contains_key("type") {
         out.insert("type".to_string(), Value::String("string".to_string()));
     }
     // `parameters` rejects an array without `items` for the whole request, so
@@ -1024,6 +1090,88 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parameters_never_emit_anyof_for_cca_claude_bridge() {
+        // SendMessage (tools.18): CCA's Claude bridge turns `anyOf` branches
+        // into an invalid `input_schema` (400, draft 2020-12), so unions must
+        // collapse or widen away, never survive.
+        let schema = declared_schema(
+            json!({
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "default": "",
+                        "anyOf": [
+                            {"type": "string", "description": "plain text"},
+                            {"anyOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"const": "shutdown_request", "type": "string"}
+                                    },
+                                    "required": ["type"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "request_id": {
+                                            "allOf": [{"pattern": "^x$"}],
+                                            "minLength": 1,
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": ["request_id"]
+                                }
+                            ]}
+                        ]
+                    },
+                    "to": {
+                        "allOf": [{"pattern": "^[^\\n\\r]*$"}],
+                        "description": "recipient",
+                        "type": "string"
+                    },
+                    "choice": {"anyOf": [
+                        {"type": "string", "enum": ["a"]},
+                        {"type": "string", "enum": ["b"]}
+                    ]},
+                    "maybe": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+                },
+                "required": ["message", "to"]
+            }),
+            ToolSchemas::OpenApi,
+        );
+        fn has_kw(v: &Value, kw: &str) -> bool {
+            match v {
+                Value::Object(m) => m.iter().any(|(k, x)| k == kw || has_kw(x, kw)),
+                Value::Array(a) => a.iter().any(|x| has_kw(x, kw)),
+                _ => false,
+            }
+        }
+        assert!(!has_kw(&schema, "anyOf"));
+        assert!(!has_kw(&schema, "oneOf"));
+        assert!(!has_kw(&schema, "allOf"));
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["message", "to"]));
+        // Nested union widens to an unconstrained empty schema node: no
+        // `type: string` fallback, no `anyOf` left for the bridge to choke on.
+        assert_eq!(schema["properties"]["message"], json!({}));
+        // `allOf`/`minLength` drop, plain type survives.
+        assert_eq!(
+            schema["properties"]["to"],
+            json!({"type": "string", "description": "recipient"})
+        );
+        // Same-type string-enum unions merge.
+        assert_eq!(
+            schema["properties"]["choice"],
+            json!({"type": "string", "enum": ["a", "b"]})
+        );
+        // Single non-null branch plus null collapses to nullable.
+        assert_eq!(
+            schema["properties"]["maybe"],
+            json!({"type": "string", "nullable": true})
+        );
+    }
 
     #[test]
     fn prepares_google_v1beta_request_and_accumulates_response() {
