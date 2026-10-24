@@ -34,19 +34,40 @@ struct AccountRow {
     name: String,
     current: bool,
     state: String,
-    usage: Option<Vec<String>>,
+    usage: Option<Vec<Line<'static>>>,
     waits: Vec<(Option<String>, u64)>,
+}
+
+impl AccountRow {
+    fn waiting_until(&self, now: u64) -> Option<u64> {
+        self.waits
+            .iter()
+            .filter(|(model, until)| model.is_none() && *until > now)
+            .map(|(_, until)| *until)
+            .max()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProviderRow {
     id: String,
     state: AuthState,
-    usage: Option<String>,
+    usage: Option<Vec<Line<'static>>>,
     accounts: Vec<AccountRow>,
     supports_accounts: bool,
     pinned: Option<String>,
     error: Option<String>,
+}
+
+impl ProviderRow {
+    fn first_reset(&self, now: u64) -> Option<(&AccountRow, u64)> {
+        self.accounts
+            .iter()
+            .map(|account| account.waiting_until(now).map(|until| (account, until)))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .min_by_key(|(_, until)| *until)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -399,20 +420,30 @@ impl ProvidersPanel {
                 format!("{}{role}", ui::provider_name(id))
             }
             Entry::Account(provider, id) => {
-                let account = self
-                    .rows
-                    .iter()
-                    .find(|row| &row.id == provider)
-                    .unwrap()
+                let row = self.rows.iter().find(|row| &row.id == provider).unwrap();
+                let account = row
                     .accounts
                     .iter()
                     .find(|account| &account.id == id)
                     .unwrap();
-                format!(
-                    "  {}{}",
-                    account.name,
-                    if account.current { " [current]" } else { "" }
-                )
+                let now = crate::rotation::now_ms();
+                let current = match (account.current, account.waiting_until(now).is_some()) {
+                    (true, true) => " [current, waiting]",
+                    (true, false) => " [current]",
+                    (false, true) => " [waiting]",
+                    (false, false) => "",
+                };
+                let first = if self.auto_rotate
+                    && row.pinned.is_none()
+                    && row
+                        .first_reset(now)
+                        .is_some_and(|(first, _)| first.id == account.id)
+                {
+                    " [first reset]"
+                } else {
+                    ""
+                };
+                format!("  {}{current}{first}", account.name)
             }
         };
         Line::from(Span::styled(text, Style::default().fg(WHITE)))
@@ -457,13 +488,12 @@ impl ProvidersPanel {
                             )
                             .into(),
                         );
-                        for line in account
-                            .usage
-                            .clone()
-                            .unwrap_or_else(|| vec!["Checking usage...".into()])
-                        {
-                            text.push(line.into());
-                        }
+                        text.extend(
+                            account
+                                .usage
+                                .clone()
+                                .unwrap_or_else(|| vec!["Checking usage...".into()]),
+                        );
                         let now = crate::rotation::now_ms();
                         for (model, until) in &account.waits {
                             if *until > now {
@@ -485,7 +515,7 @@ impl ProvidersPanel {
                     } else {
                         text.push(row.state.describe().into());
                         if let Some(usage) = &row.usage {
-                            text.push(usage.clone().into());
+                            text.extend(usage.iter().cloned());
                         }
                         text.push("".into());
                         text.push(if row.accounts.is_empty() {
@@ -496,6 +526,34 @@ impl ProvidersPanel {
                         if row.state != AuthState::Missing {
                             text.push("Use provider sends Claude Code here. Open windows follow within a few seconds.".into());
                         }
+                    }
+                    if self.auto_rotate
+                        && row.pinned.is_none()
+                        && let Some((account, until)) = row.first_reset(crate::rotation::now_ms())
+                        && let Ok(until) = i64::try_from(until)
+                        && let Ok(reset) = jiff::Timestamp::from_millisecond(until)
+                    {
+                        let reset = crate::usage::format_reset(
+                            reset,
+                            jiff::Timestamp::now(),
+                            &jiff::tz::TimeZone::system(),
+                        );
+                        text.push(Line::styled(
+                            format!("All accounts are waiting. {} {reset}.", account.name),
+                            Style::default().fg(YELLOW),
+                        ));
+                        text.push("The next request rechecks each account's limits.".into());
+                    }
+                    if row.pinned.is_none()
+                        && self
+                            .selected_account()
+                            .is_some_and(|account| account.current)
+                    {
+                        text.push(if self.auto_rotate {
+                            "Current is the saved account choice, not an active request. Auto-rotate skips it while it is waiting."
+                        } else {
+                            "Current is the saved account choice, not an active request. Auto-rotate is off, so choose another account to switch."
+                        }.into());
                     }
                 }
             }
@@ -730,17 +788,17 @@ fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
     let _ = send.send(rows);
 }
 
-fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String), Vec<String>>) {
+fn apply_account_usage(
+    rows: &mut [ProviderRow],
+    usage: &HashMap<(String, String), Vec<Line<'static>>>,
+) {
     for row in rows {
         for account in &mut row.accounts {
             let lines = usage.get(&(row.id.clone(), account.id.clone())).cloned().unwrap_or_else(|| {
                 match row.id.as_str() {
-                    "opencode" if account.current => vec![format!(
-                        "Current account usage: {}",
-                        row.usage.as_deref().unwrap_or("unavailable. Press r to retry, or run cc-proxy usage opencode.")
-                    )],
+                    "opencode" if account.current => row.usage.clone().unwrap_or_else(|| vec!["Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into()]),
                     "opencode" => vec!["OpenCode Go reports usage for the current account only.".into()],
-                    "codex" | "kimi" => vec![format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id)],
+                    "codex" | "kimi" => vec![Line::from(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id))],
                     _ => vec!["This provider does not report usage. Confirmed wait timers still appear here.".into()],
                 }
             });
@@ -767,7 +825,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                     name: "home".into(),
                     current: false,
                     state: "signed in".into(),
-                    usage: Some(vec!["5h 0% left, resets in 1h".into()]),
+                    usage: Some(vec![ui::remaining_line("5h", 0.0, ", resets in 1h")]),
                     waits: vec![(None, crate::rotation::now_ms() + 60_000)],
                 },
                 AccountRow {
@@ -776,8 +834,8 @@ fn demo_rows() -> Vec<ProviderRow> {
                     current: true,
                     state: "signed in".into(),
                     usage: Some(vec![
-                        "5h 58% left, resets in 2h".into(),
-                        "week 88% left, resets in 4d".into(),
+                        ui::remaining_line("5h", 58.0, ", resets in 2h"),
+                        ui::remaining_line("week", 88.0, ", resets in 4d"),
                     ]),
                     waits: Vec::new(),
                 },
@@ -798,7 +856,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                 name: "personal".into(),
                 current: true,
                 state: "signed in".into(),
-                usage: Some(vec!["5h 72% left, resets in 3h".into()]),
+                usage: Some(vec![ui::remaining_line("5h", 72.0, ", resets in 3h")]),
                 waits: Vec::new(),
             }],
         },
@@ -946,23 +1004,99 @@ mod tests {
                 vec!["5h 93% left".into()],
             )]),
         );
-        assert!(rows[0].accounts[0].usage.as_ref().unwrap()[0].contains("Usage unavailable"));
+        assert!(
+            rows[0].accounts[0].usage.as_ref().unwrap()[0]
+                .to_string()
+                .contains("Usage unavailable")
+        );
         assert_eq!(
             rows[0].accounts[1].usage.as_deref(),
-            Some(&["5h 93% left".to_string()][..])
+            Some(&[Line::from("5h 93% left")][..])
         );
+    }
+
+    #[test]
+    fn remaining_percentages_keep_their_color_in_the_rendered_monitor() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        panel.rows[0].accounts[1].usage = Some(
+            [100.0, 55.0, 20.0, 0.0]
+                .into_iter()
+                .map(|percent| ui::remaining_line("5h", percent, ""))
+                .collect(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+        terminal
+            .draw(|frame| panel.render(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for percent in [100.0, 55.0, 20.0, 0.0] {
+            let text = format!("5h {percent:.0}% left");
+            let (x, y) = (0..30)
+                .find_map(|y| {
+                    let row = (0..160)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>();
+                    row.find(&text)
+                        .map(|x| (row[..x].chars().count() as u16, y))
+                })
+                .unwrap();
+            assert_eq!(buffer[(x + 3, y)].fg, ui::remaining_color(percent));
+        }
+    }
+
+    #[test]
+    fn waiting_current_is_not_presented_as_the_first_account_to_reset() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        let now = crate::rotation::now_ms();
+        panel.rows[0].accounts[0].waits = vec![(None, now + 3_600_000)];
+        panel.rows[0].accounts[1].waits = vec![(None, now + 7_200_000)];
+        panel.selected = Entry::Provider("codex".into());
+        let text = render(&mut panel, 160, 30);
+        for expected in [
+            "home [waiting] [first reset]",
+            "work [current, waiting]",
+            "All accounts are waiting. home resets in",
+            "next request",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        assert!(
+            panel.rows[0].accounts[1].current,
+            "Rendering must not change the saved account"
+        );
+        panel.rows[0].accounts[0].waits.clear();
+        assert!(!render(&mut panel, 160, 30).contains("All accounts are waiting"));
+    }
+
+    #[test]
+    fn model_specific_waits_never_claim_every_model_is_waiting() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        for account in &mut panel.rows[0].accounts {
+            account.waits = vec![(Some("one-model".into()), crate::rotation::now_ms() + 60_000)];
+        }
+        assert!(
+            panel.rows[0]
+                .first_reset(crate::rotation::now_ms())
+                .is_none()
+        );
+        assert!(!render(&mut panel, 160, 30).contains("All accounts are waiting"));
     }
 
     #[test]
     fn opencode_usage_stays_with_the_current_account() {
         let mut rows = demo_rows();
         rows[0].id = "opencode".into();
-        rows[0].usage = Some("5h 42%".into());
+        rows[0].usage = Some(vec![ui::remaining_line("5h", 58.0, "")]);
         apply_account_usage(&mut rows, &HashMap::new());
-        assert!(rows[0].accounts[0].usage.as_ref().unwrap()[0].contains("current account only"));
+        assert!(
+            rows[0].accounts[0].usage.as_ref().unwrap()[0]
+                .to_string()
+                .contains("current account only")
+        );
         assert_eq!(
             rows[0].accounts[1].usage.as_deref(),
-            Some(&["Current account usage: 5h 42%".to_string()][..])
+            Some(&[ui::remaining_line("5h", 58.0, "")][..])
         );
     }
 
@@ -977,7 +1111,7 @@ mod tests {
         for _ in 0..8 {
             panel.press(KeyCode::PageDown);
         }
-        assert!(render(&mut panel, 40, 13).contains("Claude Code goes"));
+        assert!(render(&mut panel, 40, 13).contains("waiting."));
         panel.press(KeyCode::Enter);
         assert!(render(&mut panel, 40, 13).contains("Use account for new requests"));
     }

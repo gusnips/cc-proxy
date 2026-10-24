@@ -10,12 +10,16 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use crossterm::style::Stylize;
-use ratatui::style::Color;
+use ratatui::{
+    style::{Color, Style},
+    text::{Line, Span},
+};
 
 pub const TEAL: Color = Color::Rgb(78, 201, 176);
 pub const WHITE: Color = Color::Rgb(240, 244, 248);
 pub const DIM_WHITE: Color = Color::Rgb(180, 190, 200);
 pub const GREEN: Color = Color::Rgb(120, 200, 120);
+pub const BRIGHT_GREEN: Color = Color::Rgb(100, 230, 135);
 pub const RED: Color = Color::Rgb(220, 120, 120);
 pub const YELLOW: Color = Color::Rgb(220, 200, 100);
 pub const DIM: Color = Color::Rgb(100, 104, 114);
@@ -307,33 +311,45 @@ pub fn print_error(error: &anyhow::Error) {
     eprintln!("{}", card(Mood::Hurt, &lines, true, terminal_width()));
 }
 
-/// A `percent`-used bar: green, yellow from 70%, red from 90%.
-pub fn meter(percent: f64, cells: usize) -> String {
-    let percent = percent.clamp(0.0, 100.0);
-    let filled = ((percent / 100.0) * cells as f64).round() as usize;
-    let color = if percent >= 90.0 {
-        RED
-    } else if percent >= 70.0 {
-        YELLOW
-    } else {
-        GREEN
-    };
-    paint(&"━".repeat(filled), color) + &paint(&"━".repeat(cells - filled), TRACK)
-}
-
-/// A `percent`-left bar: the fill is what remains, green until 30% is left,
-/// yellow until 10%, then red. A shorter bar means less allowance.
-pub fn remaining_meter(percent: f64, cells: usize) -> String {
-    let percent = percent.clamp(0.0, 100.0);
-    let filled = ((percent / 100.0) * cells as f64).round() as usize;
-    let color = if percent <= 10.0 {
+/// Color shows what remains: bright green from 80%, yellow at 30%, red at 10%.
+pub fn remaining_color(percent: f64) -> Color {
+    if percent <= 10.0 {
         RED
     } else if percent <= 30.0 {
         YELLOW
-    } else {
+    } else if percent < 80.0 {
         GREEN
-    };
-    paint(&"━".repeat(filled), color) + &paint(&"━".repeat(cells - filled), TRACK)
+    } else {
+        BRIGHT_GREEN
+    }
+}
+
+/// A monitor usage row keeps its label and reset time neutral.
+pub(crate) fn remaining_line(label: &str, percent: f64, detail: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(format!("{label} ")),
+        Span::styled(
+            format!("{percent:.0}%"),
+            Style::default().fg(remaining_color(percent)),
+        ),
+        Span::raw(format!(" left{detail}")),
+    ])
+}
+
+/// A `percent`-used bar. A shorter allowance turns yellow, then red.
+pub fn meter(percent: f64, cells: usize) -> String {
+    let percent = percent.clamp(0.0, 100.0);
+    let filled = ((percent / 100.0) * cells as f64).round() as usize;
+    paint(&"━".repeat(filled), remaining_color(100.0 - percent))
+        + &paint(&"━".repeat(cells - filled), TRACK)
+}
+
+/// A `percent`-left bar. A shorter bar means less allowance.
+pub fn remaining_meter(percent: f64, cells: usize) -> String {
+    let percent = percent.clamp(0.0, 100.0);
+    let filled = ((percent / 100.0) * cells as f64).round() as usize;
+    paint(&"━".repeat(filled), remaining_color(percent))
+        + &paint(&"━".repeat(cells - filled), TRACK)
 }
 
 /// "2h14m", "3m05s", "5s".
@@ -475,6 +491,31 @@ mod tests {
         assert_eq!(bar.chars().count(), 20);
         assert!(meter(45.0, 20).starts_with(&paint(&"━".repeat(9), GREEN)));
         assert!(meter(95.0, 20).starts_with(&paint(&"━".repeat(19), RED)));
+    }
+
+    #[test]
+    fn remaining_percentages_share_four_status_colors() {
+        for (percent, color) in [
+            (100.0, BRIGHT_GREEN),
+            (80.0, BRIGHT_GREEN),
+            (79.0, GREEN),
+            (31.0, GREEN),
+            (30.0, YELLOW),
+            (11.0, YELLOW),
+            (10.0, RED),
+            (0.0, RED),
+        ] {
+            assert_eq!(remaining_color(percent), color);
+            let line = remaining_line("5h", percent, ", resets in 1h");
+            assert_eq!(line.spans[1].style.fg, Some(color));
+            assert_eq!(line.spans[0].style.fg, None);
+            assert_eq!(line.spans[2].style.fg, None);
+            assert_eq!(
+                line.to_string(),
+                format!("5h {percent:.0}% left, resets in 1h")
+            );
+        }
+        assert!(remaining_meter(100.0, 20).starts_with(&paint(&"━".repeat(20), BRIGHT_GREEN)));
     }
 
     #[test]
