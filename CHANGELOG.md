@@ -20,6 +20,11 @@ description: Release notes for cc-proxy.
   Codex and Kimi.
 - The account list and `cc-proxy auth status codex` show the signed-in email
   instead of the internal account ID when the token carries one.
+- Claude models on Antigravity no longer fail every tool call with
+  `tools.N.custom.input_schema` 400s. `anyOf`/`oneOf` unions in tool schemas
+  (e.g. SendMessage's nested message shape) collapse or widen away before
+  Cloud Code Assist converts them, since its Claude bridge rejects union
+  branches.
 
 ## v0.2.14 (2026-10-23)
 
