@@ -175,6 +175,8 @@ struct AnthropicConfig {
 struct RouteConfig {
     pub on: Option<bool>,
     pub provider: Option<String>,
+    /// Providers to try, in order, when the routed provider is spent.
+    pub fallback: Option<Vec<String>>,
     /// The user's own choices, provider then tier then model id.
     pub tiers: Option<BTreeMap<String, BTreeMap<String, Option<String>>>>,
 }
@@ -1416,6 +1418,8 @@ pub struct Route {
     pub on: bool,
     /// The last provider picked. Kept when routing goes off, so `start` can offer it again.
     pub provider: Option<String>,
+    /// Providers to try, in order, when the routed provider is spent.
+    pub fallback: Vec<String>,
     /// The models the user chose for a Claude name: provider, then tier.
     pub tiers: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -1424,6 +1428,11 @@ impl Route {
     /// The provider Claude model names go to, or `None` while routing is off.
     pub fn target(&self) -> Option<&str> {
         self.provider.as_deref().filter(|_| self.on)
+    }
+
+    /// The fallback providers, in the order the user listed them.
+    pub fn fallback(&self) -> &[String] {
+        &self.fallback
     }
 
     /// The model the user chose for `tier` on `provider`.
@@ -1436,6 +1445,7 @@ pub fn route() -> Route {
     let Some(RouteConfig {
         on,
         provider,
+        fallback,
         tiers,
     }) = read_file_config(&paths::config_dir()).and_then(|file| file.route)
     else {
@@ -1452,9 +1462,19 @@ pub fn route() -> Route {
             (provider, chosen)
         })
         .collect();
+    let provider = provider.filter(|name| !name.is_empty());
+    let mut seen = std::collections::HashSet::new();
+    let fallback: Vec<String> = fallback
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty() && Some(name.as_str()) != provider.as_deref())
+        .filter(|name| seen.insert(name.clone()))
+        .collect();
     Route {
         on: on.unwrap_or(false),
-        provider: provider.filter(|name| !name.is_empty()),
+        provider,
+        fallback,
         tiers,
     }
 }

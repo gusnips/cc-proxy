@@ -229,7 +229,45 @@ pub fn status_lines() -> Vec<String> {
         ),
     }
     lines.extend(found.warnings);
+    if let Some(provider) = route.target()
+        && !route.fallback.is_empty()
+    {
+        lines.push(format!(
+            "When {} is spent, Claude Code moves to {}.",
+            ui::provider_name(provider),
+            route
+                .fallback
+                .iter()
+                .map(|name| ui::provider_name(name))
+                .collect::<Vec<_>>()
+                .join(", then ")
+        ));
+    }
     lines
+}
+
+/// Save the providers to try, in order, when the routed provider is spent.
+/// An empty list turns the chain off.
+pub fn set_fallback(providers: &[String]) -> Result<()> {
+    let routable = routable_providers(&Registry::new());
+    let mut names: Vec<String> = Vec::new();
+    for raw in providers {
+        let name = raw.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        if !routable.contains(&name.as_str()) {
+            anyhow::bail!(
+                "cc-proxy can't fall back to `{name}`. Use one of: {}.",
+                routable.join(", ")
+            );
+        }
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    config_keys::write_values([("route.fallback", serde_json::json!(names))])?;
+    Ok(())
 }
 
 /// A note for when the running proxy is not the version of this binary,

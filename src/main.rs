@@ -46,10 +46,11 @@ enum Commands {
         #[arg(long, conflicts_with = "no_monitor", action = ArgAction::SetTrue)]
         monitor: bool,
     },
-    /// Switch where Claude Code goes: a provider, or `claude` for your own subscription
+    /// Switch where Claude Code goes: providers in the order to try them, or `claude` for your own subscription
     Use {
-        /// A provider, or `claude`. Leave it out to pick from a list
-        target: Option<String>,
+        /// A provider, or `claude`. More than one is a fallback chain, tried in this order. Leave it out to pick from a list
+        #[arg(value_name = "PROVIDER")]
+        targets: Vec<String>,
     },
     /// Switch routing off and stop the background proxy service
     Stop,
@@ -294,7 +295,7 @@ fn run() -> Result<()> {
             no_monitor,
             monitor,
         }),
-        Commands::Use { target } => use_target(target.as_deref()),
+        Commands::Use { targets } => use_target(&targets),
         Commands::Demo => {
             let registry = Registry::new();
             tui::run_mock_monitor(config::port(), &registry)
@@ -698,13 +699,15 @@ fn start_daemon(target: Option<&str>, port: Option<u16>) -> Result<()> {
 }
 
 /// `cc-proxy use`: switch where Claude Code goes, with the proxy kept running.
-fn use_target(target: Option<&str>) -> Result<()> {
+fn use_target(targets: &[String]) -> Result<()> {
     route::preflight()?;
-    let pick = start_flow::pick(target)?;
+    let pick = start_flow::pick(targets.first().map(String::as_str))?;
     let mut lines = Vec::new();
     let mut proxy_port = None;
     match pick {
         Pick::Provider(_) => {
+            // Checked before the proxy starts, so a typo changes nothing.
+            route::set_fallback(targets.get(1..).unwrap_or_default())?;
             let proxy = ensure_proxy(None)?;
             set_route(pick, &proxy.url)?;
             proxy_port = Some(proxy.port);
@@ -1263,6 +1266,7 @@ mod tests {
             vec!["cc-proxy", "auth", "logout", "kimi"],
             vec!["cc-proxy", "use"],
             vec!["cc-proxy", "use", "kimi"],
+            vec!["cc-proxy", "use", "kimi", "codex", "antigravity"],
             vec!["cc-proxy", "use", "claude"],
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");

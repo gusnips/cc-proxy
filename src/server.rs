@@ -1885,16 +1885,18 @@ async fn dispatch_request(
 
     let response = if count_tokens {
         provider.handle_count_tokens(body, context).await
+    } else if auto_review_route.is_some() {
+        crate::rotation::execute(provider.as_ref(), body, context, None).await
     } else {
-        crate::rotation::execute(
-            provider.as_ref(),
+        let route = crate::config::route();
+        crate::rotation::execute_routed(
+            &state.registry,
+            &route,
+            &requested_model,
+            provider.clone(),
             body,
             context,
-            if auto_review_route.is_some() {
-                None
-            } else {
-                conversation_identity
-            },
+            conversation_identity,
         )
         .await
     };

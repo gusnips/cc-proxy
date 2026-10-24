@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::response::Response;
@@ -13,7 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::accounts::{Account, Accounts};
 use crate::anthropic::{MessagesRequest, json_error};
-use crate::provider::{Provider, ProviderError, ProviderErrorKind, RequestContext};
+use crate::provider::{Provider, RequestContext};
+use crate::registry::Registry;
 use crate::request_identity::ConversationIdentity;
 
 /// Provider-confirmed limits can use a reset clock without adding client retry headers.
@@ -21,6 +23,14 @@ use crate::request_identity::ConversationIdentity;
 pub(crate) enum RotationHint {
     Stay,
     RetryAt { until_ms: u64, per_model: bool },
+}
+
+/// Rides on the 429 answered when every account (and, for a routed chain,
+/// every provider) is spent: the earliest moment one frees up. The server
+/// reads it to decide whether a fallback provider is worth trying.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExhaustedAt {
+    pub until_ms: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -222,30 +232,43 @@ fn all_limited(
         })
         .collect();
     let first = deadlines?.into_iter().min()?;
-    let seconds = (first - now).div_ceil(1000);
-    let who = if list.len() == 1 {
+    Some(exhausted_response(
+        first,
+        &format!(
+            "{}. Try again in {}, or add an account with `cc-proxy auth add {provider}`.",
+            who_is_limited(list, provider),
+            crate::ui::duration(std::time::Duration::from_millis(first - now)),
+        ),
+    ))
+}
+
+fn who_is_limited(list: &[Account], provider: &str) -> String {
+    if list.len() == 1 {
         format!(
-            "The saved {} account is",
+            "The saved {} account is at the limit",
             crate::ui::provider_name(provider)
         )
     } else {
         format!(
-            "All {} saved {} accounts are",
+            "All {} saved {} accounts are at the limit",
             list.len(),
             crate::ui::provider_name(provider)
         )
-    };
-    let mut error = ProviderError::new(
-        StatusCode::TOO_MANY_REQUESTS,
-        ProviderErrorKind::RateLimit,
-        format!(
-            "{who} at the limit. Try again in {}, or add an account with `cc-proxy auth add {provider}`.",
-            crate::ui::duration(std::time::Duration::from_secs(seconds))
-        ),
-    );
-    error.retry_after = Some(seconds.to_string());
-    error.should_retry = Some(false);
-    Some(error.response())
+    }
+}
+
+/// A 429 that Claude Code reads as a spent usage window with a reset time, so
+/// it counts down and resumes the turn by itself instead of erroring out.
+pub(crate) fn exhausted_response(until_ms: u64, message: &str) -> Response {
+    let mut response = json_error(StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", message);
+    response
+        .headers_mut()
+        .extend(crate::anthropic::error::usage_limit_headers(
+            Some(until_ms),
+            None,
+        ));
+    response.extensions_mut().insert(ExhaustedAt { until_ms });
+    response
 }
 
 pub(crate) async fn execute(
@@ -277,6 +300,96 @@ pub(crate) async fn execute(
         &Cooldowns::new(),
     )
     .await
+}
+
+/// A routed request: the provider Claude Code points at first, then the
+/// `route.fallback` list in order, each one once. A provider is skipped the
+/// moment it answers "every account is spent", so the request lands on the
+/// first provider with room. When every one of them is spent, the answer
+/// names the one that frees up first and when, which is what lets Claude Code
+/// count down and resume by itself.
+pub(crate) async fn execute_routed(
+    registry: &Registry,
+    route: &crate::config::Route,
+    requested: &str,
+    primary: Arc<dyn Provider>,
+    mut body: MessagesRequest,
+    mut context: RequestContext,
+    identity: Option<ConversationIdentity>,
+) -> Response {
+    let mut response = execute(
+        primary.as_ref(),
+        body.clone(),
+        context.clone(),
+        identity.clone(),
+    )
+    .await;
+    let mut earliest: Option<(u64, &str)> = exhausted_by(&response, primary.name());
+    for fallback in route.fallback() {
+        if fallback == primary.name() {
+            continue;
+        }
+        if response.extensions().get::<ExhaustedAt>().is_none() {
+            return response;
+        }
+        let Ok(model) = crate::tiers::resolve_for(registry, route, fallback, requested) else {
+            continue;
+        };
+        let Some(next) = registry.provider_for_model(&model) else {
+            continue;
+        };
+        // A provider nobody signed in to would answer with an auth error and
+        // hide the limit this request is really about.
+        if next.name() != fallback || next.cli().auth_state() == crate::provider::AuthState::Missing
+        {
+            continue;
+        }
+        crate::logging::create_logger("auth").info(
+            "provider_switched",
+            Some(serde_json::Map::from_iter([
+                ("from".into(), serde_json::json!(primary.name())),
+                ("to".into(), serde_json::json!(fallback)),
+                ("model".into(), serde_json::json!(&model)),
+                ("reqId".into(), serde_json::json!(&context.req_id)),
+            ])),
+        );
+        body.model = Some(model);
+        context.provider = fallback.to_string();
+        response = execute(
+            next.as_ref(),
+            body.clone(),
+            context.clone(),
+            identity.clone(),
+        )
+        .await;
+        if let Some((until, name)) = exhausted_by(&response, fallback)
+            && earliest.is_none_or(|(first, _)| until < first)
+        {
+            earliest = Some((until, name));
+        }
+    }
+    match (
+        response.extensions().get::<ExhaustedAt>().copied(),
+        earliest,
+    ) {
+        (Some(last), Some((until, fallback))) if until <= last.until_ms => exhausted_response(
+            until,
+            &format!(
+                "Every routed provider is at its limit. {} frees up first, in {}. \
+                 Use `cc-proxy auth add` to add an account sooner.",
+                crate::ui::provider_name(fallback),
+                crate::ui::duration(std::time::Duration::from_millis(until - now_ms())),
+            ),
+        ),
+        _ => response,
+    }
+}
+
+fn exhausted_by<'a>(response: &Response, provider: &'a str) -> Option<(u64, &'a str)> {
+    response
+        .extensions()
+        .get::<ExhaustedAt>()
+        .map(|at| (at.until_ms, provider))
 }
 
 fn storage_error(error: anyhow::Error) -> Response {
@@ -576,14 +689,23 @@ mod tests {
         );
         let response = call(&fake, &accounts, &cooldowns).await;
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert!(
-            response.headers()["retry-after"]
-                .to_str()
-                .unwrap()
-                .parse::<u64>()
-                .unwrap()
-                <= 3600
+        let headers = response.headers();
+        assert_eq!(headers["anthropic-ratelimit-unified-status"], "rejected");
+        assert_eq!(
+            headers["anthropic-ratelimit-unified-overage-status"],
+            "rejected"
         );
+        let reset: u64 = headers["anthropic-ratelimit-unified-reset"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(reset > now_ms() / 1_000);
+        let Some(ExhaustedAt { until_ms }) = response.extensions().get::<ExhaustedAt>().copied()
+        else {
+            panic!("an all-limited answer must name the first release");
+        };
+        assert_eq!(reset, until_ms / 1_000);
         call(&fake, &accounts, &cooldowns).await;
         assert_eq!(fake.calls.lock().unwrap().len(), 2);
     }
@@ -733,7 +855,12 @@ mod tests {
             .is_some()
         );
         let response = all_limited(&list, &snapshot, "codex", "model-a", now).unwrap();
-        assert_eq!(response.headers()["retry-after"], "60");
+        let reset: u64 = response.headers()["anthropic-ratelimit-unified-reset"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(reset, (now + 60_000) / 1_000);
         assert_eq!(response.headers()["x-should-retry"], "false");
         assert!(all_limited(&list, &snapshot, "codex", "model-b", now).is_none());
     }
@@ -760,5 +887,146 @@ mod tests {
         };
         assert_eq!(reopened.until("codex", &list[0].id).unwrap(), Some(until));
         assert_eq!(reopened.until("codex", &list[1].id).unwrap(), Some(until));
+    }
+
+    struct ChainFake {
+        name: &'static str,
+        spent_until: Option<u64>,
+    }
+
+    impl CliHandlers for ChainFake {
+        fn auth_state(&self) -> AuthState {
+            AuthState::SignedIn {
+                account: None,
+                expires_ms: None,
+            }
+        }
+        fn login(&self) -> Result<()> {
+            unreachable!()
+        }
+        fn device(&self) -> Result<()> {
+            unreachable!()
+        }
+        fn status(&self) -> Result<()> {
+            unreachable!()
+        }
+        fn logout(&self) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ChainFake {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn supported_models(&self) -> Vec<String> {
+            vec![]
+        }
+        fn cli(&self) -> &dyn CliHandlers {
+            self
+        }
+        async fn handle_count_tokens(&self, _: MessagesRequest, _: RequestContext) -> Response {
+            unreachable!()
+        }
+        async fn handle_messages(&self, _: MessagesRequest, _: RequestContext) -> Response {
+            match self.spent_until {
+                Some(until) => exhausted_response(until, &format!("{} is spent", self.name)),
+                None => Response::new(axum::body::Body::from(self.name)),
+            }
+        }
+    }
+
+    fn chain_route(fallback: &[&str]) -> crate::config::Route {
+        crate::config::Route {
+            on: true,
+            provider: Some("codex".into()),
+            fallback: fallback.iter().map(|name| (*name).to_string()).collect(),
+            tiers: [(
+                "antigravity".to_string(),
+                [("opus".to_string(), "antigravity/test-1".to_string())].into(),
+            )]
+            .into(),
+        }
+    }
+
+    async fn routed_call(
+        codex_until: Option<u64>,
+        antigravity_until: Option<u64>,
+        route: &crate::config::Route,
+    ) -> Response {
+        let registry = Registry::from_providers([
+            Arc::new(ChainFake {
+                name: "codex",
+                spent_until: codex_until,
+            }) as Arc<dyn Provider>,
+            Arc::new(ChainFake {
+                name: "antigravity",
+                spent_until: antigravity_until,
+            }),
+        ]);
+        execute_routed(
+            &registry,
+            route,
+            "claude-opus-4-8",
+            registry.provider("codex").unwrap(),
+            serde_json::from_value(json!({"messages":[],"model":"claude-opus-4-8"})).unwrap(),
+            RequestContext {
+                req_id: "chain-test".into(),
+                session_id: None,
+                session_seq: None,
+                provider: "codex".into(),
+                account: None,
+                traffic: None,
+                monitor: None,
+            },
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_spent_provider_moves_the_request_to_the_next_one_in_the_chain() {
+        let response = routed_call(
+            Some(now_ms() + 60 * 60 * 1_000),
+            None,
+            &chain_route(&["antigravity"]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"antigravity");
+    }
+
+    #[tokio::test]
+    async fn a_spent_chain_names_the_provider_that_frees_up_first() {
+        let now = now_ms();
+        let response = routed_call(
+            Some(now + 4 * 60 * 60 * 1_000),
+            Some(now + 2 * 60 * 60 * 1_000),
+            &chain_route(&["antigravity"]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let reset: u64 = response.headers()["anthropic-ratelimit-unified-reset"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        // Antigravity frees up two hours before Codex does.
+        assert_eq!(reset, (now + 2 * 60 * 60 * 1_000) / 1_000);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Antigravity"),
+            "{body}"
+        );
     }
 }

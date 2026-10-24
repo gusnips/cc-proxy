@@ -18,6 +18,7 @@ fn routed(provider: &str, model: &str) -> Route {
     Route {
         on: true,
         provider: Some(provider.into()),
+        fallback: Vec::new(),
         tiers: [(
             provider.into(),
             tiers::TIERS.map(|tier| (tier.into(), model.into())).into(),

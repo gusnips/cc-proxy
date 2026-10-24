@@ -52,10 +52,18 @@ If `settings.json` isn't valid JSON, `start` stops before it does anything and n
 ## `use`
 
 ```sh
-cc-proxy use [provider|claude]
+cc-proxy use <provider>... | claude
 ```
 
 Changes where Claude Code goes, with the proxy kept running. The provider is `codex`, `kimi`, `cursor`, `grok`, `copilot`, `glm` or `opencode`. `claude` sends Claude Code back to your Claude subscription.
+
+More than one provider is a fallback chain, tried in the order you list them:
+
+```sh
+cc-proxy use codex antigravity
+```
+
+When every saved Codex account is spent, the next request goes to Antigravity. The first request after Codex frees up goes back to Codex. This needs `auth.autoRotate` on for providers with more than one saved account. `cc-proxy use codex` on its own clears the chain.
 
 With no argument, `use` asks the same question as `start`. If the provider isn't signed in, it asks `Sign in now? [y/N]` and runs that provider's sign-in. The default is no, so a script never opens a browser. For GLM and OpenCode Go, sign-in reads an API key.
 

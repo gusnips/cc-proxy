@@ -183,6 +183,20 @@ impl ProviderError {
     pub fn response(self) -> Response {
         let mut response =
             crate::anthropic::error::json_error(self.status, self.error_type(), self.message);
+        // A provider that confirmed a reset is spent until then, not
+        // throttled. Say so with the headers Claude Code reads, so it names
+        // the limit, counts down, and resumes the turn by itself.
+        if let Some(crate::rotation::RotationHint::RetryAt { until_ms, .. }) = self.rotation_hint {
+            response
+                .headers_mut()
+                .extend(crate::anthropic::error::usage_limit_headers(
+                    Some(until_ms),
+                    None,
+                ));
+            response
+                .extensions_mut()
+                .insert(crate::rotation::ExhaustedAt { until_ms });
+        }
         let headers = response.headers_mut();
         if let Some(retry_after) = self
             .retry_after

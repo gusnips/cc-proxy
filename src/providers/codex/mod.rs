@@ -19,7 +19,7 @@ use axum::Json;
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use http::{HeaderValue, StatusCode};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -2020,39 +2020,10 @@ fn update_continuation_from_upstream(
 /// here that is hours. `x-should-retry: false` stops the retry loop instead,
 /// which is the honest signal — a spent window does not reopen on a backoff.
 fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        HeaderName::from_static("x-should-retry"),
-        HeaderValue::from_static("false"),
+    let headers = crate::anthropic::error::usage_limit_headers(
+        limit.resets_at.and_then(|at| at.checked_mul(1_000)),
+        limit.window.map(events::CodexLimitWindow::claim),
     );
-    headers.insert(
-        HeaderName::from_static("anthropic-ratelimit-unified-status"),
-        HeaderValue::from_static("rejected"),
-    );
-    if let Some(resets_at) = limit.resets_at
-        && let Ok(value) = HeaderValue::from_str(&resets_at.to_string())
-    {
-        headers.insert(
-            HeaderName::from_static("anthropic-ratelimit-unified-reset"),
-            value,
-        );
-    }
-    if let Some(window) = limit.window {
-        headers.insert(
-            HeaderName::from_static("anthropic-ratelimit-unified-representative-claim"),
-            HeaderValue::from_static(window.claim()),
-        );
-    } else {
-        // Without a claim, Claude Code takes the 429 for a server throttle
-        // ("not your usage limit") and shows no reset time. A rejected extra
-        // usage status makes it say "You've hit your limit" without naming a
-        // window Codex never named.
-        headers.insert(
-            HeaderName::from_static("anthropic-ratelimit-unified-overage-status"),
-            HeaderValue::from_static("rejected"),
-        );
-    }
-
     let mut response = (
         headers,
         json_error(
@@ -2062,8 +2033,10 @@ fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
         ),
     )
         .into_response();
-    if let Some(until_ms) = limit.resets_at.and_then(|at| at.checked_mul(1_000))
-        && until_ms > crate::rotation::now_ms()
+    if let Some(until_ms) = limit
+        .resets_at
+        .and_then(|at| at.checked_mul(1_000))
+        .filter(|until| *until > crate::rotation::now_ms())
     {
         response
             .extensions_mut()
@@ -2071,6 +2044,9 @@ fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
                 until_ms,
                 per_model: false,
             });
+        response
+            .extensions_mut()
+            .insert(crate::rotation::ExhaustedAt { until_ms });
     }
     response
 }
