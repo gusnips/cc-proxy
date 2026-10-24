@@ -83,6 +83,13 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "switch saved accounts when one reaches a limit with a retry time",
     },
     ConfigKey {
+        path: "auth.hourlyPing",
+        kind: ConfigKind::Bool,
+        env: &["CCP_HOURLY_PING"],
+        default: Some("false"),
+        blurb: "ping signed-in providers at the start of every hour to start 5h windows early",
+    },
+    ConfigKey {
         path: "autoReviewModel",
         kind: ConfigKind::Str,
         env: &["CCP_AUTO_REVIEW_MODEL"],

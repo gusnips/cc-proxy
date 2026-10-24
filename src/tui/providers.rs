@@ -176,7 +176,11 @@ fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String
                     .get(&(row.id.clone(), account.id.clone()))
                     .cloned()
                     .unwrap_or_else(|| {
-                        vec![format!("usage unavailable; run cc-proxy usage {}", row.id)]
+                        if matches!(row.id.as_str(), "codex" | "kimi") {
+                            vec![format!("usage unavailable; run cc-proxy usage {}", row.id)]
+                        } else {
+                            vec!["usage not supported".to_string()]
+                        }
                     }),
             );
         }

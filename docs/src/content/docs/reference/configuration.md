@@ -18,6 +18,7 @@ These settings configure the proxy process. Claude Code client settings such as 
   "route": {
     "on": true,
     "provider": "codex",
+    "fallback": ["antigravity"],
     "tiers": { "codex": { "haiku": "gpt-6-luna" } }
   },
   "codex": {
@@ -81,11 +82,12 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 
 ## Saved accounts and auto-rotate
 
-Codex, Kimi, Grok, Antigravity and OpenCode Zen can keep more than one login.
-Add an account with `cc-proxy auth add codex`, then choose it with
-`cc-proxy auth use codex`.
-These commands do not restart the proxy. After signing in to Antigravity,
-run `cc-proxy models refresh antigravity` to fetch the current account's model
+Every OAuth and API-key provider (Codex, Kimi, Grok, Antigravity, GLM, Gemini,
+OpenCode Go, OpenCode Zen, Anthropic, and custom providers) can keep more than
+one saved account or API key. Add one with `cc-proxy auth add <provider>`, then
+choose it with `cc-proxy auth use <provider> <account>`. These commands do not
+restart the proxy. After signing in to Antigravity, run
+`cc-proxy models refresh antigravity` to fetch the current account's model
 list. Adding another account does not replace that shared list.
 
 `auth.autoRotate` defaults to `false`. To let a running proxy switch accounts:
@@ -105,15 +107,47 @@ Quota percentages alone never trigger a switch.
 
 Codex's usage-limit reset clock works even when it omits `Retry-After`.
 Antigravity's `QUOTA_EXHAUSTED` errors use Google's retry delay or reset
-clock. A model-specific limit blocks only that model on that account.
+clock. When a 429 arrives without one, cc-proxy asks Google's quota endpoint
+for the model's reset time, so an exhausted Antigravity model still gets a real
+deadline. A model-specific limit blocks only that model on that account.
 Antigravity's short `RATE_LIMIT_EXCEEDED` capacity throttles never switch
-accounts. Gemini API keys do not rotate: Google's quotas belong to the
-project, not the key.
+accounts.
 
 The current account is used again once its wait ends. An account whose wait
-ends becomes eligible again. If every account is waiting, the proxy returns one
-429 with the earliest retry time. `cc-proxy auth status codex` shows each
-account's wait.
+ends becomes eligible again. `cc-proxy auth status codex` shows each account's
+wait.
+
+To start rolling 5-hour quota windows early while `cc-proxy` is running, enable
+`auth.hourlyPing`:
+
+```sh
+cc-proxy config set auth.hourlyPing true
+```
+
+At the start of every hour (`XX:00`), cc-proxy sends a one-token request using
+the smallest tier model to each signed-in provider account that is not waiting
+on a limit.
+
+## Provider fallback
+
+`route.fallback` lists providers to try, in order, when every saved account of
+the routed provider is waiting:
+
+```sh
+cc-proxy use codex antigravity gemini
+```
+
+writes `"provider": "codex"` and `"fallback": ["antigravity", "gemini"]`.
+Each request starts on the routed provider again, so the chain returns to it as
+soon as it frees up. A fallback provider without an account for the requested
+tier is skipped. Leave the array out, or run `cc-proxy use codex`, to turn the
+chain off.
+
+When every provider in the chain is spent, the proxy answers one 429 that names
+the provider freeing up first and when. The response carries the
+`anthropic-ratelimit-unified-*` headers, so Claude Code shows "You've hit your
+limit · resets at ..." and resumes the turn when that time arrives instead of
+treating it as a retryable error.
 
 Rotation never replays output after a stream starts. Codex reasoning signatures
 name the saved login that created them, so they remain usable after a proxy

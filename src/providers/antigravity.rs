@@ -38,6 +38,7 @@ use crate::providers::opencode::{
 use crate::providers::translate_shared::read_effort;
 use crate::providers::upstream_error;
 use crate::registry::normalize_incoming_model;
+use crate::rotation::RotationHint;
 
 pub const MODEL_PREFIX: &str = "antigravity/";
 // Public OAuth client identifiers embedded in the Antigravity desktop client.
@@ -610,6 +611,82 @@ fn build_antigravity_envelope(
     }))
 }
 
+/// Fill in the reset time Google's 429 left out. The quota endpoint knows it
+/// per model, which is also the only way to tell a spent window from a short
+/// throttle: only a bucket at zero means the request waits.
+async fn with_quota_reset(
+    mut error: ProviderError,
+    client: &reqwest::Client,
+    auth: &StoredAntigravityAuth,
+    wire_model: &str,
+) -> ProviderError {
+    if error.status != StatusCode::TOO_MANY_REQUESTS
+        || matches!(error.rotation_hint, Some(RotationHint::RetryAt { .. }))
+    {
+        return error;
+    }
+    let Some(until_ms) = quota_reset(client, auth, wire_model).await else {
+        return error;
+    };
+    error.rotation_hint = Some(RotationHint::RetryAt {
+        until_ms,
+        per_model: true,
+    });
+    let when = jiff::Timestamp::from_millisecond(until_ms as i64)
+        .map(|reset| {
+            crate::usage::format_reset(reset, jiff::Timestamp::now(), &jiff::tz::TimeZone::system())
+        })
+        .unwrap_or_else(|_| "later".to_string());
+    error.message = format!(
+        "Antigravity is out of quota for {wire_model}, {when}. Pick another model or wait."
+    );
+    error
+}
+
+/// When `wire_model` comes back, from Google's quota endpoint. There is one
+/// bucket per model; a bucket with quota left means the 429 was a short
+/// throttle, not a spent window.
+async fn quota_reset(
+    client: &reqwest::Client,
+    auth: &StoredAntigravityAuth,
+    wire_model: &str,
+) -> Option<u64> {
+    let response = client
+        .post(format!("{PROD_API}/{API_VERSION}:retrieveUserQuota"))
+        .header("Authorization", format!("Bearer {}", auth.access))
+        .header("Content-Type", "application/json")
+        .header("User-Agent", user_agent_for_wire_model(wire_model))
+        .timeout(Duration::from_secs(5))
+        .json(&json!({ "project": auth.project_id }))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value = response.json().await.ok()?;
+    quota_reset_from(&body, wire_model, now_ms())
+}
+
+/// The `resetTime` of the spent bucket for `wire_model`, in epoch ms. A
+/// bucket with quota left means a short throttle, so it never counts.
+fn quota_reset_from(body: &Value, wire_model: &str, now: u64) -> Option<u64> {
+    let bucket = body.get("buckets")?.as_array()?.iter().find(|bucket| {
+        bucket.get("modelId").and_then(Value::as_str) == Some(wire_model)
+            && bucket
+                .get("remainingFraction")
+                .and_then(Value::as_f64)
+                .is_some_and(|left| left <= 0.0)
+    })?;
+    bucket
+        .get("resetTime")?
+        .as_str()?
+        .parse::<jiff::Timestamp>()
+        .ok()
+        .and_then(|at| u64::try_from(at.as_millisecond()).ok())
+        .filter(|until| *until > now)
+}
+
 pub struct AntigravityProvider;
 
 impl Default for AntigravityProvider {
@@ -628,7 +705,7 @@ impl AntigravityProvider {
         wire_model: &str,
         envelope: &Value,
         stream: bool,
-        access_token: &str,
+        auth: &StoredAntigravityAuth,
     ) -> Result<reqwest::Response, ProviderError> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -658,7 +735,7 @@ impl AntigravityProvider {
             let url = format!("{base}/{API_VERSION}:{action}");
             let resp = client
                 .post(&url)
-                .header("Authorization", format!("Bearer {access_token}"))
+                .header("Authorization", format!("Bearer {}", auth.access))
                 .header("Accept", accept)
                 .header("Content-Type", "application/json")
                 .header("User-Agent", ua)
@@ -684,12 +761,13 @@ impl AntigravityProvider {
                         ));
                         continue;
                     }
-                    return Err(upstream_error::from_http(
+                    let error = upstream_error::from_http(
                         status.as_u16(),
                         &text,
                         retry_after.as_deref(),
                         "Antigravity",
-                    ));
+                    );
+                    return Err(with_quota_reset(error, &client, auth, wire_model).await);
                 }
                 Err(err) => {
                     last_err = Some(ProviderError::new(
@@ -745,10 +823,7 @@ impl AntigravityProvider {
                 );
             }
         };
-        let resp = match self
-            .post_cca(&wire_model, &envelope, false, &auth.access)
-            .await
-        {
+        let resp = match self.post_cca(&wire_model, &envelope, false, &auth).await {
             Ok(r) => r,
             Err(err) => return err.response(),
         };
@@ -859,9 +934,7 @@ impl Provider for AntigravityProvider {
                 e.to_string(),
             )
         })?;
-        let resp = self
-            .post_cca(&wire_model, &envelope, true, &auth.access)
-            .await?;
+        let resp = self.post_cca(&wire_model, &envelope, true, &auth).await?;
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
         let stream = google::stream_body(
             resp.bytes_stream().map(|c| c.map_err(|_| ())),
@@ -1425,5 +1498,25 @@ mod tests {
                 "{model} ({effort:?})"
             );
         }
+    }
+
+    #[test]
+    fn a_spent_bucket_names_the_reset_and_a_full_one_does_not() {
+        let now = now_ms();
+        let later = now + 4 * 60 * 60 * 1_000;
+        let reset = jiff::Timestamp::from_millisecond(later as i64).unwrap();
+        let body = json!({"buckets": [
+            {"modelId": "gemini-4-argon-high", "remainingFraction": 1, "resetTime": reset.to_string()},
+            {"modelId": "claude-opus-5-5-high", "remainingFraction": 0, "resetTime": reset.to_string()},
+            {"modelId": "chat_20706", "remainingFraction": 1}
+        ]});
+        assert_eq!(
+            quota_reset_from(&body, "claude-opus-5-5-high", now),
+            Some(later)
+        );
+        // Quota left: a short throttle, not a spent window.
+        assert_eq!(quota_reset_from(&body, "gemini-4-argon-high", now), None);
+        assert_eq!(quota_reset_from(&body, "missing-model", now), None);
+        assert_eq!(quota_reset_from(&body, "claude-opus-5-5-high", later), None);
     }
 }

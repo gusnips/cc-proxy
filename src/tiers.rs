@@ -327,15 +327,29 @@ pub fn ranked(registry: &Registry, provider: &str, tier: &str) -> Vec<String> {
 /// other name passes through unchanged. The error is the message for a 400:
 /// routing is off, or the provider has no model for the tier.
 pub fn resolve(registry: &Registry, route: &Route, model: &str) -> Result<String, String> {
-    let Some(tier) = anthropic_model_family(model) else {
+    if anthropic_model_family(model).is_none() {
         return Ok(model.to_string());
-    };
+    }
     let Some(provider) = route.target() else {
         return Err(format!(
             "cc-proxy routing is off, so it can't serve \"{model}\". This Claude Code window \
              still points at the proxy. Quit it and start it again to use your Claude \
              subscription, or run `cc-proxy start` to route it through a provider."
         ));
+    };
+    resolve_for(registry, route, provider, model)
+}
+
+/// `resolve` as if Claude Code pointed at `provider`: what a routed name
+/// means on another provider, for the fallback chain.
+pub fn resolve_for(
+    registry: &Registry,
+    route: &Route,
+    provider: &str,
+    model: &str,
+) -> Result<String, String> {
+    let Some(tier) = anthropic_model_family(model) else {
+        return Ok(model.to_string());
     };
     if let Some(chosen) = route.tier(provider, tier) {
         return Ok(chosen.to_string());

@@ -281,7 +281,10 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
 /// Usage for providers without saved accounts. Account-aware providers use
 /// `account_usage_lines`, so the monitor never asks them twice in one refresh.
 pub fn headlines() -> Vec<(&'static str, String)> {
-    if config::opencode_api_key().is_none() {
+    if crate::accounts::saved_api_key("opencode", None)
+        .or_else(config::opencode_api_key)
+        .is_none()
+    {
         return Vec::new();
     }
     let results = fetch_reports(&[UsageProvider::OpenCode]);
@@ -484,7 +487,9 @@ async fn kimi(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure> 
 }
 
 async fn opencode() -> Result<Option<Report>, String> {
-    let Some(api_key) = config::opencode_api_key() else {
+    let Some(api_key) =
+        crate::accounts::saved_api_key("opencode", None).or_else(config::opencode_api_key)
+    else {
         return Ok(None);
     };
     let client = OpenCodeClient::new(config::opencode_base_url(), Some(api_key))

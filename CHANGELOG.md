@@ -3,6 +3,32 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.3.0 (2026-10-24)
+
+- A spent account no longer reaches Claude Code as a generic 429. The proxy
+  answers with the `anthropic-ratelimit-unified-*` headers and the real reset
+  time, so Claude Code says "You've hit your limit · resets at ..." and picks
+  the turn back up when the window reopens, instead of retrying an error.
+- Provider fallback: `cc-proxy use codex antigravity` (or
+  `route.fallback` in config.json) tries providers in order. Each request
+  starts on the routed provider, moves to the next one only when every saved
+  account there is waiting, and goes back as soon as the first provider frees
+  up. When the whole chain is spent, the answer names the provider that frees
+  up first and when.
+- Antigravity 429s that omit a reset time now get one from Google's quota
+  endpoint, per model. An exhausted model waits for its real reset instead of
+  reaching Claude Code as a bare "Resource has been exhausted" error that it
+  retried on a five-second backoff.
+- API-key providers (GLM, Gemini, OpenCode Go, OpenCode Zen, Anthropic, and
+  custom providers) now support multiple saved accounts (`cc-proxy auth add`,
+  `cc-proxy auth use`, `cc-proxy auth status`) and rotate keys on rate limits
+  when `auth.autoRotate` is on.
+- `auth.hourlyPing` (`cc-proxy config set auth.hourlyPing true` or
+  `CCP_HOURLY_PING=true`) sends a one-token request at the start of every hour
+  to each signed-in provider account that is not waiting on a limit, so rolling
+  5-hour quota windows start counting down early while `cc-proxy` is active.
+- `cc-proxy status` shows the fallback chain.
+
 ## v0.2.17 (2026-10-24)
 
 - `cc-proxy auth login opencode-zen` now opens the Console's device approval
