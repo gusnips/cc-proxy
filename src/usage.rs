@@ -132,6 +132,14 @@ struct Window {
     resets_at_ms: Option<i64>,
 }
 
+impl Window {
+    /// What is left to use, the way the source dashboards show it. The JSON
+    /// contract keeps `used_percent`; only the words people read flip.
+    fn remaining_percent(&self) -> f64 {
+        (100.0 - self.used_percent).clamp(0.0, 100.0)
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct AccountUsage {
     #[serde(skip)]
@@ -150,28 +158,24 @@ enum AccountResult {
 }
 
 impl PlanUsage {
-    fn headline(&self, now: Timestamp, tz: &TimeZone) -> String {
+    /// One line per window, so a dense row cannot hide the number that matters.
+    fn lines(&self, now: Timestamp, tz: &TimeZone) -> Vec<String> {
         let window = |label: &str, window: Option<Window>| {
             window.map(|window| {
-                let mut part = format!("{label} {:.0}%", window.used_percent);
+                let mut part = format!("{label} {:.0}% left", window.remaining_percent());
                 if let Some(reset) = window
                     .resets_at_ms
                     .and_then(|ms| Timestamp::from_millisecond(ms).ok())
                 {
-                    part.push_str(&format!(" {}", format_reset(reset, now, tz)));
+                    part.push_str(&format!(", {}", format_reset(reset, now, tz)));
                 }
                 part
             })
         };
-        [
-            self.plan.clone(),
-            window("5h", self.five_hour),
-            window("week", self.weekly),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ")
+        [window("5h", self.five_hour), window("week", self.weekly)]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -275,7 +279,7 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
 }
 
 /// Usage for providers without saved accounts. Account-aware providers use
-/// `account_headlines`, so the monitor never asks them twice in one refresh.
+/// `account_usage_lines`, so the monitor never asks them twice in one refresh.
 pub fn headlines() -> Vec<(&'static str, String)> {
     if config::opencode_api_key().is_none() {
         return Vec::new();
@@ -317,19 +321,20 @@ pub fn headlines() -> Vec<(&'static str, String)> {
 
 /// Usage per saved account for the monitor's Providers panel. The UUID is
 /// only a lookup key; the monitor shows the saved name, never the provider's
-/// account identity. Call this on its background worker, not a request.
-pub fn account_headlines() -> HashMap<(String, String), String> {
-    let mut headlines = HashMap::new();
+/// account identity. Each window gets its own line. Call this on its
+/// background worker, not a request.
+pub fn account_usage_lines() -> HashMap<(String, String), Vec<String>> {
+    let mut lines = HashMap::new();
     for provider in ["codex", "kimi", "grok", "antigravity"] {
         let unavailable = if matches!(provider, "codex" | "kimi") {
-            format!("usage unavailable; run cc-proxy usage {provider}")
+            vec![format!("usage unavailable; run cc-proxy usage {provider}")]
         } else {
-            "usage not supported".to_string()
+            vec!["usage not supported".to_string()]
         };
         match Accounts::new(provider).list() {
             Ok(accounts) => {
                 for account in accounts {
-                    headlines.insert((provider.to_string(), account.id), unavailable.clone());
+                    lines.insert((provider.to_string(), account.id), unavailable.clone());
                 }
             }
             Err(error) => {
@@ -341,7 +346,7 @@ pub fn account_headlines() -> HashMap<(String, String), String> {
         Ok(results) => results,
         Err(error) => {
             tracing::warn!(%error, "Could not start saved-account usage lookups");
-            return headlines;
+            return lines;
         }
     };
     let now = Timestamp::now();
@@ -350,20 +355,23 @@ pub fn account_headlines() -> HashMap<(String, String), String> {
         match result {
             Ok(Some(Report::Accounts(provider, accounts))) => {
                 for account in accounts {
-                    let headline = match account.result {
-                        AccountResult::Usage { usage } => usage.headline(now, &tz),
+                    let account_lines = match account.result {
+                        AccountResult::Usage { usage } => usage.lines(now, &tz),
                         AccountResult::Unavailable { .. } => {
-                            format!("usage unavailable; run cc-proxy usage {}", provider.id())
+                            vec![format!(
+                                "usage unavailable; run cc-proxy usage {}",
+                                provider.id()
+                            )]
                         }
                     };
-                    headlines.insert((provider.id().to_string(), account.id), headline);
+                    lines.insert((provider.id().to_string(), account.id), account_lines);
                 }
             }
             Err(error) => tracing::warn!(%error, "Could not read saved-account usage"),
             _ => {}
         }
     }
-    headlines
+    lines
 }
 
 fn fetch_reports(
@@ -658,7 +666,7 @@ fn format_plan(
     ] {
         output.push_str(&window_row(
             label,
-            window.as_ref().map(|window| window.used_percent),
+            window.as_ref().map(Window::remaining_percent),
             &format_window(window.as_ref(), now, tz),
             styled,
         ));
@@ -668,15 +676,16 @@ fn format_plan(
 
 const METER_CELLS: usize = 20;
 
-/// "\n  Weekly: 7% used, …". In a terminal the label is padded and a meter
-/// goes before the words, so every window's meter lines up.
-pub(crate) fn window_row(label: &str, percent: Option<f64>, text: &str, styled: bool) -> String {
+/// "\n  Weekly: 93% left, …". In a terminal the label is padded and a meter
+/// goes before the words, so every window's meter lines up. The meter empties
+/// and turns red as the allowance runs out.
+pub(crate) fn window_row(label: &str, remaining: Option<f64>, text: &str, styled: bool) -> String {
     if !styled {
         return format!("\n  {label}: {text}");
     }
-    let meter = percent.map_or_else(
+    let meter = remaining.map_or_else(
         || " ".repeat(METER_CELLS),
-        |percent| ui::meter(percent, METER_CELLS),
+        |remaining| ui::remaining_meter(remaining, METER_CELLS),
     );
     format!("\n  {label:<18}{meter}  {text}")
 }
@@ -685,20 +694,20 @@ fn format_window(window: Option<&Window>, now: Timestamp, tz: &TimeZone) -> Stri
     let Some(window) = window else {
         return "not reported".to_string();
     };
-    let used = format!("{}% used", window.used_percent);
+    let left = format!("{:.0}% left", window.remaining_percent());
     match window
         .resets_at_ms
         .and_then(|ms| Timestamp::from_millisecond(ms).ok())
     {
-        Some(reset) => format!("{used}, {}", format_reset(reset, now, tz)),
-        None => used,
+        Some(reset) => format!("{left}, {}", format_reset(reset, now, tz)),
+        None => left,
     }
 }
 
 /// "resets in 2h 10m (17:00)": the time left, then the local clock time,
 /// with the weekday when it isn't today and the date when it is a week or
 /// more away.
-fn format_reset(reset: Timestamp, now: Timestamp, tz: &TimeZone) -> String {
+pub(crate) fn format_reset(reset: Timestamp, now: Timestamp, tz: &TimeZone) -> String {
     let at = reset.to_zoned(tz.clone());
     let days_ahead = now
         .to_zoned(tz.clone())
@@ -881,8 +890,8 @@ mod tests {
             format_plan("Codex", &usage, now, &tz, false),
             concat!(
                 "Codex (plus)\n",
-                "  5-hour window: 45% used, resets in 2h 10m (17:00)\n",
-                "  Weekly: 7% used, resets in 4d 9h (Mon 00:00)"
+                "  5-hour window: 55% left, resets in 2h 10m (17:00)\n",
+                "  Weekly: 93% left, resets in 4d 9h (Mon 00:00)"
             )
         );
     }
@@ -897,7 +906,7 @@ mod tests {
         };
         assert_eq!(
             format_plan("Kimi", &usage, now, &TimeZone::UTC, false),
-            "Kimi\n  5-hour window: 12.5% used\n  Weekly: not reported"
+            "Kimi\n  5-hour window: 88% left\n  Weekly: not reported"
         );
     }
 
@@ -933,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn account_headlines_include_each_reported_reset_without_guessing_missing_ones() {
+    fn account_lines_show_what_is_left_without_guessing_missing_ones() {
         let now = "2026-08-12T14:50:00Z".parse().unwrap();
         let usage = PlanUsage {
             plan: Some("plus".into()),
@@ -941,14 +950,17 @@ mod tests {
             weekly: window(7.0, ms("2026-08-17T00:00:00Z")),
         };
         assert_eq!(
-            usage.headline(now, &TimeZone::UTC),
-            "plus · 5h 45% resets in 2h 10m (17:00) · week 7% resets in 4d 9h (Mon 00:00)"
+            usage.lines(now, &TimeZone::UTC),
+            [
+                "5h 55% left, resets in 2h 10m (17:00)",
+                "week 93% left, resets in 4d 9h (Mon 00:00)"
+            ]
         );
         let usage = PlanUsage {
             five_hour: window(28.0, None),
             ..PlanUsage::default()
         };
-        assert_eq!(usage.headline(now, &TimeZone::UTC), "5h 28%");
+        assert_eq!(usage.lines(now, &TimeZone::UTC), ["5h 72% left"]);
     }
 
     #[test]

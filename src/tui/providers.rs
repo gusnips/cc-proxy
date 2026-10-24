@@ -25,7 +25,7 @@ struct AccountRow {
     name: String,
     current: bool,
     state: String,
-    usage: Option<String>,
+    usage: Option<Vec<String>>,
     waits: Vec<(Option<String>, u64)>,
 }
 
@@ -159,7 +159,7 @@ fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
     if send.send(rows.clone()).is_err() {
         return;
     }
-    apply_account_usage(&mut rows, &crate::usage::account_headlines());
+    apply_account_usage(&mut rows, &crate::usage::account_usage_lines());
     for (id, headline) in crate::usage::headlines() {
         if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
             row.usage = Some(headline);
@@ -168,14 +168,16 @@ fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
     let _ = send.send(rows);
 }
 
-fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String), String>) {
+fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String), Vec<String>>) {
     for row in rows {
         for account in &mut row.accounts {
             account.usage = Some(
                 usage
                     .get(&(row.id.clone(), account.id.clone()))
                     .cloned()
-                    .unwrap_or_else(|| format!("usage unavailable; run cc-proxy usage {}", row.id)),
+                    .unwrap_or_else(|| {
+                        vec![format!("usage unavailable; run cc-proxy usage {}", row.id)]
+                    }),
             );
         }
     }
@@ -243,13 +245,20 @@ fn lines(panel: &ProvidersPanel, now: u64) -> Vec<Line<'static>> {
                     Style::default().fg(DIM_WHITE),
                 ),
             ]));
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "    {}",
-                    account.usage.as_deref().unwrap_or("Checking usage...")
-                ),
-                Style::default().fg(DIM_WHITE),
-            )));
+            match &account.usage {
+                Some(usage) => {
+                    for line in usage {
+                        lines.push(Line::from(Span::styled(
+                            format!("    {line}"),
+                            Style::default().fg(DIM_WHITE),
+                        )));
+                    }
+                }
+                None => lines.push(Line::from(Span::styled(
+                    "    Checking usage...",
+                    Style::default().fg(DIM_WHITE),
+                ))),
+            }
             for (model, until) in &account.waits {
                 if *until <= now {
                     continue;
@@ -363,7 +372,7 @@ mod tests {
                         name: "home".into(),
                         current: false,
                         state: "signed in".into(),
-                        usage: Some("5h 100% · resets in 1h".into()),
+                        usage: Some(vec!["5h 0% left, resets in 1h".into()]),
                         waits: vec![(None, crate::rotation::now_ms() + 60_000)],
                     },
                     AccountRow {
@@ -371,7 +380,10 @@ mod tests {
                         name: "work".into(),
                         current: true,
                         state: "signed in".into(),
-                        usage: Some("5h 42% · week 12%".into()),
+                        usage: Some(vec![
+                            "5h 58% left, resets in 2h".into(),
+                            "week 88% left, resets in 4d".into(),
+                        ]),
                         waits: Vec::new(),
                     },
                 ],
@@ -387,8 +399,8 @@ mod tests {
             "Local providers and accounts",
             "home",
             "work [current]",
-            "5h 42%",
-            "week 12%",
+            "5h 58% left",
+            "week 88% left",
             "At its limit",
             "Retry in",
             "auth use codex",
@@ -403,13 +415,19 @@ mod tests {
         let mut panel = fixture();
         apply_account_usage(
             &mut panel.rows,
-            &HashMap::from([(("codex".into(), "new".into()), "5h 7%".into())]),
+            &HashMap::from([(
+                ("codex".into(), "new".into()),
+                vec!["5h 93% left".to_string()],
+            )]),
         );
         assert_eq!(
             panel.rows[0].accounts[0].usage.as_deref(),
-            Some("usage unavailable; run cc-proxy usage codex")
+            Some(&["usage unavailable; run cc-proxy usage codex".to_string()][..])
         );
-        assert_eq!(panel.rows[0].accounts[1].usage.as_deref(), Some("5h 7%"));
+        assert_eq!(
+            panel.rows[0].accounts[1].usage.as_deref(),
+            Some(&["5h 93% left".to_string()][..])
+        );
     }
 
     #[test]

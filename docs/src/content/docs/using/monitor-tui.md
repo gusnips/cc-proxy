@@ -59,10 +59,11 @@ names appear before models. Request and session details show the full name.
 The name belongs to that request, not whichever account is current now.
 
 Press `p` to inspect local saved accounts. `[current]` marks the account chosen
-for new requests. Codex and Kimi rows show provider-reported usage and reset
-times. Confirmed cooldowns show how long each account must wait, including
-model-specific limits. Grok and Antigravity usage percentages are not available;
-their confirmed cooldowns still appear.
+for new requests. Codex shows the signed-in email when the token carries one.
+Codex and Kimi rows show how much is left in each window on its own line, and
+when each window resets. Confirmed cooldowns show how long each account must
+wait, including model-specific limits. Grok and Antigravity usage percentages
+are not available; their confirmed cooldowns still appear.
 
 Up and Down scroll the panel. `r` refreshes it. Usage loads in the background
 and refreshes while the panel is open. A failed lookup says it is unavailable

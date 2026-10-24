@@ -21,7 +21,7 @@ Colors live in `src/ui.rs`: `TEAL`, `WHITE`, `DIM_WHITE`, `GREEN`, `RED`, `YELLO
 - `ui::print_card`, `ui::print_note`, `ui::print_error`, `ui::waiting`, `ui::meter`, `ui::duration`, `ui::provider_name`.
 - `prompt::choose`, `prompt::search`, `prompt::confirm`, `prompt::read_hidden_line`, `RawModeGuard`.
 - Monitor: `TerminalGuard` and `setup_terminal` in `src/tui.rs`. Request rows put the saved account name before the resolved model. Full details keep the original model text.
-- The monitor's `p` panel lists local saved accounts, marks `[current]` and shows confirmed usage/reset or cooldown timers. It scrolls on small terminals. Failed usage is unavailable, never zero. Usage loads on the panel's background worker, not on a request.
+- The monitor's `p` panel lists local saved accounts, marks `[current]` and shows how much is left per window plus reset or cooldown timers. It scrolls on small terminals. Failed usage is unavailable, never zero. Usage loads on the panel's background worker, not on a request.
 
 Build new screens from these. Don't add a terminal UI dependency.
 

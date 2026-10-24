@@ -3,6 +3,24 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.2.15 (2026-10-23)
+
+- Changing saved Codex accounts no longer stops an existing conversation with a
+  400. cc-proxy drops reasoning that belongs to another saved login and
+  continues with the text and tool history. A foreign signature is never sent
+  to another account.
+- Auto-rotate now works on conversations that carry Codex reasoning. A 429
+  with a confirmed reset retries on another saved account inside the same
+  request, so the client does not pause. When every account is waiting, the
+  proxy still returns one 429 with the earliest reset.
+- `cc-proxy usage` and the monitor panel show how much is left in each window,
+  matching the provider dashboards. Each window gets its own line in the panel,
+  and terminal bars empty as the allowance runs out (yellow at 30% left, red at
+  10% left). OpenCode Go reset times use the same "resets in ..." wording as
+  Codex and Kimi.
+- The account list and `cc-proxy auth status codex` show the signed-in email
+  instead of the internal account ID when the token carries one.
+
 ## v0.2.14 (2026-10-23)
 
 - Codex, Kimi, Grok and Antigravity can keep more than one saved login.

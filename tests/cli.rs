@@ -675,12 +675,12 @@ fn usage_shows_every_signed_in_plan_and_how_to_sign_in_to_the_rest()
         String::from_utf8(output.stdout)?,
         concat!(
             "Codex `main` [current] (plus)\n",
-            "  5-hour window: 45% used, already reset (Aug 9 17:00)\n",
-            "  Weekly: 7% used, already reset (Aug 15 00:00)\n",
+            "  5-hour window: 55% left, already reset (Aug 9 17:00)\n",
+            "  Weekly: 93% left, already reset (Aug 15 00:00)\n",
             "\n",
             "Kimi `main` [current] (allegretto)\n",
-            "  5-hour window: 28% used, already reset (Aug 9 09:00)\n",
-            "  Weekly: 12% used, already reset (Aug 14 16:00)\n",
+            "  5-hour window: 72% left, already reset (Aug 9 09:00)\n",
+            "  Weekly: 88% left, already reset (Aug 14 16:00)\n",
             "\n",
             "opencode: no API key set. Run `cc-proxy auth login opencode` or set OPENCODE_API_KEY.\n",
         )
@@ -814,8 +814,14 @@ fn usage_reads_each_saved_accounts_windows_without_switching_current()
             text.contains(&format!("{name} `work` [current] (")),
             "{text}"
         );
-        assert!(text.contains(&format!("{first_used}% used")), "{text}");
-        assert!(text.contains(&format!("{second_used}% used")), "{text}");
+        assert!(
+            text.contains(&format!("{:.0}% left", 100.0 - first_used)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("{:.0}% left", 100.0 - second_used)),
+            "{text}"
+        );
         for hidden in [
             "test-access",
             "second-access",

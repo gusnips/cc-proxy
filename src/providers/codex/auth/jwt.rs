@@ -6,7 +6,6 @@ struct IdTokenClaims {
     chatgpt_account_id: Option<String>,
     #[serde(default)]
     organizations: Option<Vec<OrgClaim>>,
-    #[allow(dead_code)]
     #[serde(default)]
     email: Option<String>,
     #[serde(default)]
@@ -15,6 +14,15 @@ struct IdTokenClaims {
     #[serde(default)]
     #[serde(rename = "https://api.openai.com/auth.chatgpt_account_id")]
     openai_chatgpt_account_id: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "https://api.openai.com/profile")]
+    profile: Option<ProfileClaim>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileClaim {
+    #[serde(default)]
+    email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +95,16 @@ pub fn extract_account_id(tokens: &TokenResponse) -> Option<String> {
     extract_account_id_from_claims(&claims)
 }
 
+/// The account email for display. A saved access token carries it under the
+/// profile claim; an id token may carry it at the top level.
+pub fn extract_email(token: &str) -> Option<String> {
+    let claims = parse_jwt_claims(token)?;
+    claims
+        .email
+        .or_else(|| claims.profile?.email)
+        .filter(|email| !email.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +144,15 @@ mod tests {
             expires_in: None,
         };
         assert_eq!(extract_account_id(&token), None);
+    }
+
+    #[test]
+    fn extract_email_reads_the_profile_claim_and_falls_back_to_the_top_level() {
+        let profile = "eyJhbGciOiJIUzI1NiJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL3Byb2ZpbGUiOnsiZW1haWwiOiJ3b3JrQGV4YW1wbGUuY29tIn19.sig";
+        assert_eq!(extract_email(profile), Some("work@example.com".into()));
+        let top_level = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6ImhvbWVAZXhhbXBsZS5jb20ifQ.sig";
+        assert_eq!(extract_email(top_level), Some("home@example.com".into()));
+        assert_eq!(extract_email("invalid"), None);
     }
 
     #[test]

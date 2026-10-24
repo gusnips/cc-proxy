@@ -173,57 +173,49 @@ impl CodexProvider {
     }
 }
 
-/// Client-held replay must name the immutable login that produced it. Session
-/// identity and the number of saved accounts are not evidence of ownership.
-fn history_matches_account(body: &MessagesRequest, account: Option<&str>) -> bool {
+/// Replay bound to one saved login must not travel to another. Drop only the
+/// unverifiable reasoning blocks: text, tool calls and tool results still carry
+/// the conversation, so a switched account continues instead of hitting a 400.
+fn strip_unverifiable_reasoning(body: &mut MessagesRequest, account: Option<&str>) -> usize {
     use translate::reasoning_signature::{
         decode_reasoning_signature, is_proxy_reasoning_signature, signature_account,
     };
-    body.messages
-        .iter()
-        .filter_map(|message| message.content.as_array())
-        .flatten()
-        .all(|block| {
-            if block
+    let mut dropped = 0;
+    let mut emptied = Vec::new();
+    for (index, message) in body.messages.iter_mut().enumerate() {
+        let Some(blocks) = message.content.as_array_mut() else {
+            continue;
+        };
+        let before = blocks.len();
+        blocks.retain(|block| {
+            let raw = block
                 .get("encrypted_content")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| !value.is_empty())
-            {
-                return false;
-            }
-            let Some(signature) = block
+                .is_some_and(|value| !value.is_empty());
+            let signature = block
                 .get("signature")
                 .and_then(serde_json::Value::as_str)
-                .filter(|signature| is_proxy_reasoning_signature(signature))
-            else {
-                return true;
-            };
-            account.is_some()
-                && signature_account(signature) == account
-                && decode_reasoning_signature(signature).is_some()
-        })
-}
-
-/// Opaque replay blobs stay on their originating account.
-pub(crate) fn can_rotate(body: &MessagesRequest) -> bool {
-    !body
-        .messages
-        .iter()
-        .filter_map(|message| message.content.as_array())
-        .flatten()
-        .any(|block| {
-            matches!(
-                block.get("type").and_then(serde_json::Value::as_str),
-                Some("thinking" | "reasoning" | "compaction")
-            ) && (block
-                .get("encrypted_content")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| !value.is_empty())
-                || block
-                    .get("signature")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(translate::reasoning_signature::is_proxy_reasoning_signature))
-        })
+                .filter(|signature| is_proxy_reasoning_signature(signature));
+            let owned = signature.is_some_and(|signature| {
+                account.is_some()
+                    && signature_account(signature) == account
+                    && decode_reasoning_signature(signature).is_some()
+            });
+            let drop = raw || (signature.is_some() && !owned);
+            if drop {
+                dropped += 1;
+            }
+            !drop
+        });
+        if blocks.len() < before && blocks.is_empty() {
+            emptied.push(index);
+        }
+    }
+    // An assistant turn that held only reasoning has nothing left to send.
+    for index in emptied.into_iter().rev() {
+        body.messages.remove(index);
+    }
+    dropped
 }
 
 fn transport_for_request(
@@ -240,7 +232,7 @@ fn transport_for_request(
 impl CodexProvider {
     async fn handle_messages_inner(
         &self,
-        body: MessagesRequest,
+        mut body: MessagesRequest,
         mut ctx: RequestContext,
         conversation_identity: Option<ConversationIdentity>,
     ) -> Response {
@@ -248,11 +240,13 @@ impl CodexProvider {
             Ok(client) => client,
             Err(error) => return map_codex_error_to_response(&error),
         };
-        if !history_matches_account(&body, ctx.account.as_deref()) {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                "This encrypted Codex history belongs to another saved login, or was made before account tracking. Switch back to the original saved account, or start a new conversation.",
+        let dropped = strip_unverifiable_reasoning(&mut body, ctx.account.as_deref());
+        if dropped > 0 {
+            tracing::warn!(
+                req_id = %ctx.req_id,
+                account = ctx.account.as_deref().unwrap_or("none"),
+                blocks = dropped,
+                "dropped Codex reasoning from another saved login"
             );
         }
         let namespace = self.pin_session_account(&ctx);
@@ -2224,9 +2218,9 @@ impl crate::accounts::AccountSupport for CodexCli {
 
     fn state(&self, login: &serde_json::Value) -> crate::provider::AuthState {
         match serde_json::from_value::<auth::token_store::StoredAuth>(login.clone()) {
-            Ok(auth) => crate::provider::AuthState::SignedIn {
-                account: auth.account_id,
-                expires_ms: Some(auth.expires),
+            Ok(stored) => crate::provider::AuthState::SignedIn {
+                account: auth::jwt::extract_email(&stored.access).or(stored.account_id),
+                expires_ms: Some(stored.expires),
             },
             Err(_) => crate::provider::AuthState::Missing,
         }
@@ -2282,68 +2276,95 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rotation_rejects_only_original_account_bound_replay() {
-        for block in [
-            serde_json::json!({"type":"thinking","thinking":"summary","signature":"ccp:codex:v1:cnNfMQ:opaque"}),
-            serde_json::json!({"type":"reasoning","encrypted_content":"opaque"}),
-            serde_json::json!({"type":"compaction","encrypted_content":"opaque"}),
-        ] {
-            assert!(!can_rotate(&request_with_tail(serde_json::json!([
-                {"role":"assistant","content":[block]}
-            ]))));
-        }
-        for content in [
-            serde_json::json!("hello"),
-            serde_json::json!([{"type":"thinking","thinking":"summary","signature":"another-provider"}]),
-            serde_json::json!([{"type":"text","text":"portable summary"}]),
-            serde_json::json!([{"type":"tool_use","id":"call","name":"Read","input":{"encrypted_content":"ordinary tool input"}}]),
-        ] {
-            assert!(can_rotate(&request_with_tail(serde_json::json!([
-                {"role":"assistant","content":content}
-            ]))));
-        }
-    }
-
-    #[test]
-    fn signatures_keep_their_account_across_siblings_replacement_and_restart() {
+    fn unverifiable_reasoning_is_dropped_and_portable_history_survives() {
         use translate::reasoning_signature::{ReasoningReplay, encode_reasoning_signature};
-        let replay = ReasoningReplay {
-            id: "rs_a".into(),
-            encrypted_content: "from-a".into(),
-        };
-        let signature = encode_reasoning_signature(&replay, Some("account-a")).unwrap();
-        let body = request_with_tail(serde_json::json!([
-            {"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":signature}]}
+        let own = encode_reasoning_signature(
+            &ReasoningReplay {
+                id: "rs_a".into(),
+                encrypted_content: "from-a".into(),
+            },
+            Some("account-a"),
+        )
+        .unwrap();
+        let body = serde_json::json!([
+            {"role":"user","content":"ping"},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"mine","signature":own},
+                {"type":"text","text":"kept"}
+            ]},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"legacy","signature":"ccp:codex:v1:cnNfMQ:opaque"},
+                {"type":"reasoning","encrypted_content":"unknown"},
+                {"type":"compaction","encrypted_content":"unknown"},
+                {"type":"tool_use","id":"call","name":"Read","input":{"encrypted_content":"ordinary tool input"}}
+            ]}
+        ]);
+
+        let mut own_body = request_with_tail(body.clone());
+        assert_eq!(
+            strip_unverifiable_reasoning(&mut own_body, Some("account-a")),
+            3
+        );
+        assert!(
+            own_body.messages[1]
+                .content
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| {
+                    block.get("signature").and_then(serde_json::Value::as_str) == Some(own.as_str())
+                }),
+            "the account's own signature stays"
+        );
+        let mut other = request_with_tail(body);
+        assert_eq!(
+            strip_unverifiable_reasoning(&mut other, Some("account-b")),
+            4
+        );
+
+        let content =
+            |request: &MessagesRequest, index: usize| request.messages[index].content.clone();
+        assert!(content(&other, 1).as_array().unwrap().iter().any(|block| {
+            block.get("type").and_then(serde_json::Value::as_str) == Some("text")
+        }));
+        assert!(content(&other, 2).as_array().unwrap().iter().any(|block| {
+            block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
+        }));
+        assert!(
+            !content(&other, 2)
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| { block.get("signature").is_some() })
+        );
+        // An assistant turn with nothing but foreign reasoning disappears
+        // instead of becoming an empty message upstream.
+        let mut only_reasoning = request_with_tail(serde_json::json!([
+            {"role":"assistant","content":[{"type":"reasoning","encrypted_content":"unknown"}]},
+            {"role":"user","content":"next"}
         ]));
-        let provider = CodexProvider::new();
-        let mut main = live_test_context("shared-session");
-        main.account = Some("account-a".into());
-        provider.pin_session_account(&main);
-        assert!(history_matches_account(&body, main.account.as_deref()));
-        let mut sibling = main.clone();
-        sibling.account = Some("account-b".into());
-        provider.pin_session_account(&sibling);
-        assert!(!history_matches_account(&body, sibling.account.as_deref()));
-        // A portable sibling cannot rebind the main conversation's old signature.
-        main.account = Some("account-b".into());
-        assert!(!history_matches_account(&body, main.account.as_deref()));
-        // A restart or removal of the old login does not erase the signature's issuer.
-        let restarted = CodexProvider::new();
-        restarted.pin_session_account(&main);
-        main.session_id = None;
-        assert!(!history_matches_account(&body, main.account.as_deref()));
-        main.account = Some("account-a".into());
-        assert!(history_matches_account(&body, main.account.as_deref()));
-        assert!(!history_matches_account(&body, None));
-        for block in [
-            serde_json::json!({"type":"thinking","signature":"ccp:codex:v1:cnNfYQ:old"}),
-            serde_json::json!({"type":"reasoning","encrypted_content":"unknown"}),
-            serde_json::json!({"type":"compaction","encrypted_content":"unknown"}),
-        ] {
-            let unverified =
-                request_with_tail(serde_json::json!([{"role":"assistant","content":[block]}]));
-            assert!(!history_matches_account(&unverified, Some("account-a")));
-        }
+        assert_eq!(
+            strip_unverifiable_reasoning(&mut only_reasoning, Some("account-a")),
+            1
+        );
+        assert_eq!(only_reasoning.messages.len(), 1);
+        assert_eq!(
+            only_reasoning.messages[0].content,
+            serde_json::json!("next")
+        );
+        // A raw provider block without a saved login cannot stay either.
+        let mut none = request_with_tail(serde_json::json!([
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"mine","signature":"not-proxy"},
+                {"type":"reasoning","encrypted_content":"unknown"}
+            ]}
+        ]));
+        assert_eq!(strip_unverifiable_reasoning(&mut none, None), 1);
+        assert_eq!(
+            none.messages[0].content.as_array().unwrap().len(),
+            1,
+            "a signature from another product is not ours to strip"
+        );
     }
 
     #[test]

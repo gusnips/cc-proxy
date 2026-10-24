@@ -186,7 +186,8 @@ saved offers to replace that account instead of adding a duplicate.
 
 `auth use` without an account opens a picker in a terminal. The switch applies
 to the next request, without restarting the proxy. `auth status` lists all
-accounts, the current one and any limit wait. `logout` without a name signs
+accounts, the current one and any limit wait. Codex shows the signed-in email
+when the saved token carries one. `logout` without a name signs
 out when there is one account; with several, it asks which one. Scripts must
 name the account or use `--all`.
 
@@ -208,12 +209,12 @@ straight from the provider with the sign-in the proxy already holds:
 
 ```text
 Codex `home` [current] (plus)
-  5-hour window: 45% used, resets in 2h 10m (17:00)
-  Weekly: 7% used, resets in 4d 9h (Mon 00:00)
+  5-hour window: 55% left, resets in 2h 10m (17:00)
+  Weekly: 93% left, resets in 4d 9h (Mon 00:00)
 ```
 
-In a terminal, each window also gets a bar that turns yellow at 70% used and
-red at 90%.
+In a terminal, each window also gets a bar that empties as the allowance runs
+out. It turns yellow with 30% left and red with 10% left.
 
 | Provider   | Asks                                             | Shows                                      |
 | ---------- | ------------------------------------------------ | ------------------------------------------ |

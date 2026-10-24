@@ -227,10 +227,7 @@ pub(crate) async fn execute(
             .handle_messages_with_conversation_identity(body, context, identity)
             .await;
     };
-    if !crate::config::auth_auto_rotate()
-        || support.pinned_credentials().is_some()
-        || (provider.name() == "codex" && !crate::providers::codex::can_rotate(&body))
-    {
+    if !crate::config::auth_auto_rotate() || support.pinned_credentials().is_some() {
         return provider
             .handle_messages_with_conversation_identity(body, context, identity)
             .await;

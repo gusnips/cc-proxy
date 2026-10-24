@@ -109,17 +109,18 @@ Antigravity's short `RATE_LIMIT_EXCEEDED` capacity throttles never switch
 accounts. Gemini API keys do not rotate: Google's quotas belong to the
 project, not the key.
 
-The replacement stays in use. An account whose wait ends becomes eligible
-again, but nothing forces a switch back. If every account is waiting, the
-proxy returns one 429 with the earliest retry time. `cc-proxy auth status codex`
-shows each account's wait.
+The current account is used again once its wait ends. An account whose wait
+ends becomes eligible again. If every account is waiting, the proxy returns one
+429 with the earliest retry time. `cc-proxy auth status codex` shows each
+account's wait.
 
 Rotation never replays output after a stream starts. Codex reasoning signatures
 name the saved login that created them, so they remain usable after a proxy
-restart but cannot move between accounts. Replacing a login gives it a new
-internal ID. History from older proxy versions, raw encrypted blocks and history
-from a replaced login need a new conversation. Ordinary text and tool history
-can rotate.
+restart but cannot move between accounts. When a conversation carries reasoning
+from another saved login (after a switch, a replacement, or history from an
+older proxy version), cc-proxy drops only that reasoning and continues with the
+text and tool history. The answer may know less about the earlier reasoning;
+nothing else is lost.
 
 Codex's native Responses route rejects encrypted history, item references,
 `conversation` and `previous_response_id` because their account cannot be

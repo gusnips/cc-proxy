@@ -178,12 +178,14 @@ A model-specific limit does not block other models.
 
 Rotation only applies to Messages requests before output starts, not images,
 audio or OpenAI-compatible routes. Codex's encrypted history stays with the
-saved login that created it, including after a restart. History from older
-proxy versions needs a new conversation. See [rotation limits](docs/src/content/docs/reference/configuration.md#saved-accounts-and-auto-rotate).
+saved login that created it, including after a restart. When a conversation
+carries reasoning from another saved login, cc-proxy drops only that reasoning
+and continues with the text and tool history. See [rotation limits](docs/src/content/docs/reference/configuration.md#saved-accounts-and-auto-rotate).
 
-Run `cc-proxy usage codex` or `cc-proxy usage kimi` to see each saved account's
-usage and reset times. In the monitor, press `p` for accounts, known usage and
-wait timers. Request rows keep the name of the account they actually used.
+Run `cc-proxy usage codex` or `cc-proxy usage kimi` to see how much is left on
+each saved account and when each window resets. In the monitor, press `p` for
+accounts, usage and wait timers. Request rows keep the name of the account they
+actually used.
 
 Run `cc-proxy config` for keyboard settings: Up and Down move, Left and Right
 change fixed choices, Enter edits a value. Changes save at once.
