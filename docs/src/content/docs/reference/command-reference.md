@@ -221,7 +221,7 @@ Logout removes the local proxy-owned credential. It does not call the provider t
 ## `usage`
 
 ```sh
-cc-proxy usage [codex|kimi|opencode] [--json]
+cc-proxy usage [claude|codex|kimi|opencode] [--json]
 ```
 
 Shows how much of each plan you have used and when each limit resets, asked
@@ -238,26 +238,28 @@ out. It turns yellow with 30% left and red with 10% left.
 
 | Provider   | Asks                                             | Shows                                      |
 | ---------- | ------------------------------------------------ | ------------------------------------------ |
+| `claude`   | `GET https://api.anthropic.com/api/oauth/usage`  | 5-hour and weekly windows, plan            |
 | `codex`    | `GET https://chatgpt.com/backend-api/wham/usage` | 5-hour and weekly windows, plan            |
 | `kimi`     | `GET https://api.kimi.ai/coding/v1/usages`       | 5-hour and weekly quotas, plan             |
 | `opencode` | `GET https://opencode.ai/zen/go/v1/usage`        | Rolling 5-hour, weekly and monthly windows |
 
 Each address follows the provider's base URL (`codex.baseUrl`, `kimi.baseUrl`,
 `opencode.baseUrl`). No provider documents these endpoints, so a Codex or Kimi
-window that cc-proxy can't read shows as `not reported`.
+window that cc-proxy can't read shows as `not reported`. The Claude address
+is fixed.
 
 With no provider named, every provider is shown. Each one you haven't signed
 in to gets one line with its login command. Name a provider to see only that
 one. If it isn't signed in, that line goes to stderr and the command exits
 with status 1. A failed lookup exits with status 2.
 
-Codex and Kimi show every saved account and mark the current one. Usage
+Claude, Codex and Kimi show every saved account and mark the current one. Usage
 lookups never change which account requests use. A failed lookup names the
 account and leaves other accounts visible. `auth status <provider>` shows
 saved accounts and confirmed cooldowns without contacting the provider.
 
-`--json` prints one object with a key per provider. Codex and Kimi share one
-shape:
+`--json` prints one object with a key per provider. Claude, Codex and Kimi share
+one shape:
 
 ```json
 {
