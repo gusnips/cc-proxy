@@ -248,6 +248,16 @@ impl PlanUsage {
                 .collect(),
         )
     }
+
+    fn exhausted_until_ms(&self, now_ms: u64) -> Option<u64> {
+        [self.five_hour, self.weekly]
+            .into_iter()
+            .flatten()
+            .filter(|window| window.remaining_percent() <= 0.0)
+            .filter_map(|window| window.resets_at_ms.and_then(|ms| u64::try_from(ms).ok()))
+            .filter(|until| *until > now_ms)
+            .max()
+    }
 }
 
 enum Report {
@@ -490,7 +500,14 @@ async fn fetch(
         let is_current = current.as_ref() == Some(&account.id);
         async move {
             let result = match fetch_account(provider, &account.id, client).await {
-                Ok(usage) => AccountResult::Usage { usage },
+                Ok(usage) => {
+                    let _ = crate::rotation::Cooldowns::new().sync_account_window(
+                        provider.id(),
+                        &account.id,
+                        usage.exhausted_until_ms(crate::rotation::now_ms()),
+                    );
+                    AccountResult::Usage { usage }
+                }
                 Err(failure) => AccountResult::Unavailable {
                     error: provider.describe(&account.name, failure),
                 },

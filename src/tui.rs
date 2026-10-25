@@ -1888,9 +1888,9 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
     let hint = if app.page == Page::Accounts && app.providers.menu_open() {
         " Esc back · ↑/↓ choose · Enter run · q close"
     } else if area.width < 80 {
-        " q close · ↑↓ move · Enter · PgDn · ?"
+        " q close · ↑↓ move · Enter · u/d · ?"
     } else if app.page == Page::Accounts {
-        " ←/→ or Tab tabs · ↑/↓ move · Enter actions · PgUp/PgDn details · r refresh · ? help · q close"
+        " ←/→ or Tab tabs · ↑/↓ move · Enter actions · u/d details · r refresh · ? help · q close"
     } else {
         " ←/→ or Tab tabs · ↑/↓ move between panes · j/k move in pane · Enter details · Esc back · ? help · q close"
     };
@@ -2021,7 +2021,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ("↑ / ↓", "move between rows and activity panes"),
         ("j / k", "move down / up within a pane"),
         ("Enter", "choose an action or open details"),
-        ("PgUp/PgDn", "scroll account details"),
+        ("u / d", "scroll account details"),
         ("r", "refresh accounts and usage"),
         (
             "Esc",

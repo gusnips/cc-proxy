@@ -272,8 +272,12 @@ impl ProvidersPanel {
         match key {
             KeyCode::Up | KeyCode::Char('k') => self.step(false),
             KeyCode::Down | KeyCode::Char('j') => self.step(true),
-            KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(3),
-            KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(3),
+            KeyCode::PageDown | KeyCode::Char('d') | KeyCode::Char(']') => {
+                self.detail_scroll = self.detail_scroll.saturating_add(3)
+            }
+            KeyCode::PageUp | KeyCode::Char('u') | KeyCode::Char('[') => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(3)
+            }
             KeyCode::Home if self.menu.is_none() => self.selected = Entry::Rotate,
             KeyCode::End if self.menu.is_none() => {
                 self.selected = self.entries().last().unwrap().clone()
@@ -888,6 +892,7 @@ fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
 }
 
 fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String), MonitorUsage>) {
+    let now = crate::rotation::now_ms();
     for row in rows {
         for account in &mut row.accounts {
             let lines = usage.get(&(row.id.clone(), account.id.clone())).cloned().unwrap_or_else(|| {
@@ -898,6 +903,18 @@ fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String
                     _ => MonitorUsage::NotReported("This provider does not report usage. Confirmed wait timers still appear here."),
                 }
             });
+            if let MonitorUsage::Reported(windows) = &lines {
+                let exhausted_until = windows
+                    .iter()
+                    .filter(|window| window.remaining_percent <= 0.0)
+                    .filter_map(|window| window.resets_at_ms.and_then(|ms| u64::try_from(ms).ok()))
+                    .filter(|until| *until > now)
+                    .max();
+                account.waits.retain(|(model, _)| model.is_some());
+                if let Some(until) = exhausted_until {
+                    account.waits.push((None, until));
+                }
+            }
             account.usage = Some(lines);
         }
     }
@@ -1134,6 +1151,7 @@ mod tests {
                 resets_at_ms: None
             }])),
         );
+        assert!(rows[0].accounts[1].waits.is_empty());
     }
 
     #[test]

@@ -3,6 +3,19 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.3.3 (2026-10-25)
+
+- Live usage lookups now clear stale account wait timers when a provider resets
+  a 5-hour or weekly quota window early, and update saved reset times when the
+  provider moves them. Switching to an account in the monitor or with
+  `cc-proxy auth use` also clears its saved wait timer.
+- `cc-proxy monitor` shows remaining quota inline for every saved account,
+  preserves quota colors on the selected row, orders providers by active route,
+  fallback chain, connected and alphabetical, and adds `u`/`d` (plus `[`/`]`)
+  to scroll account details on keyboards without `PgUp`/`PgDn`.
+- New accounts default to the signed-in email address when the provider reports
+  one, and Anthropic API requests strip client identity headers.
+
 ## v0.3.2 (2026-10-24)
 
 - Remaining percentages now show bright green from 80%, green above 30%, yellow

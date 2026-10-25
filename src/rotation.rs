@@ -92,7 +92,13 @@ impl Cooldowns {
             .max())
     }
 
-    fn mark(&self, provider: &str, id: &str, model: Option<&str>, until_ms: u64) -> Result<()> {
+    pub(crate) fn mark(
+        &self,
+        provider: &str,
+        id: &str,
+        model: Option<&str>,
+        until_ms: u64,
+    ) -> Result<()> {
         fs::create_dir_all(
             self.path
                 .parent()
@@ -115,6 +121,63 @@ impl Cooldowns {
             }),
         }
         crate::fsutil::write_atomic(&self.path, &serde_json::to_vec_pretty(&entries)?)?;
+        Ok(())
+    }
+
+    /// Aligns an account's saved wait timer with its live quota windows:
+    /// clears the account-wide wait when every window has quota left, or
+    /// updates `until_ms` when the provider moved the reset time.
+    pub(crate) fn sync_account_window(
+        &self,
+        provider: &str,
+        id: &str,
+        exhausted_until_ms: Option<u64>,
+    ) -> Result<()> {
+        if !self.path.exists() && exhausted_until_ms.is_none() {
+            return Ok(());
+        }
+        fs::create_dir_all(
+            self.path
+                .parent()
+                .context("The cooldown path has no parent folder")?,
+        )?;
+        let lock = File::create(self.path.with_extension("lock"))?;
+        lock.lock()?;
+        let now = now_ms();
+        let mut entries = self.read()?;
+        entries.retain(|c| {
+            c.until_ms > now && !(c.provider == provider && c.account == id && c.model.is_none())
+        });
+        if let Some(until_ms) = exhausted_until_ms.filter(|until| *until > now) {
+            entries.push(Cooldown {
+                provider: provider.into(),
+                account: id.into(),
+                model: None,
+                until_ms,
+            });
+        }
+        crate::fsutil::write_atomic(&self.path, &serde_json::to_vec_pretty(&entries)?)?;
+        Ok(())
+    }
+
+    pub(crate) fn clear_account(&self, provider: &str, id: &str) -> Result<()> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+        fs::create_dir_all(
+            self.path
+                .parent()
+                .context("The cooldown path has no parent folder")?,
+        )?;
+        let lock = File::create(self.path.with_extension("lock"))?;
+        lock.lock()?;
+        let now = now_ms();
+        let mut entries = self.read()?;
+        let before = entries.len();
+        entries.retain(|c| c.until_ms > now && !(c.provider == provider && c.account == id));
+        if entries.len() != before {
+            crate::fsutil::write_atomic(&self.path, &serde_json::to_vec_pretty(&entries)?)?;
+        }
         Ok(())
     }
 }
@@ -1062,6 +1125,19 @@ mod tests {
             path: dir.path().join("rotation.json"),
         };
         assert_eq!(reopened.until("codex", &list[0].id).unwrap(), Some(until));
+        assert_eq!(reopened.until("codex", &list[1].id).unwrap(), Some(until));
+
+        reopened
+            .sync_account_window("codex", &list[0].id, Some(until - 30_000))
+            .unwrap();
+        assert_eq!(
+            reopened.until("codex", &list[0].id).unwrap(),
+            Some(until - 30_000)
+        );
+        reopened
+            .sync_account_window("codex", &list[0].id, None)
+            .unwrap();
+        assert_eq!(reopened.until("codex", &list[0].id).unwrap(), None);
         assert_eq!(reopened.until("codex", &list[1].id).unwrap(), Some(until));
     }
 

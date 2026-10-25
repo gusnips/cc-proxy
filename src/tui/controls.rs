@@ -63,6 +63,7 @@ impl Action {
                         "This saved login was removed or replaced. Press Esc, then r to refresh.",
                     )?;
                 accounts.set_current(&account.name)?;
+                let _ = crate::rotation::Cooldowns::new().clear_account(provider, &account.id);
                 Ok(format!(
                     "Saved. New {} requests use {}. Requests already running keep their account.",
                     ui::provider_name(provider),
