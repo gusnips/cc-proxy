@@ -108,8 +108,11 @@ Quota percentages alone never trigger a switch.
 Codex's usage-limit reset clock works even when it omits `Retry-After`.
 Antigravity's `QUOTA_EXHAUSTED` errors use Google's retry delay or reset
 clock. When a 429 arrives without one, cc-proxy asks Google's quota endpoint
-for the model's reset time, so an exhausted Antigravity model still gets a real
-deadline. A model-specific limit blocks only that model on that account.
+whether the model's group (Gemini, or Claude and GPT-OSS) has a spent 5-hour or
+weekly window. If one is spent, the model gets a real deadline: the later reset
+of the spent windows. If both windows still have quota, the 429 is a capacity
+throttle and the request stays on the same account. A limit blocks only the
+model that hit it on that account.
 Antigravity's short `RATE_LIMIT_EXCEEDED` capacity throttles never switch
 accounts.
 

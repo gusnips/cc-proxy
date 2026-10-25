@@ -968,7 +968,7 @@ fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String
                 match row.id.as_str() {
                     "opencode" if account.current => row.usage.clone().unwrap_or_else(|| MonitorUsage::Unavailable("Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into())),
                     "opencode" => MonitorUsage::NotReported("OpenCode Go reports usage for the current account only."),
-                    "claude" | "codex" | "kimi" => MonitorUsage::Unavailable(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id)),
+                    "claude" | "codex" | "kimi" | "antigravity" => MonitorUsage::Unavailable(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id)),
                     _ => MonitorUsage::NotReported("This provider does not report usage. Confirmed wait timers still appear here."),
                 }
             });

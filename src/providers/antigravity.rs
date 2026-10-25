@@ -66,7 +66,7 @@ const SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/experimentsandconfigs",
 ];
 
-const IDE_USER_AGENT: &str =
+pub(crate) const IDE_USER_AGENT: &str =
     "antigravity/ide/2.5.5 (os_type=windows; arch=amd64; aidev_client; auth_method=oauth)";
 const CLI_USER_AGENT: &str =
     "antigravity/cli/1.3.4 (os_type=darwin; arch=arm64; aidev_client; auth_method=oauth)";
@@ -553,7 +553,9 @@ fn discover_project_blocking(
     )
 }
 
-async fn load_valid_auth(account: Option<&str>) -> Result<StoredAntigravityAuth, ProviderError> {
+pub(crate) async fn load_valid_auth(
+    account: Option<&str>,
+) -> Result<StoredAntigravityAuth, ProviderError> {
     let store = account_store(account).map_err(auth_storage_error)?;
     load_valid_auth_from_store(store, TOKEN_ENDPOINT.to_string()).await
 }
@@ -611,9 +613,9 @@ fn build_antigravity_envelope(
     }))
 }
 
-/// Fill in the reset time Google's 429 left out. The quota endpoint knows it
-/// per model, which is also the only way to tell a spent window from a short
-/// throttle: only a bucket at zero means the request waits.
+/// Fill in the reset time Google's 429 left out. The quota endpoints know it,
+/// which is also the only way to tell a spent window from a short throttle:
+/// only a bucket at zero means the request waits.
 async fn with_quota_reset(
     mut error: ProviderError,
     client: &reqwest::Client,
@@ -625,7 +627,11 @@ async fn with_quota_reset(
     {
         return error;
     }
-    let Some(until_ms) = quota_reset(client, auth, wire_model).await else {
+    let until = match family_reset(client, auth, wire_model).await {
+        Some(until) => Some(until),
+        None => quota_reset(client, auth, wire_model).await,
+    };
+    let Some(until_ms) = until else {
         return error;
     };
     error.rotation_hint = Some(RotationHint::RetryAt {
@@ -643,7 +649,152 @@ async fn with_quota_reset(
     error
 }
 
-/// When `wire_model` comes back, from Google's quota endpoint. There is one
+/// The models that share one allowance. Google keeps a 5-hour and a weekly
+/// bucket for each family, not for each model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Family {
+    Gemini,
+    /// Claude and the GPT-OSS models share one group.
+    Claude,
+}
+
+impl Family {
+    pub(crate) fn of_model(wire_model: &str) -> Self {
+        if wire_model.contains("gemini") {
+            Self::Gemini
+        } else {
+            Self::Claude
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Gemini => "Gemini",
+            Self::Claude => "Claude",
+        }
+    }
+
+    /// Short labels for the monitor: the 5-hour and the weekly window.
+    pub(crate) fn short_labels(self) -> [&'static str; 2] {
+        match self {
+            Self::Gemini => ["Gemini 5h", "Gemini week"],
+            Self::Claude => ["Claude 5h", "Claude week"],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Bucket {
+    pub family: Family,
+    pub weekly: bool,
+    pub remaining_fraction: f64,
+    pub reset_ms: Option<i64>,
+}
+
+/// The request that asks how much of each allowance is left.
+pub(crate) fn quota_request(
+    client: &reqwest::Client,
+    auth: &StoredAntigravityAuth,
+    user_agent: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .post(format!(
+            "{DAILY_API}/{API_VERSION}:retrieveUserQuotaSummary"
+        ))
+        .bearer_auth(&auth.access)
+        .header("User-Agent", user_agent)
+        .json(&json!({ "project": auth.project_id }))
+}
+
+/// Reads `:retrieveUserQuotaSummary`: `groups[]` of models, each with 5-hour
+/// and weekly `buckets[]`. A group or bucket that can't be read is left out.
+pub(crate) fn parse_quota_summary(body: &Value) -> Vec<Bucket> {
+    let text = |value: &Value, keys: &[&str]| {
+        keys.iter()
+            .filter_map(|key| value.get(*key).and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let groups = body.get("groups").and_then(Value::as_array);
+    let mut buckets = Vec::new();
+    for group in groups.into_iter().flatten() {
+        let name = text(group, &["displayName", "description"]);
+        let family = if name.contains("gemini") {
+            Family::Gemini
+        } else if ["claude", "3p", "gpt"]
+            .iter()
+            .any(|word| name.contains(word))
+        {
+            Family::Claude
+        } else {
+            continue;
+        };
+        let group_buckets = group.get("buckets").and_then(Value::as_array);
+        for bucket in group_buckets.into_iter().flatten() {
+            let label = text(bucket, &["window", "bucketId", "displayName"]);
+            let weekly = label.contains("week");
+            if !weekly && !label.contains("5h") && !label.contains("five") {
+                continue;
+            }
+            let Some(remaining) = bucket
+                .get("remainingFraction")
+                .or_else(|| bucket.pointer("/remaining/remainingFraction"))
+                .and_then(Value::as_f64)
+            else {
+                continue;
+            };
+            buckets.push(Bucket {
+                family,
+                weekly,
+                remaining_fraction: remaining.clamp(0.0, 1.0),
+                reset_ms: bucket
+                    .get("resetTime")
+                    .and_then(Value::as_str)
+                    .and_then(|time| time.parse::<jiff::Timestamp>().ok())
+                    .map(|time| time.as_millisecond()),
+            });
+        }
+    }
+    buckets
+}
+
+/// When the family of `wire_model` comes back, if one of its windows is spent.
+async fn family_reset(
+    client: &reqwest::Client,
+    auth: &StoredAntigravityAuth,
+    wire_model: &str,
+) -> Option<u64> {
+    let response = quota_request(client, auth, user_agent_for_wire_model(wire_model))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value = response.json().await.ok()?;
+    spent_until(
+        &parse_quota_summary(&body),
+        Family::of_model(wire_model),
+        now_ms(),
+    )
+}
+
+/// The latest reset among the family's spent windows: the request can only
+/// go through once every spent window is back.
+fn spent_until(buckets: &[Bucket], family: Family, now: u64) -> Option<u64> {
+    buckets
+        .iter()
+        .filter(|bucket| bucket.family == family && bucket.remaining_fraction <= 0.0)
+        .filter_map(|bucket| bucket.reset_ms.and_then(|ms| u64::try_from(ms).ok()))
+        .filter(|until| *until > now)
+        .max()
+}
+
+/// When `wire_model` comes back, from Google's per-model quota endpoint, for
+/// accounts the summary doesn't cover. There is one
 /// bucket per model; a bucket with quota left means the 429 was a short
 /// throttle, not a spent window.
 async fn quota_reset(
@@ -952,7 +1103,7 @@ impl Provider for AntigravityProvider {
     }
 }
 
-struct AntigravityCli;
+pub(crate) struct AntigravityCli;
 
 fn generate_pkce() -> (String, String) {
     let mut bytes = [0u8; 48];
@@ -1132,7 +1283,7 @@ impl CliHandlers for AntigravityCli {
     }
 }
 
-static ANTIGRAVITY_CLI: AntigravityCli = AntigravityCli;
+pub(crate) static ANTIGRAVITY_CLI: AntigravityCli = AntigravityCli;
 
 #[cfg(test)]
 mod tests {
@@ -1539,5 +1690,44 @@ mod tests {
         assert_eq!(quota_reset_from(&body, "gemini-4-argon-high", now), None);
         assert_eq!(quota_reset_from(&body, "missing-model", now), None);
         assert_eq!(quota_reset_from(&body, "claude-opus-5-5-high", later), None);
+    }
+
+    #[test]
+    fn a_spent_family_waits_for_its_latest_spent_window_and_others_keep_going() {
+        let body = json!({"groups": [
+            {"displayName": "Gemini Models", "buckets": [
+                {"bucketId": "gemini-weekly", "window": "weekly", "resetTime": "2026-09-11T02:25:41Z", "remainingFraction": 0},
+                {"bucketId": "gemini-5h", "window": "5h", "resetTime": "2026-09-04T12:25:41Z", "remainingFraction": 0}
+            ]},
+            {"displayName": "Claude and GPT models", "description": "Claude Opus, GPT-OSS", "buckets": [
+                {"bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining", "resetTime": "2026-09-11T10:57:22Z", "remaining": {"remainingFraction": 0.95}},
+                {"bucketId": "3p-5h", "displayName": "Five Hour Limit Remaining", "resetTime": "2026-09-04T12:54:45Z", "remainingFraction": 1.0}
+            ]},
+            {"displayName": "Image models", "buckets": [
+                {"window": "5h", "remainingFraction": 0}
+            ]}
+        ]});
+        let buckets = parse_quota_summary(&body);
+        assert_eq!(buckets.len(), 4);
+        let now = "2026-09-04T08:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .unwrap()
+            .as_millisecond() as u64;
+        let reset =
+            |time: &str| Some(time.parse::<jiff::Timestamp>().unwrap().as_millisecond() as u64);
+        // Both Gemini windows are spent: the model waits for the later one.
+        assert_eq!(
+            spent_until(&buckets, Family::of_model("gemini-4-argon-high"), now),
+            reset("2026-09-11T02:25:41Z")
+        );
+        // Claude still has quota in both windows, so a 429 is a short throttle.
+        assert_eq!(
+            spent_until(&buckets, Family::of_model("claude-opus-5-5-high"), now),
+            None
+        );
+        assert_eq!(Family::of_model("gpt-oss-120b-medium"), Family::Claude);
+        // A reset that already passed proves nothing.
+        let after = reset("2026-09-12T00:00:00Z").unwrap();
+        assert_eq!(spent_until(&buckets, Family::Gemini, after), None);
     }
 }

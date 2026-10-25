@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::accounts::Accounts;
 use crate::config;
+use crate::providers::antigravity::Family;
 use crate::providers::codex::auth::constants::CODEX_API_ENDPOINT;
 use crate::providers::codex::auth::manager::CodexAuthManager;
 use crate::providers::codex::auth::token_store as codex_tokens;
@@ -30,6 +31,7 @@ pub enum UsageProvider {
     Claude,
     Codex,
     Kimi,
+    Antigravity,
     #[value(name = "opencode")]
     OpenCode,
 }
@@ -40,6 +42,7 @@ impl UsageProvider {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Kimi => "kimi",
+            Self::Antigravity => "antigravity",
             Self::OpenCode => "opencode",
         }
     }
@@ -49,6 +52,7 @@ impl UsageProvider {
             Self::Claude => "Claude subscription",
             Self::Codex => "Codex",
             Self::Kimi => "Kimi",
+            Self::Antigravity => "Antigravity",
             Self::OpenCode => "OpenCode Go",
         }
     }
@@ -58,6 +62,9 @@ impl UsageProvider {
             Self::Claude => "claude: not signed in. Run `cc-proxy auth login claude`.",
             Self::Codex => "codex: not signed in. Run `cc-proxy auth login codex`.",
             Self::Kimi => "kimi: not signed in. Run `cc-proxy auth login kimi`.",
+            Self::Antigravity => {
+                "antigravity: not signed in. Run `cc-proxy auth login antigravity`."
+            }
             Self::OpenCode => {
                 "opencode: no API key set. Run `cc-proxy auth login opencode` or set OPENCODE_API_KEY."
             }
@@ -124,6 +131,19 @@ enum Failure {
 struct PlanUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
     plan: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    five_hour: Option<Window>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    weekly: Option<Window>,
+    /// Providers that keep one allowance per model family list each here
+    /// instead of in `five_hour` and `weekly`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<GroupUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct GroupUsage {
+    family: Family,
     #[serde(skip_serializing_if = "Option::is_none")]
     five_hour: Option<Window>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -239,9 +259,14 @@ impl MonitorUsage {
 
 impl PlanUsage {
     fn monitor_usage(&self) -> MonitorUsage {
+        let groups = self.groups.iter().flat_map(|group| {
+            let [five_hour, weekly] = group.family.short_labels();
+            [(five_hour, group.five_hour), (weekly, group.weekly)]
+        });
         MonitorUsage::Reported(
             [("5h", self.five_hour), ("week", self.weekly)]
                 .into_iter()
+                .chain(groups)
                 .filter_map(|(label, window)| {
                     window.map(|window| UsageWindow {
                         label,
@@ -417,7 +442,7 @@ pub(crate) fn headlines() -> Vec<(&'static str, MonitorUsage)> {
 pub(crate) fn account_usage() -> HashMap<(String, String), MonitorUsage> {
     let mut usage = HashMap::new();
     for provider in ["claude", "codex", "kimi", "grok", "antigravity"] {
-        let unavailable = if matches!(provider, "claude" | "codex" | "kimi") {
+        let unavailable = if matches!(provider, "claude" | "codex" | "kimi" | "antigravity") {
             MonitorUsage::Unavailable(format!(
                 "Usage unavailable. Press r to retry, or run cc-proxy usage {provider}."
             ))
@@ -441,6 +466,7 @@ pub(crate) fn account_usage() -> HashMap<(String, String), MonitorUsage> {
         UsageProvider::Claude,
         UsageProvider::Codex,
         UsageProvider::Kimi,
+        UsageProvider::Antigravity,
     ]) {
         Ok(results) => results,
         Err(error) => {
@@ -494,6 +520,10 @@ async fn fetch(
         }
         UsageProvider::Codex => Accounts::open(provider.id(), &crate::providers::codex::CODEX_CLI),
         UsageProvider::Kimi => Accounts::open(provider.id(), &crate::providers::kimi::KIMI_CLI),
+        UsageProvider::Antigravity => Accounts::open(
+            provider.id(),
+            &crate::providers::antigravity::ANTIGRAVITY_CLI,
+        ),
         UsageProvider::OpenCode => return opencode().await,
     }
     .map_err(|error| format!("{}: {error:#}", provider.name()))?;
@@ -512,11 +542,14 @@ async fn fetch(
         async move {
             let result = match fetch_account(provider, &account.id, client).await {
                 Ok(usage) => {
-                    let _ = crate::rotation::Cooldowns::new().sync_account_window(
-                        provider.id(),
-                        &account.id,
-                        usage.exhausted_until_ms(crate::rotation::now_ms()),
-                    );
+                    // A spent family can't set or clear a wait for the whole account.
+                    if usage.groups.is_empty() {
+                        let _ = crate::rotation::Cooldowns::new().sync_account_window(
+                            provider.id(),
+                            &account.id,
+                            usage.exhausted_until_ms(crate::rotation::now_ms()),
+                        );
+                    }
                     AccountResult::Usage { usage }
                 }
                 Err(failure) => AccountResult::Unavailable {
@@ -544,9 +577,10 @@ async fn fetch_account(
         UsageProvider::Claude => claude(client, id).await?,
         UsageProvider::Codex => codex(client, id).await?,
         UsageProvider::Kimi => kimi(client, id).await?,
+        UsageProvider::Antigravity => antigravity(client, id).await?,
         UsageProvider::OpenCode => return Err(Failure::Unreadable),
     };
-    if usage.five_hour.is_none() && usage.weekly.is_none() {
+    if usage.five_hour.is_none() && usage.weekly.is_none() && usage.groups.is_empty() {
         return Err(Failure::Unreadable);
     }
     Ok(usage)
@@ -610,6 +644,15 @@ async fn kimi(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure> 
     Ok(parse_kimi(&body))
 }
 
+async fn antigravity(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure> {
+    use crate::providers::antigravity::{IDE_USER_AGENT, load_valid_auth, quota_request};
+    let auth = load_valid_auth(Some(id))
+        .await
+        .map_err(|_| Failure::SignInUnusable)?;
+    let body = read_json(quota_request(client, &auth, IDE_USER_AGENT)).await?;
+    Ok(parse_antigravity(&body, auth.plan))
+}
+
 async fn opencode() -> Result<Option<Report>, String> {
     let Some(api_key) =
         crate::accounts::saved_api_key("opencode", None).or_else(config::opencode_api_key)
@@ -627,6 +670,10 @@ async fn get_json(
     url: &str,
     headers: HeaderMap,
 ) -> Result<Value, Failure> {
+    read_json(client.get(url).headers(headers)).await
+}
+
+async fn read_json(request: reqwest::RequestBuilder) -> Result<Value, Failure> {
     let transport_failure = |error: reqwest::Error| {
         if error.is_timeout() {
             Failure::TimedOut
@@ -634,12 +681,7 @@ async fn get_json(
             Failure::Unreachable
         }
     };
-    let response = client
-        .get(url)
-        .headers(headers)
-        .send()
-        .await
-        .map_err(transport_failure)?;
+    let response = request.send().await.map_err(transport_failure)?;
     let status = response.status();
     if !status.is_success() {
         return Err(Failure::Rejected(status.as_u16()));
@@ -667,6 +709,35 @@ fn parse_claude(body: &Value, plan: Option<String>) -> PlanUsage {
         plan,
         five_hour: window("five_hour"),
         weekly: window("seven_day"),
+        ..Default::default()
+    }
+}
+
+/// Antigravity keeps a 5-hour and a weekly window for each model family.
+fn parse_antigravity(body: &Value, plan: Option<String>) -> PlanUsage {
+    let buckets = crate::providers::antigravity::parse_quota_summary(body);
+    let window = |family, weekly| {
+        let bucket = buckets
+            .iter()
+            .find(|bucket| bucket.family == family && bucket.weekly == weekly)?;
+        Some(Window {
+            used_percent: 100.0 - bucket.remaining_fraction * 100.0,
+            resets_at_ms: bucket.reset_ms,
+        })
+    };
+    let groups = [Family::Gemini, Family::Claude]
+        .into_iter()
+        .map(|family| GroupUsage {
+            family,
+            five_hour: window(family, false),
+            weekly: window(family, true),
+        })
+        .filter(|group| group.five_hour.is_some() || group.weekly.is_some())
+        .collect();
+    PlanUsage {
+        plan,
+        groups,
+        ..Default::default()
     }
 }
 
@@ -684,6 +755,7 @@ fn parse_chatgpt(body: &Value) -> PlanUsage {
         plan: text(body.get("plan_type")),
         five_hour: window("primary_window"),
         weekly: window("secondary_window"),
+        ..Default::default()
     }
 }
 
@@ -700,6 +772,7 @@ fn parse_kimi(body: &Value) -> PlanUsage {
         plan: text(body.pointer("/user/membership/level")).or_else(|| text(body.get("subType"))),
         five_hour: five_hour_limit(limits).and_then(|limit| kimi_quota(limit.get("detail")?)),
         weekly: body.get("usage").and_then(kimi_quota),
+        ..Default::default()
     }
 }
 
@@ -805,12 +878,27 @@ fn format_plan(
         None => name.to_string(),
     };
     let mut output = ui::strong(&heading, ui::WHITE, styled);
-    for (label, window) in [
-        ("5-hour window", &usage.five_hour),
-        ("Weekly", &usage.weekly),
-    ] {
+    let rows = if usage.groups.is_empty() {
+        vec![
+            ("5-hour window".to_string(), &usage.five_hour),
+            ("Weekly".to_string(), &usage.weekly),
+        ]
+    } else {
+        usage
+            .groups
+            .iter()
+            .flat_map(|group| {
+                let name = group.family.name();
+                [
+                    (format!("{name} 5-hour"), &group.five_hour),
+                    (format!("{name} weekly"), &group.weekly),
+                ]
+            })
+            .collect()
+    };
+    for (label, window) in rows {
         output.push_str(&window_row(
-            label,
+            &label,
             window.as_ref().map(Window::remaining_percent),
             &format_window(window.as_ref(), now, tz),
             styled,
@@ -944,6 +1032,66 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_usage_lists_each_model_family_and_never_sets_an_account_wait() {
+        let usage = parse_antigravity(
+            &serde_json::json!({"groups": [
+                {"displayName": "Gemini Models", "buckets": [
+                    {"window": "weekly", "resetTime": "2026-10-30T12:00:00Z", "remainingFraction": 0.88},
+                    {"window": "5h", "resetTime": "2026-10-25T12:00:00Z", "remainingFraction": 0}
+                ]},
+                {"displayName": "Claude and GPT models", "buckets": [
+                    {"window": "5h", "resetTime": "2026-10-25T13:00:00Z", "remainingFraction": 1}
+                ]},
+                {"displayName": "Something new", "buckets": [
+                    {"window": "5h", "remainingFraction": 0}
+                ]}
+            ]}),
+            Some("pro".into()),
+        );
+        assert_eq!(usage.plan.as_deref(), Some("pro"));
+        assert_eq!(usage.groups.len(), 2);
+        assert_eq!(usage.groups[0].family, Family::Gemini);
+        assert_eq!(
+            usage.groups[0].five_hour,
+            window(100.0, ms("2026-10-25T12:00:00Z"))
+        );
+        assert_eq!(
+            usage.groups[0]
+                .weekly
+                .map(|weekly| weekly.remaining_percent().round()),
+            Some(88.0)
+        );
+        assert_eq!(usage.groups[1].weekly, None);
+        // Family waits are per model, so they never count as an account-wide wait.
+        assert_eq!(usage.exhausted_until_ms(0), None);
+
+        let MonitorUsage::Reported(windows) = usage.monitor_usage() else {
+            panic!("expected reported usage");
+        };
+        let labels: Vec<_> = windows.iter().map(|window| window.label).collect();
+        assert_eq!(
+            labels,
+            ["Gemini 5h", "Gemini week", "Claude 5h"],
+            "{windows:?}"
+        );
+
+        let text = format_plan(
+            "Antigravity `main`",
+            &usage,
+            Timestamp::from_millisecond(0).unwrap(),
+            &TimeZone::UTC,
+            false,
+        );
+        assert!(text.contains("\n  Gemini 5-hour: 0% left"), "{text}");
+        assert!(text.contains("\n  Claude 5-hour: 100% left"), "{text}");
+        assert!(text.contains("\n  Claude weekly: not reported"), "{text}");
+        assert!(!text.contains("Weekly:"), "{text}");
+        let json = serde_json::to_value(&usage).unwrap();
+        assert_eq!(json["groups"][0]["family"], "gemini");
+        assert_eq!(json["groups"][1]["family"], "claude");
+    }
+
+    #[test]
     fn chatgpt_maps_primary_and_secondary_windows_and_keeps_the_plan() {
         assert_eq!(
             parse_chatgpt(&fixture("chatgpt.json")),
@@ -951,6 +1099,7 @@ mod tests {
                 plan: Some("plus".into()),
                 five_hour: window(45.0, ms("2026-08-09T17:00:00Z")),
                 weekly: window(7.0, ms("2026-08-15T00:00:00Z")),
+                ..Default::default()
             }
         );
     }
@@ -974,6 +1123,7 @@ mod tests {
                 plan: Some("allegretto".into()),
                 five_hour: window(28.0, ms("2026-08-09T17:00:00+08:00")),
                 weekly: window(12.0, ms("2026-08-15T00:00:00+08:00")),
+                ..Default::default()
             }
         );
     }
@@ -1068,6 +1218,7 @@ mod tests {
             plan: Some("plus".into()),
             five_hour: window(45.0, ms("2026-08-12T17:00:00Z")),
             weekly: window(7.0, ms("2026-08-17T00:00:00Z")),
+            ..Default::default()
         };
         assert_eq!(
             format_plan("Codex", &usage, now, &tz, false),
@@ -1086,6 +1237,7 @@ mod tests {
             plan: None,
             five_hour: window(12.5, None),
             weekly: None,
+            ..Default::default()
         };
         assert_eq!(
             format_plan("Kimi", &usage, now, &TimeZone::UTC, false),
@@ -1140,6 +1292,7 @@ mod tests {
             plan: Some("plus".into()),
             five_hour: window(45.0, ms("2026-08-12T17:00:00Z")),
             weekly: window(7.0, ms("2026-08-17T00:00:00Z")),
+            ..Default::default()
         };
         assert_eq!(
             usage
