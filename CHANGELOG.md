@@ -3,6 +3,24 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.1 (2026-10-25)
+
+- The monitor has a Settings tab (press `3`). It is the same list as
+  `cc-proxy config`, with auto-rotate first, so auto-rotate is no longer a row
+  in the provider list. Search it with `/`.
+- Providers in the monitor now follow the route: the one Claude Code uses, then
+  your fallbacks in order, then other connected providers. Disable proxy routing
+  is the last row. Claude subscription sorts like any other provider.
+- You can remove a saved account in the monitor: choose it, press Enter, then
+  Remove saved account. The monitor asks first and names the account.
+- A saved account with a spent window keeps all its quota numbers on screen.
+  Before, one wait timer replaced them with a single `0%`. A spent Gemini or
+  Claude window on Antigravity no longer marks the whole account as waiting.
+- `[stale]` is now `[refresh failed]`, and Details says why the lookup failed
+  and what to run.
+- `cc-proxy config` fix: after a search with no matches, Enter and Left/Right no
+  longer change a setting you can't see.
+
 ## v0.4.0 (2026-10-25)
 
 - New provider: your Claude subscription. Sign in with
