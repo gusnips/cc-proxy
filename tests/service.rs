@@ -316,7 +316,10 @@ fn use_switches_provider_and_direct_without_restarting_the_proxy() {
         .assert()
         .success()
         .stdout(contains("Claude Code goes to Kimi"));
-    assert_eq!(sandbox.route(), json!({"on": true, "provider": "kimi"}));
+    assert_eq!(
+        sandbox.route(),
+        json!({"on": true, "provider": "kimi", "fallback": []})
+    );
     sandbox.assert_routed_to_proxy();
 
     sandbox
@@ -328,7 +331,10 @@ fn use_switches_provider_and_direct_without_restarting_the_proxy() {
             "Claude Code uses its original settings and login, without the proxy",
         ));
     sandbox.assert_routed_to_anthropic();
-    assert_eq!(sandbox.route(), json!({"on": false, "provider": "kimi"}));
+    assert_eq!(
+        sandbox.route(),
+        json!({"on": false, "provider": "kimi", "fallback": []})
+    );
 
     // The proxy ran through all of it, and picks the last provider up again.
     sandbox.cmd().args(["use", "codex"]).assert().success();

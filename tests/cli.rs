@@ -674,6 +674,8 @@ fn usage_shows_every_signed_in_plan_and_how_to_sign_in_to_the_rest()
     assert_eq!(
         String::from_utf8(output.stdout)?,
         concat!(
+            "claude: not signed in. Run `cc-proxy auth login claude`.\n",
+            "\n",
             "Codex `main` [current] (plus)\n",
             "  5-hour window: 55% left, already reset (Aug 9 17:00)\n",
             "  Weekly: 93% left, already reset (Aug 15 00:00)\n",
@@ -692,7 +694,10 @@ fn usage_shows_every_signed_in_plan_and_how_to_sign_in_to_the_rest()
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(output.stderr)?,
-        "opencode: no API key set. Run `cc-proxy auth login opencode` or set OPENCODE_API_KEY.\n"
+        concat!(
+            "claude: not signed in. Run `cc-proxy auth login claude`.\n",
+            "opencode: no API key set. Run `cc-proxy auth login opencode` or set OPENCODE_API_KEY.\n",
+        )
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(
@@ -724,6 +729,10 @@ fn usage_for_a_provider_that_is_not_signed_in_names_the_login_and_exits_one()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
     for (provider, line) in [
+        (
+            "claude",
+            "claude: not signed in. Run `cc-proxy auth login claude`.\n",
+        ),
         (
             "codex",
             "codex: not signed in. Run `cc-proxy auth login codex`.\n",
