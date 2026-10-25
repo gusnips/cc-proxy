@@ -17,9 +17,10 @@ use serde_json::Value;
 use crate::auth::{AuthStorage, FileAuthStore, write_atomically};
 use crate::provider::AuthState;
 
-/// The name the first account gets, and the one an old single login moves to.
+/// The fallback for the first account, and the name an old single login keeps.
 const FIRST_NAME: &str = "main";
 const MAX_NAME_LEN: usize = 32;
+const MAX_EMAIL_NAME_LEN: usize = 254;
 
 /// What a provider gives the account commands to work with. A provider that
 /// returns this from `CliHandlers::accounts` can keep more than one login.
@@ -28,6 +29,10 @@ pub trait AccountSupport: Send + Sync {
     fn sign_in(&self, device: bool) -> Result<Value>;
     /// Who a saved login belongs to, when it says.
     fn identity(&self, login: &Value) -> Option<String>;
+    /// An explicit email from the saved sign-in, never an account ID or a key.
+    fn email(&self, _login: &Value) -> Option<String> {
+        None
+    }
     /// What a saved login holds.
     fn state(&self, login: &Value) -> AuthState;
     /// Where the provider kept its one login before accounts existed.
@@ -69,21 +74,32 @@ pub struct Accounts {
     dir: PathBuf,
 }
 
-/// Turns what someone typed into an account name: letters, numbers, `-` and `_`.
+/// Normalizes a short label or a shell-safe email used as an account name.
 pub fn clean_name(raw: &str) -> Result<String> {
     let name = raw.trim().to_ascii_lowercase();
     let starts_well = name
         .chars()
         .next()
         .is_some_and(|ch| ch.is_ascii_alphanumeric());
-    let fits = name.len() <= MAX_NAME_LEN
-        && name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    let fits = if let Some((local, domain)) = name.split_once('@') {
+        name.len() <= MAX_EMAIL_NAME_LEN
+            && !domain.is_empty()
+            && local
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || b"._+-".contains(&ch))
+            && domain
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || b".-".contains(&ch))
+    } else {
+        name.len() <= MAX_NAME_LEN
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    };
     if !starts_well || !fits {
         bail!(
-            "`{}` can't be an account name. Use up to {MAX_NAME_LEN} letters, numbers, `-` or `_`, starting with a letter or number (for example `work`).",
-            raw.trim()
+            "`{}` can't be an account name. Use a short name such as `work`: up to {MAX_NAME_LEN} letters, numbers, `-` or `_`. An email can use letters, numbers, `.`, `_`, `+` and `-`, up to {MAX_EMAIL_NAME_LEN} characters. Start with a letter or number.",
+            raw.trim().escape_debug()
         );
     }
     Ok(name)
@@ -260,10 +276,25 @@ impl Accounts {
         Ok(index.accounts.into_iter().nth(at))
     }
 
-    /// The first free name: `main`, then `account-2`, `account-3`.
-    pub fn next_name(&self) -> Result<String> {
+    /// A free email name when available, else `main`, `account-2`, `account-3`.
+    pub fn next_name(&self, email: Option<&str>) -> Result<String> {
         let taken = self.list()?;
         let free = |name: &str| taken.iter().all(|account| account.name != name);
+        if let Some(email) = email
+            .and_then(|email| clean_name(email).ok())
+            .filter(|email| email.contains('@'))
+        {
+            if free(&email) {
+                return Ok(email);
+            }
+            if let Some(name) = (2..)
+                .map(|number| format!("{email}-{number}"))
+                .take_while(|name| name.len() <= MAX_EMAIL_NAME_LEN)
+                .find(|name| free(name))
+            {
+                return Ok(name);
+            }
+        }
         if free(FIRST_NAME) {
             return Ok(FIRST_NAME.to_string());
         }
@@ -672,6 +703,7 @@ mod tests {
         );
         assert_eq!(support.state(&json!({})), AuthState::Missing);
         assert_eq!(support.state(&json!({"apiKey": "   "})), AuthState::Missing);
+        assert_eq!(support.email(&json!({"apiKey": "user@example.com"})), None);
     }
 
     #[test]
@@ -679,7 +711,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let accounts = accounts(&dir);
         assert!(accounts.current().unwrap().is_none());
-        assert_eq!(accounts.next_name().unwrap(), "main");
+        assert_eq!(accounts.next_name(None).unwrap(), "main");
 
         accounts
             .save("main", &json!({"access": "a"}), Some("id-a".into()))
@@ -689,7 +721,7 @@ mod tests {
             .unwrap();
         assert_eq!(names(&accounts), ["main", "work"]);
         assert_eq!(accounts.current().unwrap().unwrap().name, "main");
-        assert_eq!(accounts.next_name().unwrap(), "account-2");
+        assert_eq!(accounts.next_name(None).unwrap(), "account-2");
         assert_eq!(
             accounts.login("work").unwrap().unwrap(),
             json!({"access": "w"})
@@ -822,11 +854,119 @@ mod tests {
     fn names_are_cleaned_or_refused() {
         assert_eq!(clean_name("  Work ").unwrap(), "work");
         assert_eq!(clean_name("a_b-2").unwrap(), "a_b-2");
-        for bad in ["", "-x", "a b", "../x", "x/y", "é", &"a".repeat(33)] {
+        assert_eq!(
+            clean_name(" Ana.Silva+code@Example.COM ").unwrap(),
+            "ana.silva+code@example.com"
+        );
+        for bad in [
+            "",
+            "-x",
+            "a b",
+            "../x",
+            "x/y",
+            "é",
+            &"a".repeat(33),
+            "a@",
+            "a@@example.com",
+            "a/b@example.com",
+            "a\\b@example.com",
+            "a;echo@example.com",
+            "a$(id)@example.com",
+            "a`id`@example.com",
+            "a\"b@example.com",
+            "a'b@example.com",
+            "a\nb@example.com",
+            "a\u{1b}[31m@example.com",
+            "-a@example.com",
+        ] {
             assert!(clean_name(bad).is_err(), "{bad:?}");
         }
+        let unsafe_error = clean_name("a\u{1b}[31m@example.com")
+            .unwrap_err()
+            .to_string();
+        assert!(!unsafe_error.contains('\u{1b}'));
         let error = clean_name("a b").unwrap_err().to_string();
         assert!(error.contains("`a b`") && error.contains("work"), "{error}");
+    }
+
+    #[test]
+    fn email_defaults_skip_taken_names_and_still_use_uuid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        let email = "long.account+tag@subdomain.example.com";
+        assert_eq!(accounts.next_name(Some(email)).unwrap(), email);
+        accounts
+            .install(email, None, &json!({"user": "one"}), Some("one".into()))
+            .unwrap();
+        let first = accounts.require(email).unwrap();
+        assert_eq!(
+            accounts.file(&first.id).file_name().unwrap(),
+            format!("{}.json", first.id).as_str()
+        );
+        assert_eq!(
+            accounts.next_name(Some(email)).unwrap(),
+            format!("{email}-2")
+        );
+        accounts
+            .install(
+                &format!("{email}-2"),
+                None,
+                &json!({"user": "two"}),
+                Some("two".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            accounts.next_name(Some(email)).unwrap(),
+            format!("{email}-3")
+        );
+        // A name claimed after it was chosen must never overwrite that login.
+        assert!(
+            accounts
+                .install(email, None, &json!({"user": "late"}), Some("late".into()))
+                .is_err()
+        );
+        assert_eq!(accounts.require(email).unwrap(), first);
+        assert_eq!(accounts.login(email).unwrap().unwrap()["user"], "one");
+    }
+
+    #[test]
+    fn unusable_email_defaults_fall_back_to_a_free_short_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        for email in [
+            "opaque-id",
+            "",
+            "a/b@example.com",
+            "a;echo@example.com",
+            "a\u{1b}@example.com",
+        ] {
+            assert_eq!(accounts.next_name(Some(email)).unwrap(), "main");
+        }
+        let longest = format!(
+            "{}@{}.{}.{}.com",
+            "a".repeat(64),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(57)
+        );
+        assert_eq!(longest.len(), MAX_EMAIL_NAME_LEN);
+        assert_eq!(accounts.next_name(Some(&longest)).unwrap(), longest);
+        accounts.install(&longest, None, &json!({}), None).unwrap();
+        assert_eq!(accounts.next_name(Some(&longest)).unwrap(), "main");
+        accounts.install("main", None, &json!({}), None).unwrap();
+        assert_eq!(accounts.next_name(Some(&longest)).unwrap(), "account-2");
+        assert_eq!(
+            accounts.next_name(Some(&format!("a{longest}"))).unwrap(),
+            "account-2"
+        );
+        let room_for_suffix = &longest[2..];
+        accounts
+            .install(room_for_suffix, None, &json!({}), None)
+            .unwrap();
+        let suffixed = accounts.next_name(Some(room_for_suffix)).unwrap();
+        assert_eq!(suffixed, format!("{room_for_suffix}-2"));
+        assert_eq!(suffixed.len(), MAX_EMAIL_NAME_LEN);
+        assert_eq!(clean_name(&suffixed).unwrap(), suffixed);
     }
 
     #[test]
@@ -834,7 +974,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let accounts = accounts(&dir);
         let old = InMemoryAuthStore::<Value>::new();
-        old.save(json!({"access": "a", "accountId": "acct-1"}))
+        old.save(json!({"access": "a", "accountId": "acct-1", "email": "ana@example.com"}))
             .unwrap();
         let identity = |login: &Value| login["accountId"].as_str().map(str::to_string);
 
@@ -846,10 +986,13 @@ mod tests {
             Some("acct-1")
         );
         assert!(old.load().unwrap().is_none());
+        let original = accounts.current().unwrap().unwrap();
 
         // A login saved later is not "migrated" over the new accounts.
-        old.save(json!({"access": "later"})).unwrap();
+        old.save(json!({"access": "later", "email": "other@example.com"}))
+            .unwrap();
         accounts.migrate(&old, identity).unwrap();
+        assert_eq!(accounts.current().unwrap(), Some(original));
         assert_eq!(accounts.login("main").unwrap().unwrap()["access"], "a");
         assert!(old.load().unwrap().is_some());
     }

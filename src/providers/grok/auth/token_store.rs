@@ -60,21 +60,50 @@ pub fn single_login_store() -> FileAuthStore<Value> {
 /// The subject is used only to recognize a login already saved, not to grant
 /// access. Grok validates the access token when a request reaches it.
 pub fn identity(auth: &StoredAuth) -> Option<String> {
+    jwt_claim(auth, "sub")
+}
+
+/// The explicit email claim, not the subject used to recognize a saved login.
+pub fn email(auth: &StoredAuth) -> Option<String> {
+    jwt_claim(auth, "email")
+}
+
+fn jwt_claim(auth: &StoredAuth, name: &str) -> Option<String> {
     let payload = auth.access.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
         .ok()?;
     let claims: Value = serde_json::from_slice(&bytes).ok()?;
     claims
-        .get("sub")?
+        .get(name)?
         .as_str()
-        .filter(|subject| !subject.is_empty())
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_email_is_separate_from_the_subject() {
+        use crate::accounts::AccountSupport;
+        let mut login = serde_json::json!({
+            "access": "header.eyJlbWFpbCI6ImhvbWVAZXhhbXBsZS5jb20ifQ.sig",
+            "refresh": "fake-refresh",
+            "expires_at_ms": 123,
+            "issuer": super::super::login::CANONICAL_ISSUER,
+            "client_id": super::super::login::CLIENT_ID
+        });
+        let cli = &super::super::super::GROK_CLI;
+        assert_eq!(cli.email(&login).as_deref(), Some("home@example.com"));
+        assert_eq!(cli.identity(&login), None);
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"sub":"subject@example.com"}"#);
+        login["access"] = serde_json::json!(format!("header.{claims}.sig"));
+        assert_eq!(cli.identity(&login).as_deref(), Some("subject@example.com"));
+        assert_eq!(cli.email(&login), None);
+    }
 
     #[test]
     fn account_identity_uses_the_subject_not_the_rotating_token() {

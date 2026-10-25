@@ -73,6 +73,11 @@ pub fn identity(auth: &StoredAuth) -> Option<String> {
         .or_else(|| jwt_claim(&auth.access, &["email", "sub"]))
 }
 
+/// The explicit email claim, separate from the organization or subject ID.
+pub fn email(auth: &StoredAuth) -> Option<String> {
+    jwt_claim(&auth.access, &["email"])
+}
+
 /// What the Console base URL is: the override when set, `opencode.ai` otherwise.
 pub fn console_url() -> String {
     std::env::var("CCP_OPENCODE_CONSOLE_URL")

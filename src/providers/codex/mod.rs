@@ -2184,12 +2184,30 @@ impl crate::accounts::AccountSupport for CodexCli {
         } else {
             run_browser_login()?
         };
-        Ok(serde_json::to_value(auth::manager::initial_auth(&tokens)?)?)
+        let mut login = serde_json::to_value(auth::manager::initial_auth(&tokens)?)?;
+        if let Some(email) = tokens
+            .id_token
+            .as_deref()
+            .and_then(auth::jwt::extract_email)
+        {
+            // Keep only the ID token's email for the new account name, not the token.
+            login["email"] = serde_json::json!(email);
+        }
+        Ok(login)
     }
 
     fn identity(&self, login: &serde_json::Value) -> Option<String> {
         let auth: auth::token_store::StoredAuth = serde_json::from_value(login.clone()).ok()?;
         auth.account_id
+    }
+
+    fn email(&self, login: &serde_json::Value) -> Option<String> {
+        let auth: auth::token_store::StoredAuth = serde_json::from_value(login.clone()).ok()?;
+        login["email"]
+            .as_str()
+            .filter(|email| !email.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| auth::jwt::extract_email(&auth.access))
     }
 
     fn state(&self, login: &serde_json::Value) -> crate::provider::AuthState {
@@ -2250,6 +2268,35 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     use super::*;
+
+    #[test]
+    fn account_email_comes_from_the_profile_not_the_account_id() {
+        use crate::accounts::AccountSupport;
+        let mut login = serde_json::json!({
+            "access": "eyJhbGciOiJIUzI1NiJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL3Byb2ZpbGUiOnsiZW1haWwiOiJ3b3JrQGV4YW1wbGUuY29tIn19.sig",
+            "refresh": "fake-refresh",
+            "expires": 123,
+            "accountId": "opaque@example.com"
+        });
+        assert_eq!(CODEX_CLI.email(&login).as_deref(), Some("work@example.com"));
+        assert_eq!(
+            CODEX_CLI.identity(&login).as_deref(),
+            Some("opaque@example.com")
+        );
+        login["access"] = serde_json::json!("opaque-token");
+        assert_eq!(CODEX_CLI.email(&login), None);
+        // A sign-in may carry its email only in the ID token; sign_in keeps
+        // that email as metadata even though the stored token schema has no ID token.
+        login["email"] = serde_json::json!("from-id@example.com");
+        assert_eq!(
+            CODEX_CLI.email(&login).as_deref(),
+            Some("from-id@example.com")
+        );
+        assert_eq!(
+            CODEX_CLI.identity(&login).as_deref(),
+            Some("opaque@example.com")
+        );
+    }
 
     #[test]
     fn unverifiable_reasoning_is_dropped_and_portable_history_survives() {

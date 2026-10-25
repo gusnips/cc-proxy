@@ -269,7 +269,7 @@ impl OpenCodeClient {
                         "anthropic-beta": betas,
                         auth_header: if api_key.is_some() { "[redacted]" } else { "[none]" },
                         "content-type": "application/json",
-                        "x-opencode-session": session_header_value
+                        "x-opencode-session": provider_slug.starts_with("opencode").then_some(&session_header_value)
                     }
                 }),
             );
@@ -280,8 +280,10 @@ impl OpenCodeClient {
             .post(url)
             .header(http::header::ACCEPT, accept)
             .header(http::header::CONTENT_TYPE, "application/json")
-            .header("x-opencode-session", &session_header_value)
             .json(body);
+        if provider_slug.starts_with("opencode") {
+            request = request.header("x-opencode-session", &session_header_value);
+        }
         if provider_slug == "opencode-zen" {
             request = request
                 .header(http::header::USER_AGENT, OPENCODE_CLI_USER_AGENT)
@@ -519,7 +521,7 @@ impl OpenCodeClient {
                         "accept": accept,
                         "authorization": if api_key.is_some() { "[redacted]" } else { "[none]" },
                         "content-type": "application/json",
-                        "x-opencode-session": session_header_value
+                        "x-opencode-session": provider_slug.starts_with("opencode").then_some(&session_header_value)
                     }
                 }),
             );
@@ -581,13 +583,14 @@ impl OpenCodeClient {
     }
 }
 
-/// The betas to send Anthropic: Claude Code's own, minus `oauth-*`. Claude
-/// Code signs in to cc-proxy, and cc-proxy sends Anthropic its own API key.
+/// Preserve API feature betas, not the downstream client's sign-in or identity.
 fn upstream_betas(header: &str) -> Option<String> {
     let betas: Vec<&str> = header
         .split(',')
         .map(str::trim)
-        .filter(|beta| !beta.is_empty() && !beta.starts_with("oauth-"))
+        .filter(|beta| {
+            !beta.is_empty() && !beta.starts_with("oauth-") && !beta.starts_with("claude-code-")
+        })
         .collect();
     (!betas.is_empty()).then(|| betas.join(","))
 }
@@ -673,6 +676,7 @@ mod tests {
         anthropic_version: String,
         anthropic_beta: String,
         x_opencode_session: String,
+        user_agent: String,
         body: serde_json::Value,
     }
 
@@ -708,6 +712,11 @@ mod tests {
                 .to_string(),
             x_opencode_session: headers
                 .get("x-opencode-session")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string(),
+            user_agent: headers
+                .get(http::header::USER_AGENT)
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default()
                 .to_string(),
@@ -889,16 +898,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn messages_send_claude_codes_betas_without_the_oauth_one() {
+    async fn messages_keep_feature_betas_without_client_identity_or_oauth() {
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let (address, server) = serve_capture(seen.clone()).await;
         let client =
             OpenCodeClient::new(format!("http://{address}"), Some("test-key".to_string())).unwrap();
         let body = serde_json::json!({"model": "claude-opus-5-5", "messages": []});
-        let claude_code = "oauth-2025-04-20, context-management-2025-06-27,advisor-tool-2026-03-01";
+        let claude_code = "claude-code-20250219, oauth-2025-04-20, context-management-2025-06-27,advisor-tool-2026-03-01";
         for (endpoint, betas) in [
             (EndpointKind::Messages, Some(claude_code)),
-            (EndpointKind::Messages, Some("oauth-2025-04-20")),
+            (
+                EndpointKind::Messages,
+                Some("claude-code-20250219,oauth-2025-04-20"),
+            ),
             (EndpointKind::ChatCompletions, Some(claude_code)),
         ] {
             client
@@ -926,8 +938,20 @@ mod tests {
             seen[0].anthropic_beta,
             "context-management-2025-06-27,advisor-tool-2026-03-01"
         );
-        // With the OAuth beta gone nothing is left, so no header goes out.
+        // Client identity and sign-in betas leave no API feature to enable.
         assert!(seen[1].anthropic_beta.is_empty());
+        for request in seen.iter() {
+            assert_eq!(request.user_agent, USER_AGENT);
+            assert!(request.x_opencode_session.is_empty());
+            assert_eq!(
+                request.x_api_key,
+                if request.path.ends_with("messages") {
+                    "test-key"
+                } else {
+                    ""
+                }
+            );
+        }
         // Betas only switch on fields of an Anthropic Messages body.
         assert!(seen[2].anthropic_beta.is_empty());
     }

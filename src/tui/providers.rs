@@ -17,6 +17,7 @@ use super::{BG, DIM_WHITE, GREEN, SELECTED_BG, TEAL, WHITE, YELLOW, panel};
 use crate::accounts::Accounts;
 use crate::provider::AuthState;
 use crate::registry::Registry;
+use crate::usage::{MonitorUsage, UsageWindow};
 use crate::{config, rotation::Cooldowns, ui};
 
 const REFRESH_AFTER: Duration = Duration::from_secs(60);
@@ -28,13 +29,13 @@ pub(super) enum Mode {
     Demo,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct AccountRow {
     id: String,
     name: String,
     current: bool,
     state: String,
-    usage: Option<Vec<Line<'static>>>,
+    usage: Option<MonitorUsage>,
     waits: Vec<(Option<String>, u64)>,
 }
 
@@ -46,13 +47,37 @@ impl AccountRow {
             .map(|(_, until)| *until)
             .max()
     }
+
+    fn usage_summary(&self, now: u64) -> Line<'static> {
+        if let Some(until) = self.waiting_until(now) {
+            let depleted = matches!(&self.usage, Some(MonitorUsage::Reported(windows)) if windows.iter().any(|window| window.remaining_percent == 0.0));
+            return Line::from(vec![
+                Span::styled(
+                    if depleted { "0%" } else { "waiting" },
+                    Style::default().fg(if depleted {
+                        ui::remaining_color(0.0)
+                    } else {
+                        YELLOW
+                    }),
+                ),
+                Span::raw(format!(
+                    " · {} left",
+                    ui::duration(Duration::from_millis(until - now))
+                )),
+            ]);
+        }
+        self.usage.as_ref().map_or_else(
+            || "checking...".into(),
+            |usage| usage.compact_line(jiff::Timestamp::now()),
+        )
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct ProviderRow {
     id: String,
     state: AuthState,
-    usage: Option<Vec<Line<'static>>>,
+    usage: Option<MonitorUsage>,
     accounts: Vec<AccountRow>,
     supports_accounts: bool,
     pinned: Option<String>,
@@ -174,14 +199,42 @@ impl ProvidersPanel {
     }
 
     fn entries(&self) -> Vec<Entry> {
-        let mut entries = vec![Entry::Rotate, Entry::Claude];
-        for row in &self.rows {
+        let mut entries = vec![Entry::Rotate];
+        if self.route.target().is_none() {
+            entries.push(Entry::Claude);
+        }
+        let mut rows: Vec<_> = self.rows.iter().collect();
+        rows.sort_by_cached_key(|row| {
+            let role = if self.route.target() == Some(row.id.as_str()) {
+                (0, 0)
+            } else if let Some(at) = self.route.fallback.iter().position(|id| id == &row.id) {
+                (1, at)
+            } else if row.state != AuthState::Missing {
+                (2, 0)
+            } else {
+                (3, 0)
+            };
+            (role, ui::provider_name(&row.id).to_lowercase(), &row.id)
+        });
+        let mut native_added = self.route.target().is_none();
+        for row in rows {
+            if !native_added
+                && row.state == AuthState::Missing
+                && self.route.target() != Some(row.id.as_str())
+                && !self.route.fallback.contains(&row.id)
+            {
+                entries.push(Entry::Claude);
+                native_added = true;
+            }
             entries.push(Entry::Provider(row.id.clone()));
             entries.extend(
                 row.accounts
                     .iter()
                     .map(|account| Entry::Account(row.id.clone(), account.id.clone())),
             );
+        }
+        if !native_added {
+            entries.push(Entry::Claude);
         }
         entries
     }
@@ -219,8 +272,12 @@ impl ProvidersPanel {
         match key {
             KeyCode::Up | KeyCode::Char('k') => self.step(false),
             KeyCode::Down | KeyCode::Char('j') => self.step(true),
-            KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(3),
-            KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(3),
+            KeyCode::PageDown | KeyCode::Char('d') | KeyCode::Char(']') => {
+                self.detail_scroll = self.detail_scroll.saturating_add(3)
+            }
+            KeyCode::PageUp | KeyCode::Char('u') | KeyCode::Char('[') => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(3)
+            }
             KeyCode::Home if self.menu.is_none() => self.selected = Entry::Rotate,
             KeyCode::End if self.menu.is_none() => {
                 self.selected = self.entries().last().unwrap().clone()
@@ -392,7 +449,8 @@ impl ProvidersPanel {
         self.notice = Some(("Demo only. Nothing on this computer changed.".into(), false));
     }
 
-    fn entry_line(&self, entry: &Entry) -> Line<'static> {
+    fn entry_item(&self, entry: &Entry, width: u16) -> ListItem<'static> {
+        let name_color = if entry == &self.selected { TEAL } else { WHITE };
         let text = match entry {
             Entry::Rotate => format!(
                 "Auto-rotate  {}",
@@ -427,12 +485,7 @@ impl ProvidersPanel {
                     .find(|account| &account.id == id)
                     .unwrap();
                 let now = crate::rotation::now_ms();
-                let current = match (account.current, account.waiting_until(now).is_some()) {
-                    (true, true) => " [current, waiting]",
-                    (true, false) => " [current]",
-                    (false, true) => " [waiting]",
-                    (false, false) => "",
-                };
+                let current = if account.current { " [current]" } else { "" };
                 let first = if self.auto_rotate
                     && row.pinned.is_none()
                     && row
@@ -443,10 +496,56 @@ impl ProvidersPanel {
                 } else {
                     ""
                 };
-                format!("  {}{current}{first}", account.name)
+                let summary = account.usage_summary(now);
+                let status = format!("{current}{first}");
+                let name_width =
+                    usize::from(width).saturating_sub(4 + summary.width() + status.len());
+                if name_width < 8 {
+                    let name_width = usize::from(width).saturating_sub(2 + status.len());
+                    let summaries = match &account.usage {
+                        Some(MonitorUsage::Reported(windows))
+                            if summary.width() + 4 > usize::from(width)
+                                && account.waiting_until(now).is_none() =>
+                        {
+                            windows
+                                .iter()
+                                .map(|window| {
+                                    MonitorUsage::Reported(vec![window.clone()])
+                                        .compact_line(jiff::Timestamp::now())
+                                })
+                                .collect()
+                        }
+                        _ => vec![summary],
+                    };
+                    let mut lines = vec![Line::styled(
+                        format!("  {}{status}", super::ellipsize(&account.name, name_width)),
+                        Style::default().fg(name_color),
+                    )];
+                    lines.extend(summaries.into_iter().map(|summary| {
+                        Line::from(
+                            std::iter::once(Span::raw("    "))
+                                .chain(summary.spans)
+                                .collect::<Vec<_>>(),
+                        )
+                    }));
+                    return ListItem::new(lines);
+                }
+                let mut spans = vec![
+                    Span::styled(
+                        format!("  {}", super::ellipsize(&account.name, name_width)),
+                        Style::default().fg(name_color),
+                    ),
+                    Span::raw("  "),
+                ];
+                spans.extend(summary.spans);
+                spans.push(Span::styled(status, Style::default().fg(DIM_WHITE)));
+                return ListItem::new(Line::from(spans));
             }
         };
-        Line::from(Span::styled(text, Style::default().fg(WHITE)))
+        ListItem::new(Line::from(Span::styled(
+            text,
+            Style::default().fg(name_color),
+        )))
     }
 
     fn detail_lines(&self) -> Vec<Line<'static>> {
@@ -488,12 +587,12 @@ impl ProvidersPanel {
                             )
                             .into(),
                         );
-                        text.extend(
-                            account
-                                .usage
-                                .clone()
-                                .unwrap_or_else(|| vec!["Checking usage...".into()]),
-                        );
+                        text.extend(account.usage.as_ref().map_or_else(
+                            || vec!["Checking usage...".into()],
+                            |usage| {
+                                usage.lines(jiff::Timestamp::now(), &jiff::tz::TimeZone::system())
+                            },
+                        ));
                         let now = crate::rotation::now_ms();
                         for (model, until) in &account.waits {
                             if *until > now {
@@ -511,11 +610,15 @@ impl ProvidersPanel {
                         }
                         text.push(account.state.clone().into());
                         text.push("".into());
-                        text.push("Choosing an account changes new requests for this provider, not where Claude Code goes.".into());
+                        text.push(
+                            "New requests for this provider use the account you choose.".into(),
+                        );
                     } else {
                         text.push(row.state.describe().into());
                         if let Some(usage) = &row.usage {
-                            text.extend(usage.iter().cloned());
+                            text.extend(
+                                usage.lines(jiff::Timestamp::now(), &jiff::tz::TimeZone::system()),
+                            );
                         }
                         text.push("".into());
                         text.push(if row.accounts.is_empty() {
@@ -550,9 +653,9 @@ impl ProvidersPanel {
                             .is_some_and(|account| account.current)
                     {
                         text.push(if self.auto_rotate {
-                            "Current is the saved account choice, not an active request. Auto-rotate skips it while it is waiting."
+                            "[current] is the saved choice. Auto-rotate skips it while it is waiting."
                         } else {
-                            "Current is the saved account choice, not an active request. Auto-rotate is off, so choose another account to switch."
+                            "[current] is the saved choice. Auto-rotate is off; choose another account to switch."
                         }.into());
                     }
                 }
@@ -635,7 +738,7 @@ impl ProvidersPanel {
         let entries = self.entries();
         let items: Vec<_> = entries
             .iter()
-            .map(|entry| ListItem::new(self.entry_line(entry)))
+            .map(|entry| self.entry_item(entry, list_area.width.saturating_sub(4)))
             .collect();
         self.list
             .select(entries.iter().position(|entry| entry == &self.selected));
@@ -643,9 +746,9 @@ impl ProvidersPanel {
             List::new(items)
                 .block(panel("Providers and accounts", self.menu.is_none()))
                 .highlight_symbol("❯ ")
+                .style(Style::default().fg(DIM_WHITE))
                 .highlight_style(
                     Style::default()
-                        .fg(TEAL)
                         .bg(SELECTED_BG)
                         .add_modifier(Modifier::BOLD),
                 ),
@@ -784,24 +887,34 @@ fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
             row.usage = Some(headline);
         }
     }
-    apply_account_usage(&mut rows, &crate::usage::account_usage_lines());
+    apply_account_usage(&mut rows, &crate::usage::account_usage());
     let _ = send.send(rows);
 }
 
-fn apply_account_usage(
-    rows: &mut [ProviderRow],
-    usage: &HashMap<(String, String), Vec<Line<'static>>>,
-) {
+fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String), MonitorUsage>) {
+    let now = crate::rotation::now_ms();
     for row in rows {
         for account in &mut row.accounts {
             let lines = usage.get(&(row.id.clone(), account.id.clone())).cloned().unwrap_or_else(|| {
                 match row.id.as_str() {
-                    "opencode" if account.current => row.usage.clone().unwrap_or_else(|| vec!["Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into()]),
-                    "opencode" => vec!["OpenCode Go reports usage for the current account only.".into()],
-                    "codex" | "kimi" => vec![Line::from(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id))],
-                    _ => vec!["This provider does not report usage. Confirmed wait timers still appear here.".into()],
+                    "opencode" if account.current => row.usage.clone().unwrap_or_else(|| MonitorUsage::Unavailable("Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into())),
+                    "opencode" => MonitorUsage::NotReported("OpenCode Go reports usage for the current account only."),
+                    "codex" | "kimi" => MonitorUsage::Unavailable(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id)),
+                    _ => MonitorUsage::NotReported("This provider does not report usage. Confirmed wait timers still appear here."),
                 }
             });
+            if let MonitorUsage::Reported(windows) = &lines {
+                let exhausted_until = windows
+                    .iter()
+                    .filter(|window| window.remaining_percent <= 0.0)
+                    .filter_map(|window| window.resets_at_ms.and_then(|ms| u64::try_from(ms).ok()))
+                    .filter(|until| *until > now)
+                    .max();
+                account.waits.retain(|(model, _)| model.is_some());
+                if let Some(until) = exhausted_until {
+                    account.waits.push((None, until));
+                }
+            }
             account.usage = Some(lines);
         }
     }
@@ -825,18 +938,32 @@ fn demo_rows() -> Vec<ProviderRow> {
                     name: "home".into(),
                     current: false,
                     state: "signed in".into(),
-                    usage: Some(vec![ui::remaining_line("5h", 0.0, ", resets in 1h")]),
-                    waits: vec![(None, crate::rotation::now_ms() + 60_000)],
+                    usage: Some(MonitorUsage::Reported(vec![UsageWindow {
+                        label: "5h",
+                        remaining_percent: 0.0,
+                        resets_at_ms: Some(jiff::Timestamp::now().as_millisecond() + 3_600_000),
+                    }])),
+                    waits: vec![(None, crate::rotation::now_ms() + 3_600_000)],
                 },
                 AccountRow {
                     id: "demo-work".into(),
                     name: "work".into(),
                     current: true,
                     state: "signed in".into(),
-                    usage: Some(vec![
-                        ui::remaining_line("5h", 58.0, ", resets in 2h"),
-                        ui::remaining_line("week", 88.0, ", resets in 4d"),
-                    ]),
+                    usage: Some(MonitorUsage::Reported(vec![
+                        UsageWindow {
+                            label: "5h",
+                            remaining_percent: 58.0,
+                            resets_at_ms: Some(jiff::Timestamp::now().as_millisecond() + 7_200_000),
+                        },
+                        UsageWindow {
+                            label: "week",
+                            remaining_percent: 88.0,
+                            resets_at_ms: Some(
+                                jiff::Timestamp::now().as_millisecond() + 345_600_000,
+                            ),
+                        },
+                    ])),
                     waits: Vec::new(),
                 },
             ],
@@ -856,7 +983,11 @@ fn demo_rows() -> Vec<ProviderRow> {
                 name: "personal".into(),
                 current: true,
                 state: "signed in".into(),
-                usage: Some(vec![ui::remaining_line("5h", 72.0, ", resets in 3h")]),
+                usage: Some(MonitorUsage::Reported(vec![UsageWindow {
+                    label: "5h",
+                    remaining_percent: 72.0,
+                    resets_at_ms: Some(jiff::Timestamp::now().as_millisecond() + 10_800_000),
+                }])),
                 waits: Vec::new(),
             }],
         },
@@ -900,7 +1031,7 @@ mod tests {
         let text = render(&mut panel, 110, 25);
         for expected in [
             "home",
-            "work [current]",
+            "58%",
             "5h 0% left",
             "At its limit",
             "Retry in",
@@ -1001,30 +1132,42 @@ mod tests {
             &mut rows,
             &HashMap::from([(
                 ("codex".into(), "demo-work".into()),
-                vec!["5h 93% left".into()],
+                MonitorUsage::Reported(vec![UsageWindow {
+                    label: "5h",
+                    remaining_percent: 93.0,
+                    resets_at_ms: None,
+                }]),
             )]),
         );
-        assert!(
-            rows[0].accounts[0].usage.as_ref().unwrap()[0]
-                .to_string()
-                .contains("Usage unavailable")
-        );
+        assert!(matches!(
+            rows[0].accounts[0].usage,
+            Some(MonitorUsage::Unavailable(_))
+        ));
         assert_eq!(
-            rows[0].accounts[1].usage.as_deref(),
-            Some(&[Line::from("5h 93% left")][..])
+            rows[0].accounts[1].usage,
+            Some(MonitorUsage::Reported(vec![UsageWindow {
+                label: "5h",
+                remaining_percent: 93.0,
+                resets_at_ms: None
+            }])),
         );
+        assert!(rows[0].accounts[1].waits.is_empty());
     }
 
     #[test]
     fn remaining_percentages_keep_their_color_in_the_rendered_monitor() {
         let mut panel = ProvidersPanel::new(Mode::Demo);
         panel.selected = Entry::Account("codex".into(), "demo-work".into());
-        panel.rows[0].accounts[1].usage = Some(
+        panel.rows[0].accounts[1].usage = Some(MonitorUsage::Reported(
             [100.0, 55.0, 20.0, 0.0]
                 .into_iter()
-                .map(|percent| ui::remaining_line("5h", percent, ""))
+                .map(|percent| UsageWindow {
+                    label: "5h",
+                    remaining_percent: percent,
+                    resets_at_ms: None,
+                })
                 .collect(),
-        );
+        ));
         let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
         terminal
             .draw(|frame| panel.render(frame, frame.area()))
@@ -1046,6 +1189,27 @@ mod tests {
     }
 
     #[test]
+    fn selected_account_keeps_its_quota_color() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.selected = Entry::Account("codex".into(), "demo-home".into());
+        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+        terminal
+            .draw(|frame| panel.render(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = (0..30)
+            .find_map(|y| {
+                let row = (0..160)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                row.find("0% · ")
+                    .map(|x| (row[..x].chars().count() as u16, y))
+            })
+            .unwrap();
+        assert_eq!(buffer[(x, y)].fg, ui::remaining_color(0.0));
+    }
+
+    #[test]
     fn waiting_current_is_not_presented_as_the_first_account_to_reset() {
         let mut panel = ProvidersPanel::new(Mode::Demo);
         let now = crate::rotation::now_ms();
@@ -1054,8 +1218,9 @@ mod tests {
         panel.selected = Entry::Provider("codex".into());
         let text = render(&mut panel, 160, 30);
         for expected in [
-            "home [waiting] [first reset]",
-            "work [current, waiting]",
+            "0% · ",
+            "[first reset]",
+            "[current]",
             "All accounts are waiting. home resets in",
             "next request",
         ] {
@@ -1087,17 +1252,17 @@ mod tests {
     fn opencode_usage_stays_with_the_current_account() {
         let mut rows = demo_rows();
         rows[0].id = "opencode".into();
-        rows[0].usage = Some(vec![ui::remaining_line("5h", 58.0, "")]);
+        rows[0].usage = Some(MonitorUsage::Reported(vec![UsageWindow {
+            label: "5h",
+            remaining_percent: 58.0,
+            resets_at_ms: None,
+        }]));
         apply_account_usage(&mut rows, &HashMap::new());
-        assert!(
-            rows[0].accounts[0].usage.as_ref().unwrap()[0]
-                .to_string()
-                .contains("current account only")
-        );
-        assert_eq!(
-            rows[0].accounts[1].usage.as_deref(),
-            Some(&[ui::remaining_line("5h", 58.0, "")][..])
-        );
+        assert!(matches!(
+            rows[0].accounts[0].usage,
+            Some(MonitorUsage::NotReported(_))
+        ));
+        assert_eq!(rows[0].accounts[1].usage, rows[0].usage);
     }
 
     #[test]
@@ -1111,9 +1276,105 @@ mod tests {
         for _ in 0..8 {
             panel.press(KeyCode::PageDown);
         }
-        assert!(render(&mut panel, 40, 13).contains("waiting."));
+        assert!(render(&mut panel, 40, 13).contains("saved choice"));
         panel.press(KeyCode::Enter);
         assert!(render(&mut panel, 40, 13).contains("Use account for new requests"));
+    }
+
+    #[test]
+    fn a_wait_timer_never_invents_zero_quota() {
+        let mut account = demo_rows().remove(0).accounts.remove(1);
+        let now = crate::rotation::now_ms();
+        account.waits = vec![(None, now + 60_000)];
+        assert_eq!(
+            account.usage_summary(now).to_string(),
+            "waiting · 1m00s left"
+        );
+        account.usage = None;
+        assert_eq!(
+            account.usage_summary(now).to_string(),
+            "waiting · 1m00s left"
+        );
+        account.waits = vec![(Some("one-model".into()), now + 60_000)];
+        assert_eq!(account.usage_summary(now).to_string(), "checking...");
+    }
+
+    #[test]
+    fn providers_follow_route_then_connection_and_alphabetical_order() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        for (id, state) in [
+            ("grok", AuthState::Missing),
+            ("anthropic", AuthState::KeySaved),
+            ("gemini", AuthState::KeySaved),
+            ("cursor", AuthState::Missing),
+        ] {
+            let mut row = panel.rows[2].clone();
+            row.id = id.into();
+            row.state = state;
+            panel.rows.push(row);
+        }
+        let providers = |panel: &ProvidersPanel| {
+            panel
+                .entries()
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    Entry::Provider(id) => Some(id),
+                    Entry::Claude => Some("claude".into()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            providers(&panel),
+            [
+                "codex",
+                "kimi",
+                "anthropic",
+                "gemini",
+                "claude",
+                "cursor",
+                "grok",
+                "opencode-zen"
+            ]
+        );
+        panel.route.provider = Some("gemini".into());
+        panel.route.fallback = vec!["kimi".into(), "codex".into()];
+        assert_eq!(
+            providers(&panel),
+            [
+                "gemini",
+                "kimi",
+                "codex",
+                "anthropic",
+                "claude",
+                "cursor",
+                "grok",
+                "opencode-zen"
+            ]
+        );
+        panel.route.on = false;
+        assert_eq!(providers(&panel)[0], "claude");
+    }
+
+    #[test]
+    fn account_list_shows_quota_for_unselected_accounts_and_long_names() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.rows[0].accounts[1].name = "a-very-long-email-address-for-work@example.com".into();
+        for (width, height) in [(160, 30), (80, 24), (40, 24)] {
+            let text = render(&mut panel, width, height);
+            assert!(text.contains("58%"), "{text}");
+            assert!(text.contains("88%"), "{text}");
+            assert!(text.contains("0%"), "{text}");
+            assert!(text.contains("left"), "{text}");
+        }
+        if let Some(MonitorUsage::Reported(windows)) = &mut panel.rows[0].accounts[1].usage {
+            for window in windows {
+                window.remaining_percent = 0.0;
+            }
+        }
+        let text = render(&mut panel, 40, 30);
+        assert!(text.contains("5h 0%"), "{text}");
+        assert!(text.contains("week 0%"), "{text}");
     }
 
     #[test]

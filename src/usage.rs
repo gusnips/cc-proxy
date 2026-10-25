@@ -158,24 +158,105 @@ enum AccountResult {
     Unavailable { error: String },
 }
 
-impl PlanUsage {
-    /// One line per window, so a dense row cannot hide the number that matters.
-    fn lines(&self, now: Timestamp, tz: &TimeZone) -> Vec<Line<'static>> {
-        let window = |label: &str, window: Option<Window>| {
-            window.map(|window| {
-                let reset = window
-                    .resets_at_ms
-                    .and_then(|ms| Timestamp::from_millisecond(ms).ok())
-                    .map_or(String::new(), |reset| {
-                        format!(", {}", format_reset(reset, now, tz))
-                    });
-                ui::remaining_line(label, window.remaining_percent(), &reset)
-            })
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct UsageWindow {
+    pub label: &'static str,
+    pub remaining_percent: f64,
+    pub resets_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum MonitorUsage {
+    Reported(Vec<UsageWindow>),
+    Unavailable(String),
+    NotReported(&'static str),
+}
+
+impl MonitorUsage {
+    pub fn lines(&self, now: Timestamp, tz: &TimeZone) -> Vec<Line<'static>> {
+        match self {
+            Self::Unavailable(message) => vec![message.clone().into()],
+            Self::NotReported(message) => vec![(*message).into()],
+            Self::Reported(windows) => windows
+                .iter()
+                .map(|window| {
+                    let reset = window
+                        .resets_at_ms
+                        .and_then(|ms| Timestamp::from_millisecond(ms).ok())
+                        .map_or(String::new(), |reset| {
+                            format!(", {}", format_reset(reset, now, tz))
+                        });
+                    ui::remaining_line(window.label, window.remaining_percent, &reset)
+                })
+                .collect(),
+        }
+    }
+
+    pub fn compact_line(&self, now: Timestamp) -> Line<'static> {
+        use ratatui::{style::Style, text::Span};
+
+        let windows = match self {
+            Self::Unavailable(_) => return "unavailable".into(),
+            Self::NotReported(_) => return "not reported".into(),
+            Self::Reported(windows) if windows.is_empty() => return "not reported".into(),
+            Self::Reported(windows) => windows,
         };
-        [window("5h", self.five_hour), window("week", self.weekly)]
+        let mut spans = Vec::new();
+        for window in windows {
+            if !spans.is_empty() {
+                spans.push(Span::raw(" · "));
+            }
+            spans.push(Span::raw(format!("{} ", window.label)));
+            // A passed reset is not proof that the next allowance is available.
+            if window.remaining_percent == 0.0
+                && window
+                    .resets_at_ms
+                    .is_some_and(|at| at <= now.as_millisecond())
+            {
+                spans.push(Span::raw("refresh needed"));
+                continue;
+            }
+            spans.push(Span::styled(
+                format!("{:.0}%", window.remaining_percent),
+                Style::default().fg(ui::remaining_color(window.remaining_percent)),
+            ));
+            if window.remaining_percent == 0.0
+                && let Some(reset) = window.resets_at_ms
+            {
+                spans.push(Span::raw(format!(
+                    " {} left",
+                    format_time_left((reset - now.as_millisecond() + 999) / 1000)
+                )));
+            }
+        }
+        Line::from(spans)
+    }
+}
+
+impl PlanUsage {
+    fn monitor_usage(&self) -> MonitorUsage {
+        MonitorUsage::Reported(
+            [("5h", self.five_hour), ("week", self.weekly)]
+                .into_iter()
+                .filter_map(|(label, window)| {
+                    window.map(|window| UsageWindow {
+                        label,
+                        remaining_percent: window.remaining_percent(),
+                        resets_at_ms: window.resets_at_ms,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn exhausted_until_ms(&self, now_ms: u64) -> Option<u64> {
+        [self.five_hour, self.weekly]
             .into_iter()
             .flatten()
-            .collect()
+            .filter(|window| window.remaining_percent() <= 0.0)
+            .filter_map(|window| window.resets_at_ms.and_then(|ms| u64::try_from(ms).ok()))
+            .filter(|until| *until > now_ms)
+            .max()
     }
 }
 
@@ -279,7 +360,7 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
 }
 
 /// OpenCode Go reports usage for its current login only.
-pub(crate) fn headlines() -> Vec<(&'static str, Vec<Line<'static>>)> {
+pub(crate) fn headlines() -> Vec<(&'static str, MonitorUsage)> {
     if crate::accounts::saved_api_key("opencode", None)
         .or_else(config::opencode_api_key)
         .is_none()
@@ -291,52 +372,60 @@ pub(crate) fn headlines() -> Vec<(&'static str, Vec<Line<'static>>)> {
         Ok(results) => match results.into_iter().next() {
             Some(Ok(Some(Report::OpenCode(response)))) => {
                 let usage = &response.usage;
-                [
-                    ("5h", &usage.rolling),
-                    ("week", &usage.weekly),
-                    ("month", &usage.monthly),
-                ]
-                .into_iter()
-                .filter_map(|(label, window)| {
-                    let window = window.as_ref()?;
-                    let remaining = (100.0 - window.percent?).clamp(0.0, 100.0);
-                    Some(ui::remaining_line(label, remaining, ""))
-                })
-                .collect()
+                MonitorUsage::Reported(
+                    [
+                        ("5h", &usage.rolling),
+                        ("week", &usage.weekly),
+                        ("month", &usage.monthly),
+                    ]
+                    .into_iter()
+                    .filter_map(|(label, window)| {
+                        let window = window.as_ref()?;
+                        Some(UsageWindow {
+                            label,
+                            remaining_percent: (100.0 - window.percent?).clamp(0.0, 100.0),
+                            resets_at_ms: window
+                                .resets_at
+                                .as_deref()
+                                .and_then(|reset| reset_ms(&Value::from(reset))),
+                        })
+                    })
+                    .collect(),
+                )
             }
             Some(Ok(None)) => return Vec::new(),
-            _ => {
-                vec!["Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into()]
-            }
+            _ => MonitorUsage::Unavailable(
+                "Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into(),
+            ),
         },
         Err(error) => {
             tracing::warn!(%error, "Could not start the OpenCode usage lookup");
-            vec!["Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into()]
+            MonitorUsage::Unavailable(
+                "Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into(),
+            )
         }
     };
     vec![("opencode", headline)]
 }
 
-/// Usage per saved account for the monitor's Providers panel. The UUID is
-/// only a lookup key; the monitor shows the saved name, never the provider's
-/// account identity. Each window gets its own line. Call this on its
-/// background worker, not a request.
-pub(crate) fn account_usage_lines() -> HashMap<(String, String), Vec<Line<'static>>> {
-    let mut lines = HashMap::new();
+/// Structured usage per saved account for the monitor. Call on its background
+/// worker, never a request. UUIDs join the results without exposing credentials.
+pub(crate) fn account_usage() -> HashMap<(String, String), MonitorUsage> {
+    let mut usage = HashMap::new();
     for provider in ["codex", "kimi", "grok", "antigravity"] {
         let unavailable = if matches!(provider, "codex" | "kimi") {
-            vec![Line::from(format!(
+            MonitorUsage::Unavailable(format!(
                 "Usage unavailable. Press r to retry, or run cc-proxy usage {provider}."
-            ))]
+            ))
         } else {
-            vec![Line::from(
+            MonitorUsage::NotReported(
                 "This provider does not report usage. Confirmed wait timers still appear here.",
-            )]
+            )
         };
         match Accounts::new(provider).list() {
             Ok(accounts) => {
                 for account in accounts {
-                    lines.insert((provider.to_string(), account.id), unavailable.clone());
+                    usage.insert((provider.to_string(), account.id), unavailable.clone());
                 }
             }
             Err(error) => {
@@ -348,32 +437,28 @@ pub(crate) fn account_usage_lines() -> HashMap<(String, String), Vec<Line<'stati
         Ok(results) => results,
         Err(error) => {
             tracing::warn!(%error, "Could not start saved-account usage lookups");
-            return lines;
+            return usage;
         }
     };
-    let now = Timestamp::now();
-    let tz = TimeZone::system();
     for result in results {
         match result {
             Ok(Some(Report::Accounts(provider, accounts))) => {
                 for account in accounts {
-                    let account_lines = match account.result {
-                        AccountResult::Usage { usage } => usage.lines(now, &tz),
-                        AccountResult::Unavailable { .. } => {
-                            vec![Line::from(format!(
-                                "Usage unavailable. Press r to retry, or run cc-proxy usage {}.",
-                                provider.id()
-                            ))]
-                        }
+                    let report = match account.result {
+                        AccountResult::Usage { usage } => usage.monitor_usage(),
+                        AccountResult::Unavailable { .. } => MonitorUsage::Unavailable(format!(
+                            "Usage unavailable. Press r to retry, or run cc-proxy usage {}.",
+                            provider.id()
+                        )),
                     };
-                    lines.insert((provider.id().to_string(), account.id), account_lines);
+                    usage.insert((provider.id().to_string(), account.id), report);
                 }
             }
             Err(error) => tracing::warn!(%error, "Could not read saved-account usage"),
             _ => {}
         }
     }
-    lines
+    usage
 }
 
 fn fetch_reports(
@@ -415,7 +500,14 @@ async fn fetch(
         let is_current = current.as_ref() == Some(&account.id);
         async move {
             let result = match fetch_account(provider, &account.id, client).await {
-                Ok(usage) => AccountResult::Usage { usage },
+                Ok(usage) => {
+                    let _ = crate::rotation::Cooldowns::new().sync_account_window(
+                        provider.id(),
+                        &account.id,
+                        usage.exhausted_until_ms(crate::rotation::now_ms()),
+                    );
+                    AccountResult::Usage { usage }
+                }
                 Err(failure) => AccountResult::Unavailable {
                     error: provider.describe(&account.name, failure),
                 },
@@ -971,6 +1063,7 @@ mod tests {
         };
         assert_eq!(
             usage
+                .monitor_usage()
                 .lines(now, &TimeZone::UTC)
                 .iter()
                 .map(ToString::to_string)
@@ -986,12 +1079,46 @@ mod tests {
         };
         assert_eq!(
             usage
+                .monitor_usage()
                 .lines(now, &TimeZone::UTC)
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
             ["5h 72% left"]
         );
+    }
+
+    #[test]
+    fn compact_usage_keeps_both_windows_and_counts_down_only_exhausted_ones() {
+        let now: Timestamp = "2026-08-12T14:50:00Z".parse().unwrap();
+        let usage = PlanUsage {
+            five_hour: window(60.0, ms("2026-08-12T17:05:00Z")),
+            weekly: window(90.0, ms("2026-08-17T00:00:00Z")),
+            ..PlanUsage::default()
+        };
+        assert_eq!(
+            usage.monitor_usage().compact_line(now).to_string(),
+            "5h 40% · week 10%"
+        );
+        let usage = PlanUsage {
+            five_hour: window(100.0, ms("2026-08-12T17:05:00Z")),
+            weekly: window(100.0, ms("2026-08-12T18:00:00Z")),
+            ..PlanUsage::default()
+        };
+        assert_eq!(
+            usage.monitor_usage().compact_line(now).to_string(),
+            "5h 0% 2h 15m left · week 0% 3h 10m left"
+        );
+        let usage = PlanUsage {
+            five_hour: window(100.0, ms("2026-08-12T14:00:00Z")),
+            ..PlanUsage::default()
+        };
+        assert_eq!(
+            usage.monitor_usage().compact_line(now).to_string(),
+            "5h refresh needed"
+        );
+        let usage = MonitorUsage::Unavailable("Press r to retry.".into());
+        assert_eq!(usage.compact_line(now).to_string(), "unavailable");
     }
 
     #[test]

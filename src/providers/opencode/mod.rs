@@ -857,6 +857,11 @@ impl crate::accounts::AccountSupport for OpenCodeZenCli {
         zen::identity(&auth)
     }
 
+    fn email(&self, login: &serde_json::Value) -> Option<String> {
+        let auth: zen::StoredAuth = serde_json::from_value(login.clone()).ok()?;
+        zen::email(&auth)
+    }
+
     fn state(&self, login: &serde_json::Value) -> crate::provider::AuthState {
         match serde_json::from_value::<zen::StoredAuth>(login.clone()) {
             Ok(auth) => crate::provider::AuthState::SignedIn {
@@ -938,6 +943,25 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+
+    #[test]
+    fn account_email_does_not_replace_the_organization_identity() {
+        let mut login = json!({
+            "access": "header.eyJlbWFpbCI6ImhvbWVAZXhhbXBsZS5jb20ifQ.sig",
+            "org_id": "org_123"
+        });
+        assert_eq!(
+            OPENCODE_ZEN_CLI.email(&login).as_deref(),
+            Some("home@example.com")
+        );
+        assert_eq!(
+            OPENCODE_ZEN_CLI.identity(&login).as_deref(),
+            Some("org_123")
+        );
+        login["access"] = json!("opaque-token");
+        login["org_id"] = json!("org@example.com");
+        assert_eq!(OPENCODE_ZEN_CLI.email(&login), None);
+    }
 
     fn context() -> RequestContext {
         RequestContext {

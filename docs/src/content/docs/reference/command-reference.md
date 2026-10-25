@@ -184,9 +184,17 @@ cc-proxy logout codex --all
 ```
 
 `add` saves another login without switching away from the current account.
-`--name` is optional; the first default name is `main`, then `account-2` and so
-on. Names use up to 32 letters, numbers, `-` or `_` and start with a letter or
-number. `--device` chooses device-code login when supported.
+`--name` is optional. New accounts use the email from the sign-in when the
+provider includes one. A name already in use gets `-2`, `-3` and so on.
+Without a usable email, the next free name is `main`, then `account-2` and so
+on. Saved names stay the same when you sign in again.
+
+Short names use up to 32 letters, numbers, `-` or `_` and start with a letter
+or number. Email names allow letters, numbers, `.`, `_`, `+` and `-`, with
+one `@`, up to 254 characters. They also start with a letter or number.
+Other characters, or a collision with no room for a suffix, use a short
+default name instead. Names are saved in lowercase. `--device` chooses
+device-code login when supported.
 
 `login` with an existing account asks Add or Replace. Outside a terminal it
 refuses to guess: use `auth add` or `login --replace`. `--account` names which
