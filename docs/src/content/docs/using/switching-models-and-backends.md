@@ -5,24 +5,25 @@ description: Switch Claude Code between providers and your Claude subscription w
 
 cc-proxy edits the `env` block of Claude Code's `settings.json`, and Claude Code reads that file again whenever it changes. So one command switches every open window and terminal. You don't restart anything.
 
-| Goal                                                        | Command                                                                          |
-| ----------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Send Claude Code through the proxy                          | `cc-proxy start`                                                                 |
-| Change provider                                             | `cc-proxy use kimi` (or `codex`, `cursor`, `grok`, `copilot`, `glm`, `opencode`) |
-| Go back to your Claude subscription, keep the proxy running | `cc-proxy use claude`                                                            |
-| Go back to your Claude subscription and stop the proxy      | `cc-proxy stop`                                                                  |
-| Try one model once                                          | `claude --model <id>`                                                            |
-| Change model inside a session                               | `/model`                                                                         |
+| Goal                                                | Command                                                                          |
+| --------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Send Claude Code through the proxy                  | `cc-proxy start`                                                                 |
+| Change provider                                     | `cc-proxy use kimi` (or `codex`, `cursor`, `grok`, `copilot`, `glm`, `opencode`) |
+| Use a saved Claude subscription through the proxy   | `cc-proxy use claude`                                                            |
+| Restore Claude Code's login, keep the proxy running | `cc-proxy use direct`                                                            |
+| Restore Claude Code's login and stop the proxy      | `cc-proxy stop`                                                                  |
+| Try one model once                                  | `claude --model <id>`                                                            |
+| Change model inside a session                       | `/model`                                                                         |
 
-`use` takes a provider only if you are signed in to it. If you aren't, it asks `Sign in now? [y/N]` and signs you in. The default is no, so a script never opens a browser.
+`use` takes a provider only if you are signed in to it. If you aren't, it asks `Sign in now? [y/N]` and signs you in. The default is no, so a script never opens a browser. `direct` needs no sign-in and restores the settings and login Claude Code used before routing. It does not select a saved cc-proxy account.
 
 ```sh
 cc-proxy use kimi
-cc-proxy use claude
+cc-proxy use direct
 cc-proxy use codex
 ```
 
-The proxy keeps running through all of it. Routing never comes back on its own: after `stop` or `use claude`, only `start` or `use <provider>` turns it on again.
+The proxy keeps running through all of it. Routing never comes back on its own: after `stop` or `use direct`, only `start` or `use <provider>` turns it on again.
 
 ## One-shot aliases
 

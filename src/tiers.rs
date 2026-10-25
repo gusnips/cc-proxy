@@ -333,8 +333,8 @@ pub fn resolve(registry: &Registry, route: &Route, model: &str) -> Result<String
     let Some(provider) = route.target() else {
         return Err(format!(
             "cc-proxy routing is off, so it can't serve \"{model}\". This Claude Code window \
-             still points at the proxy. Quit it and start it again to use your Claude \
-             subscription, or run `cc-proxy start` to route it through a provider."
+             still points at the proxy. Run `cc-proxy use direct` to restore Claude Code's \
+             original settings and login, or `cc-proxy start` to route it through a provider."
         ));
     };
     resolve_for(registry, route, provider, model)
@@ -354,9 +354,11 @@ pub fn resolve_for(
     if let Some(chosen) = route.tier(provider, tier) {
         return Ok(chosen.to_string());
     }
-    if provider == "anthropic" && model.starts_with("claude-") && model != format!("claude-{tier}")
+    if matches!(provider, "claude" | "anthropic")
+        && model.starts_with("claude-")
+        && model != format!("claude-{tier}")
     {
-        return Ok(format!("anthropic/{model}"));
+        return Ok(format!("{provider}/{model}"));
     }
     match for_provider(registry, provider).remove(tier) {
         Some(guess) => Ok(guess.model),
@@ -610,6 +612,48 @@ mod tests {
             lines[3],
             "haiku has no model yet. Pick one with `cc-proxy models choose kimi`."
         );
+    }
+
+    #[test]
+    fn concrete_claude_ids_stay_on_claude_or_anthropic_including_new_releases() {
+        let registry = Registry::from_providers([]);
+        for provider in ["claude", "anthropic"] {
+            let route = Route {
+                on: true,
+                provider: Some(provider.into()),
+                ..Route::default()
+            };
+            for model in [
+                "claude-opus-4-8",
+                "claude-haiku-4-5-20251001",
+                "claude-sonnet-99-1",
+            ] {
+                assert_eq!(
+                    resolve(&registry, &route, model),
+                    Ok(format!("{provider}/{model}"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claude_tier_aliases_and_explicit_choices_keep_their_normal_priority() {
+        let registry = Registry::from_providers([]);
+        for provider in ["claude", "anthropic", "codex", "kimi"] {
+            let mut route = Route {
+                on: true,
+                provider: Some(provider.into()),
+                ..Route::default()
+            };
+            route
+                .tiers
+                .entry(provider.into())
+                .or_default()
+                .insert("opus".into(), "chosen-model".into());
+            for model in ["opus", "claude-opus", "claude-opus-4-8"] {
+                assert_eq!(resolve(&registry, &route, model), Ok("chosen-model".into()));
+            }
+        }
     }
 
     #[test]

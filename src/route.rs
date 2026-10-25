@@ -7,7 +7,7 @@
 //! the proxy at all.
 //!
 //! Routing starts only when the user runs `cc-proxy start` or `cc-proxy use`.
-//! It ends when they run `cc-proxy stop` or `cc-proxy use claude`, or when the
+//! It ends when they run `cc-proxy stop` or `cc-proxy use direct`, or when the
 //! proxy turns out to be gone ([`heal`]). Nothing else turns it back on.
 
 use std::time::Duration;
@@ -19,13 +19,14 @@ use crate::ui::{self, Mood};
 use crate::{claude_settings, config, config_keys, daemon, tiers};
 
 /// The built-in providers `start` and `use` can send Claude Code to.
-pub const PROVIDERS: [&str; 11] = [
+pub const PROVIDERS: [&str; 12] = [
     "codex",
     "kimi",
     "cursor",
     "grok",
     "copilot",
     "glm",
+    "claude",
     "anthropic",
     "gemini",
     "antigravity",
@@ -41,7 +42,7 @@ pub fn routable_providers(registry: &Registry) -> Vec<&'static str> {
         .filter(|name| registry.provider(name).is_some())
         .collect();
     for name in registry.list_provider_names() {
-        if !out.contains(&name.as_str()) {
+        if name != DIRECT && !out.contains(&name.as_str()) {
             out.push(crate::provider::intern_provider_name(&name));
         }
     }
@@ -49,7 +50,7 @@ pub fn routable_providers(registry: &Registry) -> Vec<&'static str> {
 }
 
 /// What `cc-proxy use` takes to mean "no routing".
-pub const CLAUDE: &str = "claude";
+pub const DIRECT: &str = "direct";
 
 /// Fails before anything starts when Claude Code's settings can't be edited,
 /// so a refused `start` doesn't leave a proxy running that nothing points at.
@@ -145,8 +146,9 @@ pub fn refresh_model_labels() -> bool {
     }
 }
 
-/// Send Claude Code back to Anthropic. Reports a settings file it couldn't
-/// change, after the proxy has stopped serving Claude's names either way.
+/// Restore Claude Code's original settings and login, without selecting a
+/// saved provider account. Reports a settings file it couldn't change, after
+/// the proxy has stopped serving Claude's names either way.
 pub fn deactivate() -> Result<()> {
     let config = if config::route().on {
         config_keys::write_value("route.on", serde_json::Value::Bool(false)).map(drop)
@@ -168,7 +170,7 @@ pub fn refresh(base_url: &str) -> Result<bool> {
 }
 
 /// Routing that outlived its proxy (a crash, a reboot, a kill) leaves every
-/// Claude Code window pointed at nothing. Put them back on Anthropic.
+/// Claude Code window pointed at nothing. Restore its original settings.
 pub fn heal() {
     let Ok(found) = claude_settings::inspect() else {
         return;
@@ -183,7 +185,7 @@ pub fn heal() {
         Ok(()) => ui::eprint_note(
             Mood::Asleep,
             &[
-                "cc-proxy wasn't running, so Claude Code goes back to your Claude subscription."
+                "cc-proxy wasn't running, so Claude Code uses its original settings and login again."
                     .into(),
                 "Run `cc-proxy start` to route it again.".into(),
             ],
@@ -220,7 +222,7 @@ pub fn status_lines() -> Vec<String> {
     let mut lines = Vec::new();
     match (route.target(), found.routed_to) {
         (Some(provider), Some(_)) => lines.push(format!(
-            "Claude Code goes to {}. `cc-proxy use claude` switches back to your subscription.",
+            "Claude Code goes to {} through the proxy. `cc-proxy use direct` restores its original settings and login.",
             ui::provider_name(provider)
         )),
         (Some(provider), None) => lines.push(format!(
@@ -229,12 +231,12 @@ pub fn status_lines() -> Vec<String> {
             ui::provider_name(provider)
         )),
         (None, Some(url)) => lines.push(format!(
-            "Claude Code's settings point at {url}, but routing is off. `cc-proxy use claude` \
-             points them back at Anthropic."
+            "Claude Code's settings point at {url}, but routing is off. `cc-proxy use direct` \
+             restores its original settings and login."
         )),
         (None, None) => lines.push(
-            "Claude Code uses your Claude subscription. `cc-proxy start` routes it through a \
-             provider."
+            "Claude Code uses its original settings and login, without the proxy. \
+             `cc-proxy start` routes it through a provider."
                 .into(),
         ),
     }
@@ -319,6 +321,20 @@ mod tests {
                 models: (0..models).map(|i| format!("vendor/model-{i}")).collect(),
             },
         ))
+    }
+
+    #[test]
+    fn claude_is_a_provider_and_direct_is_never_routable() {
+        let registry = Registry::from_providers([
+            reseller("claude", 1),
+            reseller("direct", 1),
+            reseller("codex", 1),
+            reseller("reseller", 1),
+        ]);
+        assert_eq!(
+            routable_providers(&registry),
+            ["codex", "claude", "reseller"]
+        );
     }
 
     #[test]

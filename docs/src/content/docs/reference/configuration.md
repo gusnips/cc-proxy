@@ -174,7 +174,7 @@ not clear them. See [Files and storage](/reference/files-and-storage/).
 
 | Config key                      | Default | Meaning                                                                                                                                                                |
 | ------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `route.on`                      | `false` | Whether Claude names are served. Only `start` and `use <provider>` turn it on. `stop` and `use claude` turn it off.                                                    |
+| `route.on`                      | `false` | Whether Claude names are served. Only `start` and `use <provider>` turn it on. `stop` and `use direct` turn it off.                                                    |
 | `route.provider`                | unset   | The provider Claude Code goes to. It stays set while routing is off, so `start` can offer it again.                                                                    |
 | `route.tiers.<provider>.<name>` | unset   | The model you chose for a Claude name (`fable`, `opus`, `sonnet`, `haiku`). Written by `cc-proxy models choose`, `cc-proxy models set` and the questions `start` asks. |
 

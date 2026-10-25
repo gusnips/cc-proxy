@@ -62,8 +62,9 @@ seconds. Editors and new terminals work the same way.
 
 ```sh
 cc-proxy use kimi     # another provider
-cc-proxy use claude   # your Claude subscription; the proxy keeps running
-cc-proxy stop         # your Claude subscription, and the proxy stops
+cc-proxy use claude   # a saved Claude subscription through the proxy
+cc-proxy use direct   # Claude Code's own login; the proxy keeps running
+cc-proxy stop         # Claude Code's own login, and the proxy stops
 ```
 
 Routing never comes back by itself. Run `cc-proxy start` or

@@ -109,8 +109,9 @@ Switch whenever you want:
 
 ```sh
 cc-proxy use kimi     # send Claude Code to another provider
-cc-proxy use claude   # back to your Claude subscription; the proxy keeps running
-cc-proxy stop         # routing off and the proxy stops
+cc-proxy use claude   # use a saved Claude subscription through the proxy
+cc-proxy use direct   # restore Claude Code's login; leave the proxy running
+cc-proxy stop         # restore Claude Code's login and stop the proxy
 ```
 
 Routing never comes back by itself. It starts again only when you run

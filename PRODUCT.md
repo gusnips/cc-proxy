@@ -10,7 +10,7 @@ A local proxy that lets Claude Code run on those plans. It starts in the backgro
 
 ## Why this one
 
-It uses plans people already pay for and can also save API keys. One command switches provider, and open windows follow within seconds. It writes only the `env` block of Claude Code's `settings.json`, and `cc-proxy use claude` puts everything back.
+It uses plans people already pay for and can also save API keys. One command switches provider, and open windows follow within seconds. It writes only the `env` block of Claude Code's `settings.json`, and `cc-proxy use direct` puts everything back.
 
 ## How people use it
 
