@@ -49,5 +49,5 @@ Only the waiting face moves. Lists and screens don't animate.
 - The selected row is `❯` in bold teal. Hints are dim, on one footer line that changes with the mode.
 - Every error says what failed, why, and what to run.
 - A value that an environment variable overrides says so next to the value.
-- A secret is masked while typed and never shown again.
+- A secret shows as one `*` for each character typed, so a paste is seen to land, and is never shown again. `prompt::read_hidden_line` draws it; Escape or Ctrl-C cancels and saves nothing.
 - Changes that save at once say "Saved". A change that needs a restart says so in the same line.

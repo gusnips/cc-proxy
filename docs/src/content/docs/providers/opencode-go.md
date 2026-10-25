@@ -11,8 +11,8 @@ or direct protocol verification against the API.
 
 ## Account and authentication
 
-Subscribe to OpenCode Go, copy your API key, and store it once (input is
-hidden, nothing lands in shell history):
+Subscribe to OpenCode Go, copy your API key, and store it once (each
+character shows as `*`, nothing lands in shell history):
 
 ```sh
 cc-proxy login opencode
