@@ -684,6 +684,8 @@ fn usage_shows_every_signed_in_plan_and_how_to_sign_in_to_the_rest()
             "  5-hour window: 72% left, already reset (Aug 9 09:00)\n",
             "  Weekly: 88% left, already reset (Aug 14 16:00)\n",
             "\n",
+            "antigravity: not signed in. Run `cc-proxy auth login antigravity`.\n",
+            "\n",
             "opencode: no API key set. Run `cc-proxy auth login opencode` or set OPENCODE_API_KEY.\n",
         )
     );
@@ -696,6 +698,7 @@ fn usage_shows_every_signed_in_plan_and_how_to_sign_in_to_the_rest()
         String::from_utf8(output.stderr)?,
         concat!(
             "claude: not signed in. Run `cc-proxy auth login claude`.\n",
+            "antigravity: not signed in. Run `cc-proxy auth login antigravity`.\n",
             "opencode: no API key set. Run `cc-proxy auth login opencode` or set OPENCODE_API_KEY.\n",
         )
     );
@@ -740,6 +743,10 @@ fn usage_for_a_provider_that_is_not_signed_in_names_the_login_and_exits_one()
         (
             "kimi",
             "kimi: not signed in. Run `cc-proxy auth login kimi`.\n",
+        ),
+        (
+            "antigravity",
+            "antigravity: not signed in. Run `cc-proxy auth login antigravity`.\n",
         ),
         (
             "opencode",
