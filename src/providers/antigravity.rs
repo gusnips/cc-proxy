@@ -1081,6 +1081,11 @@ impl crate::accounts::AccountSupport for AntigravityCli {
             .or_else(|| (!auth.project_id.is_empty()).then_some(auth.project_id))
     }
 
+    fn email(&self, login: &Value) -> Option<String> {
+        let auth: StoredAntigravityAuth = serde_json::from_value(login.clone()).ok()?;
+        auth.email
+    }
+
     fn state(&self, login: &Value) -> AuthState {
         match serde_json::from_value::<StoredAntigravityAuth>(login.clone()) {
             Ok(auth) => AuthState::SignedIn {
@@ -1147,6 +1152,22 @@ mod tests {
             email: Some(format!("{name}@example.com")),
             plan: Some("test-plan".into()),
         }
+    }
+
+    #[test]
+    fn account_email_comes_from_metadata_not_the_project() {
+        let mut login = serde_json::to_value(stored_auth("first")).unwrap();
+        assert_eq!(
+            ANTIGRAVITY_CLI.email(&login).as_deref(),
+            Some("first@example.com")
+        );
+        login["email"] = Value::Null;
+        login["projectId"] = json!("project@example.com");
+        assert_eq!(ANTIGRAVITY_CLI.email(&login), None);
+        assert_eq!(
+            ANTIGRAVITY_CLI.identity(&login).as_deref(),
+            Some("project@example.com")
+        );
     }
 
     #[test]

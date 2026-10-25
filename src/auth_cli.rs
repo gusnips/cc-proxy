@@ -17,7 +17,7 @@ pub struct LoginOptions {
 
 /// Where a new sign-in is saved.
 enum Slot {
-    New(String),
+    New(Option<String>),
     Replace(Account),
 }
 
@@ -55,7 +55,7 @@ impl<'a> AccountCli<'a> {
             return self.sign_in(options.device, Slot::Replace(self.accounts.require(raw)?));
         }
         let Some(current) = self.accounts.current()? else {
-            return self.sign_in(options.device, Slot::New(self.accounts.next_name()?));
+            return self.sign_in(options.device, Slot::New(None));
         };
         if options.replace {
             return self.sign_in(options.device, Slot::Replace(current));
@@ -93,9 +93,9 @@ impl<'a> AccountCli<'a> {
                         self.provider
                     );
                 }
-                name
+                Some(name)
             }
-            None => self.accounts.next_name()?,
+            None => None,
         };
         self.sign_in(device, Slot::New(name))
     }
@@ -114,7 +114,16 @@ impl<'a> AccountCli<'a> {
             None => None,
         };
         let (name, expected_id, renewed) = match (slot, same) {
-            (Slot::New(name), None) => (name, None, false),
+            (Slot::New(name), None) => (
+                match name {
+                    Some(name) => name,
+                    None => self
+                        .accounts
+                        .next_name(self.support.email(&login).as_deref())?,
+                },
+                None,
+                false,
+            ),
             (Slot::New(_), Some(same)) => {
                 let question = format!(
                     "That {label} login is already saved as `{}`. Replace its saved sign-in?",
@@ -324,28 +333,37 @@ mod tests {
 
     /// Signs in as whoever `next` names, with no browser.
     struct Fake {
-        next: Mutex<String>,
+        next: Mutex<Value>,
     }
 
     impl Fake {
         fn new() -> Self {
             Self {
-                next: Mutex::new(String::new()),
+                next: Mutex::new(json!({})),
             }
         }
 
         fn as_user(&self, who: &str) {
-            *self.next.lock().unwrap() = who.to_string();
+            *self.next.lock().unwrap() = json!({"user": who, "access": "token"});
+        }
+
+        fn as_user_with_email(&self, who: &str, email: &str) {
+            self.as_user(who);
+            self.next.lock().unwrap()["email"] = json!(email);
         }
     }
 
     impl AccountSupport for Fake {
         fn sign_in(&self, _device: bool) -> Result<Value> {
-            Ok(json!({"user": *self.next.lock().unwrap(), "access": "token"}))
+            Ok(self.next.lock().unwrap().clone())
         }
 
         fn identity(&self, login: &Value) -> Option<String> {
             login["user"].as_str().map(str::to_string)
+        }
+
+        fn email(&self, login: &Value) -> Option<String> {
+            login["email"].as_str().map(str::to_string)
         }
 
         fn state(&self, login: &Value) -> AuthState {
@@ -375,6 +393,113 @@ mod tests {
             .into_iter()
             .map(|a| a.name)
             .collect()
+    }
+
+    #[test]
+    fn new_accounts_default_to_email_but_explicit_names_win() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::new();
+        let cli = cli(&fake, &dir);
+
+        fake.as_user_with_email("ana", " Ana.Silva+code@Example.COM ");
+        cli.login(&LoginOptions::default()).unwrap();
+        let first = cli.accounts.current().unwrap().unwrap();
+        fake.as_user_with_email("bo", "bo@example.com");
+        cli.add(None, false).unwrap();
+        fake.as_user_with_email("cy", "cy@example.com");
+        cli.add(Some("Work"), false).unwrap();
+
+        assert_eq!(
+            names(&cli),
+            ["ana.silva+code@example.com", "bo@example.com", "work"]
+        );
+        assert_eq!(cli.accounts.current().unwrap(), Some(first.clone()));
+        assert_eq!(
+            cli.accounts
+                .require(" ANA.SILVA+CODE@EXAMPLE.COM ")
+                .unwrap(),
+            first
+        );
+        cli.use_account(Some("bo@example.com")).unwrap();
+        assert_eq!(
+            cli.accounts.current().unwrap().unwrap().name,
+            "bo@example.com"
+        );
+        cli.logout(Some("bo@example.com"), false).unwrap();
+        assert_eq!(cli.accounts.current().unwrap(), Some(first));
+    }
+
+    #[test]
+    fn shared_emails_get_free_names_but_duplicate_identities_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::new();
+        let cli = cli(&fake, &dir);
+        for user in ["personal", "team", "other-team"] {
+            fake.as_user_with_email(user, "shared@example.com");
+            cli.add(None, false).unwrap();
+        }
+        let first = cli.accounts.require("shared@example.com").unwrap();
+        assert_eq!(
+            names(&cli),
+            [
+                "shared@example.com",
+                "shared@example.com-2",
+                "shared@example.com-3"
+            ]
+        );
+        assert_eq!(
+            cli.accounts.login(&first.name).unwrap().unwrap()["user"],
+            "personal"
+        );
+
+        fake.as_user_with_email("personal", "changed@example.com");
+        let error = cli.add(None, false).unwrap_err().to_string();
+        assert!(
+            error.contains("already saved as `shared@example.com`"),
+            "{error}"
+        );
+        assert_eq!(cli.accounts.require(&first.name).unwrap(), first);
+        assert_eq!(names(&cli).len(), 3);
+        let error = cli
+            .add(Some("SHARED@example.com"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("already has an account called `shared@example.com`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_new_email_never_renames_a_saved_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::new();
+        let cli = cli(&fake, &dir);
+        fake.as_user("ana");
+        cli.login(&LoginOptions::default()).unwrap();
+        fake.as_user_with_email("ana", "ana@example.com");
+        cli.login(&LoginOptions {
+            replace: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(names(&cli), ["main"]);
+        assert_eq!(
+            cli.accounts.login("main").unwrap().unwrap()["email"],
+            "ana@example.com"
+        );
+    }
+
+    #[test]
+    fn an_identity_that_looks_like_email_is_not_a_default_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::new();
+        let cli = cli(&fake, &dir);
+        fake.as_user("id@example.com");
+        cli.add(None, false).unwrap();
+        fake.as_user_with_email("other", "unsafe;name@example.com");
+        cli.add(None, false).unwrap();
+        assert_eq!(names(&cli), ["main", "account-2"]);
     }
 
     #[test]

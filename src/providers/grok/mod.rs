@@ -553,6 +553,11 @@ impl crate::accounts::AccountSupport for GrokCli {
         auth::token_store::identity(&auth)
     }
 
+    fn email(&self, login: &serde_json::Value) -> Option<String> {
+        let auth = serde_json::from_value(login.clone()).ok()?;
+        auth::token_store::email(&auth)
+    }
+
     fn state(&self, login: &serde_json::Value) -> crate::provider::AuthState {
         match serde_json::from_value::<auth::token_store::StoredAuth>(login.clone()) {
             Ok(auth) => crate::provider::AuthState::SignedIn {
