@@ -127,7 +127,7 @@ impl ProviderRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Entry {
     Rotate,
-    Claude,
+    Direct,
     Provider(String),
     Account(String, String),
 }
@@ -233,33 +233,23 @@ impl ProvidersPanel {
     }
 
     fn entries(&self) -> Vec<Entry> {
-        let mut entries = vec![Entry::Rotate];
-        if self.route.target().is_none() {
-            entries.push(Entry::Claude);
-        }
+        let mut entries = vec![Entry::Direct];
         let mut rows: Vec<_> = self.rows.iter().collect();
         rows.sort_by_cached_key(|row| {
-            let role = if self.route.target() == Some(row.id.as_str()) {
+            let role = if row.id == "claude" {
                 (0, 0)
+            } else if self.route.target() == Some(row.id.as_str()) {
+                (1, 0)
             } else if let Some(at) = self.route.fallback.iter().position(|id| id == &row.id) {
-                (1, at)
+                (2, at)
             } else if row.state != AuthState::Missing {
-                (2, 0)
-            } else {
                 (3, 0)
+            } else {
+                (4, 0)
             };
             (role, ui::provider_name(&row.id).to_lowercase(), &row.id)
         });
-        let mut native_added = self.route.target().is_none();
         for row in rows {
-            if !native_added
-                && row.state == AuthState::Missing
-                && self.route.target() != Some(row.id.as_str())
-                && !self.route.fallback.contains(&row.id)
-            {
-                entries.push(Entry::Claude);
-                native_added = true;
-            }
             entries.push(Entry::Provider(row.id.clone()));
             entries.extend(
                 row.accounts
@@ -267,9 +257,7 @@ impl ProvidersPanel {
                     .map(|account| Entry::Account(row.id.clone(), account.id.clone())),
             );
         }
-        if !native_added {
-            entries.push(Entry::Claude);
-        }
+        entries.push(Entry::Rotate);
         entries
     }
 
@@ -312,7 +300,7 @@ impl ProvidersPanel {
             KeyCode::PageUp | KeyCode::Char('u') | KeyCode::Char('[') => {
                 self.detail_scroll = self.detail_scroll.saturating_sub(3)
             }
-            KeyCode::Home if self.menu.is_none() => self.selected = Entry::Rotate,
+            KeyCode::Home if self.menu.is_none() => self.selected = Entry::Direct,
             KeyCode::End if self.menu.is_none() => {
                 self.selected = self.entries().last().unwrap().clone()
             }
@@ -368,10 +356,10 @@ impl ProvidersPanel {
                     Action::Rotate(!self.auto_rotate),
                 )];
             }
-            Entry::Claude => {
+            Entry::Direct => {
                 return vec![(
-                    "Use my Claude subscription (no proxy)".into(),
-                    Action::UseProvider("claude".into()),
+                    "Disable proxy routing".into(),
+                    Action::UseProvider("direct".into()),
                 )];
             }
             _ => {}
@@ -457,9 +445,13 @@ impl ProvidersPanel {
     pub fn preview_action(&mut self, action: &Action) {
         match action {
             Action::UseProvider(id) => {
-                self.route.on = id != "claude";
-                self.route.provider = Some(id.clone());
-                self.route.fallback.retain(|name| name != id);
+                if id == "direct" {
+                    self.route.on = false;
+                } else {
+                    self.route.on = true;
+                    self.route.provider = Some(id.clone());
+                    self.route.fallback.retain(|name| name != id);
+                }
             }
             Action::UseAccount { provider, id } => {
                 if let Some(row) = self.rows.iter_mut().find(|row| &row.id == provider) {
@@ -490,8 +482,8 @@ impl ProvidersPanel {
                 "Auto-rotate  {}",
                 if self.auto_rotate { "on" } else { "off" }
             ),
-            Entry::Claude => format!(
-                "Claude subscription{}",
+            Entry::Direct => format!(
+                "Disable proxy routing{}",
                 if self.route.target().is_none() {
                     " [in use]"
                 } else {
@@ -597,10 +589,9 @@ impl ProvidersPanel {
                     "Off by default. Changes apply to new requests without a restart.".into(),
                 );
             }
-            Entry::Claude => {
+            Entry::Direct => {
                 text.push(
-                    "Send Claude Code straight to your Claude subscription, without the proxy."
-                        .into(),
+                    "Restore Claude Code's original settings and login, without the proxy.".into(),
                 );
                 text.push(
                     "The proxy keeps running. You can switch back to a provider here.".into(),
@@ -734,7 +725,7 @@ impl ProvidersPanel {
             .route
             .target()
             .map(ui::provider_name)
-            .unwrap_or("Claude subscription (no proxy)");
+            .unwrap_or("Claude Code login (no proxy)");
         let fallback = if self.route.fallback.is_empty() {
             "none".into()
         } else {
@@ -977,7 +968,7 @@ fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String
                 match row.id.as_str() {
                     "opencode" if account.current => row.usage.clone().unwrap_or_else(|| MonitorUsage::Unavailable("Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into())),
                     "opencode" => MonitorUsage::NotReported("OpenCode Go reports usage for the current account only."),
-                    "codex" | "kimi" => MonitorUsage::Unavailable(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id)),
+                    "claude" | "codex" | "kimi" => MonitorUsage::Unavailable(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id)),
                     _ => MonitorUsage::NotReported("This provider does not report usage. Confirmed wait timers still appear here."),
                 }
             });
@@ -1410,6 +1401,8 @@ mod tests {
         for _ in 0..12 {
             panel.press(KeyCode::Down);
         }
+        assert_eq!(panel.selected, Entry::Rotate);
+        panel.press(KeyCode::Up);
         assert_eq!(panel.selected, Entry::Provider("opencode-zen".into()));
         assert!(render(&mut panel, 40, 14).contains("OpenCode Zen"));
         assert!(
@@ -1658,7 +1651,7 @@ mod tests {
                 .into_iter()
                 .filter_map(|entry| match entry {
                     Entry::Provider(id) => Some(id),
-                    Entry::Claude => Some("claude".into()),
+                    Entry::Direct => Some("direct".into()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -1666,11 +1659,11 @@ mod tests {
         assert_eq!(
             providers(&panel),
             [
+                "direct",
                 "codex",
                 "kimi",
                 "anthropic",
                 "gemini",
-                "claude",
                 "cursor",
                 "grok",
                 "opencode-zen"
@@ -1681,18 +1674,46 @@ mod tests {
         assert_eq!(
             providers(&panel),
             [
+                "direct",
                 "gemini",
                 "kimi",
                 "codex",
                 "anthropic",
-                "claude",
                 "cursor",
                 "grok",
                 "opencode-zen"
             ]
         );
         panel.route.on = false;
-        assert_eq!(providers(&panel)[0], "claude");
+        assert_eq!(providers(&panel)[0], "direct");
+    }
+
+    #[test]
+    fn claude_subscription_is_pinned_after_direct_and_keeps_its_own_accounts() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        let mut claude = panel.rows[0].clone();
+        claude.id = "claude".into();
+        panel.rows.push(claude);
+        assert_eq!(
+            &panel.entries()[..2],
+            &[Entry::Direct, Entry::Provider("claude".into())]
+        );
+        panel.selected = Entry::Account("claude".into(), "demo-work".into());
+        assert!(render(&mut panel, 160, 35).contains("5h 58% left"));
+        panel.preview_action(&Action::UseProvider("claude".into()));
+        assert_eq!(panel.route.target(), Some("claude"));
+        panel.selected = Entry::Direct;
+        assert_eq!(panel.actions()[0].1, Action::UseProvider("direct".into()));
+        panel.preview_action(&Action::UseProvider("direct".into()));
+        assert!(panel.route.target().is_none());
+        assert_eq!(panel.route.provider.as_deref(), Some("claude"));
+        let text = render(&mut panel, 160, 35);
+        assert!(text.contains("Disable proxy routing [in use]"), "{text}");
+        assert!(text.contains("original settings and login"), "{text}");
+        panel.press(KeyCode::Home);
+        assert_eq!(panel.selected, Entry::Direct);
+        panel.press(KeyCode::End);
+        assert_eq!(panel.selected, Entry::Rotate);
     }
 
     #[test]
