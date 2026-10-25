@@ -27,6 +27,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum UsageProvider {
+    Claude,
     Codex,
     Kimi,
     #[value(name = "opencode")]
@@ -36,6 +37,7 @@ pub enum UsageProvider {
 impl UsageProvider {
     fn id(self) -> &'static str {
         match self {
+            Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Kimi => "kimi",
             Self::OpenCode => "opencode",
@@ -44,6 +46,7 @@ impl UsageProvider {
 
     fn name(self) -> &'static str {
         match self {
+            Self::Claude => "Claude subscription",
             Self::Codex => "Codex",
             Self::Kimi => "Kimi",
             Self::OpenCode => "OpenCode Go",
@@ -52,6 +55,7 @@ impl UsageProvider {
 
     fn not_signed_in(self) -> &'static str {
         match self {
+            Self::Claude => "claude: not signed in. Run `cc-proxy auth login claude`.",
             Self::Codex => "codex: not signed in. Run `cc-proxy auth login codex`.",
             Self::Kimi => "kimi: not signed in. Run `cc-proxy auth login kimi`.",
             Self::OpenCode => {
@@ -412,8 +416,8 @@ pub(crate) fn headlines() -> Vec<(&'static str, MonitorUsage)> {
 /// worker, never a request. UUIDs join the results without exposing credentials.
 pub(crate) fn account_usage() -> HashMap<(String, String), MonitorUsage> {
     let mut usage = HashMap::new();
-    for provider in ["codex", "kimi", "grok", "antigravity"] {
-        let unavailable = if matches!(provider, "codex" | "kimi") {
+    for provider in ["claude", "codex", "kimi", "grok", "antigravity"] {
+        let unavailable = if matches!(provider, "claude" | "codex" | "kimi") {
             MonitorUsage::Unavailable(format!(
                 "Usage unavailable. Press r to retry, or run cc-proxy usage {provider}."
             ))
@@ -433,7 +437,11 @@ pub(crate) fn account_usage() -> HashMap<(String, String), MonitorUsage> {
             }
         }
     }
-    let results = match fetch_reports(&[UsageProvider::Codex, UsageProvider::Kimi]) {
+    let results = match fetch_reports(&[
+        UsageProvider::Claude,
+        UsageProvider::Codex,
+        UsageProvider::Kimi,
+    ]) {
         Ok(results) => results,
         Err(error) => {
             tracing::warn!(%error, "Could not start saved-account usage lookups");
@@ -481,6 +489,9 @@ async fn fetch(
     client: &reqwest::Client,
 ) -> Result<Option<Report>, String> {
     let accounts = match provider {
+        UsageProvider::Claude => {
+            Accounts::open(provider.id(), &crate::providers::claude::auth::CLI)
+        }
         UsageProvider::Codex => Accounts::open(provider.id(), &crate::providers::codex::CODEX_CLI),
         UsageProvider::Kimi => Accounts::open(provider.id(), &crate::providers::kimi::KIMI_CLI),
         UsageProvider::OpenCode => return opencode().await,
@@ -530,6 +541,7 @@ async fn fetch_account(
     client: &reqwest::Client,
 ) -> Result<PlanUsage, Failure> {
     let usage = match provider {
+        UsageProvider::Claude => claude(client, id).await?,
         UsageProvider::Codex => codex(client, id).await?,
         UsageProvider::Kimi => kimi(client, id).await?,
         UsageProvider::OpenCode => return Err(Failure::Unreadable),
@@ -538,6 +550,27 @@ async fn fetch_account(
         return Err(Failure::Unreadable);
     }
     Ok(usage)
+}
+
+async fn claude(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure> {
+    use crate::providers::claude::auth::{AuthManager, StoredAuth, USAGE_BETA, USAGE_URL};
+    let store = Accounts::new("claude")
+        .for_request::<StoredAuth>(Some(id))
+        .map_err(|_| Failure::SignInUnusable)?;
+    let auth = AuthManager::new(store)
+        .get_auth()
+        .await
+        .map_err(|_| Failure::SignInUnusable)?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", auth.access))
+            .map_err(|_| Failure::Setup("the saved token is not a valid header".into()))?,
+    );
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert("anthropic-beta", HeaderValue::from_static(USAGE_BETA));
+    let body = get_json(client, USAGE_URL, headers).await?;
+    Ok(parse_claude(&body, auth.plan))
 }
 
 async fn codex(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure> {
@@ -620,6 +653,22 @@ async fn get_json(
 // These endpoints are undocumented, so a window that can't be read is left
 // out rather than failing the whole reply.
 // ---------------------------------------------------------------------------
+
+/// Claude's OAuth usage reports utilization as a percentage, not a fraction.
+fn parse_claude(body: &Value, plan: Option<String>) -> PlanUsage {
+    let window = |name| {
+        let window = body.get(name)?;
+        Some(Window {
+            used_percent: number(window.get("utilization")?)?.clamp(0.0, 100.0),
+            resets_at_ms: window.get("resets_at").and_then(reset_ms),
+        })
+    };
+    PlanUsage {
+        plan,
+        five_hour: window("five_hour"),
+        weekly: window("seven_day"),
+    }
+}
 
 /// ChatGPT's `wham/usage`: `plan_type`, and `rate_limit.primary_window`
 /// (5 hours) and `secondary_window` (weekly), each with a `used_percent`.
@@ -861,6 +910,37 @@ mod tests {
             used_percent,
             resets_at_ms,
         })
+    }
+
+    #[test]
+    fn claude_usage_keeps_reported_windows_and_real_reset_times() {
+        let usage = parse_claude(
+            &serde_json::json!({
+                "five_hour": {"utilization": 20, "resets_at": "2026-10-25T12:00:00Z"},
+                "seven_day": {"utilization": 100, "resets_at": "2026-10-28T12:00:00Z"}
+            }),
+            Some("max".into()),
+        );
+        assert_eq!(usage.five_hour, window(20.0, ms("2026-10-25T12:00:00Z")));
+        assert_eq!(usage.weekly, window(100.0, ms("2026-10-28T12:00:00Z")));
+        assert_eq!(
+            usage.exhausted_until_ms(0),
+            u64::try_from(ms("2026-10-28T12:00:00Z").unwrap()).ok()
+        );
+        let partial = parse_claude(
+            &serde_json::json!({"five_hour": {"utilization": 0}, "seven_day": null}),
+            None,
+        );
+        assert_eq!(partial.five_hour, window(0.0, None));
+        assert!(partial.weekly.is_none());
+        assert!(
+            parse_claude(
+                &serde_json::json!({"five_hour": {"utilization": "not a number"}}),
+                None
+            )
+            .five_hour
+            .is_none()
+        );
     }
 
     #[test]

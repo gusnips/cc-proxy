@@ -336,10 +336,11 @@ pub(crate) fn exhausted_response(until_ms: u64, message: &str) -> Response {
 
 pub(crate) async fn execute(
     provider: &dyn Provider,
-    body: MessagesRequest,
+    mut body: MessagesRequest,
     context: RequestContext,
     identity: Option<ConversationIdentity>,
 ) -> Response {
+    crate::anthropic::request::prepare_for_provider(&mut body, provider.name());
     let Some(support) = provider.cli().accounts() else {
         return provider
             .handle_messages_with_conversation_identity(body, context, identity)

@@ -6,6 +6,20 @@ const CLIENT_IDENTITIES: &[&str] = &[
     "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
 ];
 
+/// Server-side advisor tools require the native subscription endpoint.
+pub(crate) fn prepare_for_provider(body: &mut super::MessagesRequest, provider: &str) {
+    if provider != "claude"
+        && let Some(Value::Array(tools)) = body.extra.get_mut("tools")
+    {
+        tools.retain(|tool| {
+            !tool
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("advisor"))
+        });
+    }
+}
+
 /// API keys must not carry the native client's OAuth account or billing identity.
 pub fn prepare_api_key_request(body: &mut Value) {
     if let Some(body) = body.as_object_mut() {
@@ -55,6 +69,22 @@ fn without_client_lines(text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn advisor_tools_follow_each_provider_attempt_not_the_original_route() {
+        let body: super::super::MessagesRequest = serde_json::from_value(json!({
+            "tools": [{"type":"advisor_20260301","name":"advisor"}, {"name":"Read","input_schema":{"type":"object"}}]
+        })).unwrap();
+        let mut native = body.clone();
+        prepare_for_provider(&mut native, "claude");
+        assert_eq!(native.extra["tools"].as_array().unwrap().len(), 2);
+        for provider in ["anthropic", "codex", "antigravity"] {
+            let mut attempt = body.clone();
+            prepare_for_provider(&mut attempt, provider);
+            assert_eq!(attempt.extra["tools"].as_array().unwrap().len(), 1);
+            assert_eq!(attempt.extra["tools"][0]["name"], "Read");
+        }
+    }
 
     #[test]
     fn api_key_requests_keep_instructions_and_cache_markers_not_cli_identity() {
