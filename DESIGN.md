@@ -20,7 +20,7 @@ Remaining allowance uses the same colors for percentages and bars: bright green 
 
 ## Components
 
-- `ui::print_card`, `ui::print_note`, `ui::print_error`, `ui::waiting`, `ui::meter`, `ui::duration`, `ui::provider_name`.
+- `ui::print_card`, `ui::print_note`, `ui::print_error`, `ui::print_tip`, `ui::waiting`, `ui::meter`, `ui::duration`, `ui::provider_name`.
 - `prompt::choose`, `prompt::search`, `prompt::confirm`, `prompt::read_hidden_line`, `RawModeGuard`.
 - Monitor: `TerminalGuard`, `setup_terminal`, `suspend_terminal` and `resume_terminal` in `src/tui.rs`. Sign-in and model selection reuse the CLI prompts, then return to the same monitor row. Settings reuse the same terminal handoff.
 - Accounts is the monitor's first tab: one provider/account list and a detail area. Disable proxy routing stays first and Claude subscription stays second, with its saved accounts below it. Other providers follow by active route, fallbacks in request order, other connected providers alphabetically, then providers not set up. Auto-rotate is a separate setting after the provider list. Enter opens actions in the detail area, not a modal. Wide terminals place them side by side; narrow terminals stack them. Account rows show each reported quota window and a countdown when depleted, using the same numbers and colors as Details. Refresh keeps the last values visible and marks pending or failed refreshes separately. Long names shorten in the list so usage stays visible; Details keeps the full name. Failed usage is unavailable, never zero. The background worker loads usage, never a request.
@@ -44,6 +44,7 @@ Only the waiting face moves. Lists and screens don't animate.
 
 ## Rules
 
+- A command's own next step stays in its card. A tip is something else: one random line from `src/tips.rs`, dim, under the card, in line with its text. It is never about the command that just ran, never in piped output, and every command it names must exist (a test parses them).
 - The selected row is `❯` in bold teal. Hints are dim, on one footer line that changes with the mode.
 - Every error says what failed, why, and what to run.
 - A value that an environment variable overrides says so next to the value.

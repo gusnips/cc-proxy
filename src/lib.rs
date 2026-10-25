@@ -27,6 +27,7 @@ pub mod server;
 pub mod session;
 pub mod start_flow;
 pub mod tiers;
+pub mod tips;
 pub mod traffic;
 pub mod tui;
 pub mod ui;

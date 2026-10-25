@@ -287,6 +287,35 @@ pub fn print_card(mood: Mood, lines: &[String]) {
     );
 }
 
+/// A dim tip under a card, in line with the card's text. Only a terminal gets
+/// one: piped output stays exactly what the command printed.
+pub fn print_tip(text: &str) {
+    if styled(&io::stdout()) {
+        println!("\n{}", tip(text, true, terminal_width()));
+    }
+}
+
+pub fn tip(text: &str, styled: bool, width: usize) -> String {
+    const LABEL: &str = "Tip: ";
+    if !styled {
+        return format!("{LABEL}{text}");
+    }
+    let indent = " ".repeat(FACE_WIDTH + GAP.len());
+    let text_width = width.saturating_sub(indent.len() + LABEL.len()).max(24);
+    wrap(text, text_width)
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let lead = match index {
+                0 => paint(LABEL, DIM),
+                _ => " ".repeat(LABEL.len()),
+            };
+            format!("{indent}{lead}{}", with_code(part, DIM))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn print_note(mood: Mood, lines: &[String]) {
     println!(
         "{}",
@@ -445,6 +474,26 @@ mod tests {
         assert_eq!(provider_name("claude"), "Claude subscription");
         assert_eq!(provider_name("anthropic"), "Anthropic");
         assert_eq!(provider_color("claude"), provider_color("anthropic"));
+    }
+
+    #[test]
+    fn a_tip_hangs_under_the_card_text_and_keeps_its_command_in_teal() {
+        let text = "`cc-proxy monitor` shows your accounts, how much quota each one has left and the requests running now.";
+        assert_eq!(tip(text, false, 80), format!("Tip: {text}"));
+        let styled = tip(text, true, 60);
+        let plain = strip_ansi(&styled);
+        let lines: Vec<_> = plain.lines().collect();
+        assert!(lines.len() > 1, "{plain}");
+        assert!(
+            lines[0].starts_with("         Tip: cc-proxy monitor shows"),
+            "{plain}"
+        );
+        assert!(lines[1].starts_with("              "), "{plain}");
+        assert!(
+            lines.iter().all(|line| line.chars().count() <= 60),
+            "{plain}"
+        );
+        assert!(!plain.contains('`'), "{plain}");
     }
 
     #[test]

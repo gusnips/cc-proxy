@@ -7,7 +7,7 @@ use cc_proxy::{
     route,
     server::{self, ServerConfig},
     start_flow::{self, Pick},
-    tiers,
+    tiers, tips,
     tui::{self, MonitorExit, MonitorUiConfig},
     ui::{self, Mood},
 };
@@ -695,6 +695,7 @@ fn start_daemon(target: Option<&str>, port: Option<u16>) -> Result<()> {
     lines.extend(hook_note);
     lines.push("`cc-proxy monitor` shows traffic. `cc-proxy stop` switches routing off.".into());
     ui::print_card(Mood::Awake, &lines);
+    tips::print("start");
     Ok(())
 }
 
@@ -731,6 +732,7 @@ fn use_target(targets: &[String]) -> Result<()> {
     lines.extend(route_lines(pick));
     lines.extend(proxy_port.and_then(route::version_note));
     ui::print_card(Mood::Awake, &lines);
+    tips::print("use");
     Ok(())
 }
 
@@ -853,6 +855,7 @@ fn stop_daemon() -> Result<()> {
     }
     lines.push(start_hint().into());
     ui::print_card(mood, &lines);
+    tips::print("stop");
     Ok(())
 }
 
@@ -867,6 +870,7 @@ fn daemon_status() -> Result<()> {
             lines.extend(route::status_lines());
             lines.extend(route::version_note(info.port));
             ui::print_card(Mood::Awake, &lines);
+            tips::print("status");
             Ok(())
         }
         daemon::DaemonStatus::Unmanaged { port } => {
@@ -908,6 +912,7 @@ fn restart_daemon(port: Option<u16>) -> Result<()> {
         lines.push("Claude Code's settings were refreshed.".into());
     }
     ui::print_card(Mood::Awake, &lines);
+    tips::print("restart");
     Ok(())
 }
 
@@ -1295,6 +1300,17 @@ mod tests {
             Cli::try_parse_from(["cc-proxy", "service", "start", "--monitor", "--no-monitor"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn every_command_a_tip_names_exists() {
+        for (_, text) in tips::TIPS {
+            let commands = text.split('`').skip(1).step_by(2);
+            for command in commands.filter(|span| span.starts_with("cc-proxy ")) {
+                let args: Vec<_> = command.split_whitespace().collect();
+                assert!(Cli::try_parse_from(&args).is_ok(), "{text}");
+            }
+        }
     }
 
     #[test]
