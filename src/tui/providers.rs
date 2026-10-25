@@ -133,7 +133,6 @@ impl ProviderRow {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Entry {
-    Rotate,
     Direct,
     Provider(String),
     Account(String, String),
@@ -163,7 +162,7 @@ impl ProvidersPanel {
             auto_rotate: false,
             loaded_at: None,
             pending: None,
-            selected: Entry::Rotate,
+            selected: Entry::Direct,
             list: ListState::default(),
             menu: None,
             menu_state: ListState::default(),
@@ -196,22 +195,13 @@ impl ProvidersPanel {
                                 row.retain_usage(previous);
                             }
                         }
-                        if self.rows.is_empty() {
-                            self.selected = rows
-                                .iter()
-                                .find(|row| self.route.target() == Some(row.id.as_str()))
-                                .map(|row| {
-                                    row.accounts
-                                        .iter()
-                                        .find(|account| account.current)
-                                        .map(|account| {
-                                            Entry::Account(row.id.clone(), account.id.clone())
-                                        })
-                                        .unwrap_or_else(|| Entry::Provider(row.id.clone()))
-                                })
-                                .unwrap_or(Entry::Rotate);
-                        }
+                        let first_load = self.rows.is_empty();
                         self.rows = rows;
+                        if first_load {
+                            self.selected = self
+                                .primary_entry()
+                                .unwrap_or_else(|| self.entries()[0].clone());
+                        }
                     }
                     Err(mpsc::TryRecvError::Empty) => return,
                     Err(mpsc::TryRecvError::Disconnected) => break,
@@ -220,7 +210,10 @@ impl ProvidersPanel {
             self.pending = None;
             self.loaded_at = Some(Instant::now());
             if !self.entries().contains(&self.selected) {
-                self.selected = Entry::Rotate;
+                self.selected = self
+                    .selected_provider()
+                    .map(|row| Entry::Provider(row.id.clone()))
+                    .unwrap_or_else(|| self.entries()[0].clone());
                 self.menu = None;
             }
         }
@@ -239,20 +232,35 @@ impl ProvidersPanel {
         self.refresh();
     }
 
+    /// The account requests use now on the primary provider, or the provider itself.
+    fn primary_entry(&self) -> Option<Entry> {
+        let row = self
+            .rows
+            .iter()
+            .find(|row| self.route.target() == Some(row.id.as_str()))?;
+        Some(
+            row.accounts
+                .iter()
+                .find(|account| account.current)
+                .map_or_else(
+                    || Entry::Provider(row.id.clone()),
+                    |account| Entry::Account(row.id.clone(), account.id.clone()),
+                ),
+        )
+    }
+
     fn entries(&self) -> Vec<Entry> {
-        let mut entries = vec![Entry::Direct];
+        let mut entries = Vec::new();
         let mut rows: Vec<_> = self.rows.iter().collect();
         rows.sort_by_cached_key(|row| {
-            let role = if row.id == "claude" {
+            let role = if self.route.target() == Some(row.id.as_str()) {
                 (0, 0)
-            } else if self.route.target() == Some(row.id.as_str()) {
-                (1, 0)
             } else if let Some(at) = self.route.fallback.iter().position(|id| id == &row.id) {
-                (2, at)
+                (1, at)
             } else if row.state != AuthState::Missing {
-                (3, 0)
+                (2, 0)
             } else {
-                (4, 0)
+                (3, 0)
             };
             (role, ui::provider_name(&row.id).to_lowercase(), &row.id)
         });
@@ -264,7 +272,7 @@ impl ProvidersPanel {
                     .map(|account| Entry::Account(row.id.clone(), account.id.clone())),
             );
         }
-        entries.push(Entry::Rotate);
+        entries.push(Entry::Direct);
         entries
     }
 
@@ -307,7 +315,7 @@ impl ProvidersPanel {
             KeyCode::PageUp | KeyCode::Char('u') | KeyCode::Char('[') => {
                 self.detail_scroll = self.detail_scroll.saturating_sub(3)
             }
-            KeyCode::Home if self.menu.is_none() => self.selected = Entry::Direct,
+            KeyCode::Home if self.menu.is_none() => self.selected = self.entries()[0].clone(),
             KeyCode::End if self.menu.is_none() => {
                 self.selected = self.entries().last().unwrap().clone()
             }
@@ -353,23 +361,11 @@ impl ProvidersPanel {
     }
 
     fn actions(&self) -> Vec<(String, Action)> {
-        match &self.selected {
-            Entry::Rotate => {
-                return vec![(
-                    format!(
-                        "Turn {} auto-rotate",
-                        if self.auto_rotate { "off" } else { "on" }
-                    ),
-                    Action::Rotate(!self.auto_rotate),
-                )];
-            }
-            Entry::Direct => {
-                return vec![(
-                    "Disable proxy routing".into(),
-                    Action::UseProvider("direct".into()),
-                )];
-            }
-            _ => {}
+        if self.selected == Entry::Direct {
+            return vec![(
+                "Disable proxy routing".into(),
+                Action::UseProvider("direct".into()),
+            )];
         }
         let Some(row) = self.selected_provider() else {
             return Vec::new();
@@ -426,6 +422,15 @@ impl ProvidersPanel {
                 add: account.is_none() && row.supports_accounts && !row.accounts.is_empty(),
             },
         ));
+        if let Some(account) = account {
+            actions.push((
+                "Remove saved account...".into(),
+                Action::RemoveAccount {
+                    provider: row.id.clone(),
+                    id: account.id.clone(),
+                },
+            ));
+        }
         actions
     }
 
@@ -481,7 +486,19 @@ impl ProvidersPanel {
                     }
                 }
             }
-            Action::Rotate(on) => self.auto_rotate = *on,
+            Action::RemoveAccount { provider, id } => {
+                if let Some(row) = self.rows.iter_mut().find(|row| &row.id == provider) {
+                    let was_current = row
+                        .accounts
+                        .iter()
+                        .any(|account| &account.id == id && account.current);
+                    row.accounts.retain(|account| &account.id != id);
+                    if was_current && let Some(first) = row.accounts.first_mut() {
+                        first.current = true;
+                    }
+                }
+                self.selected = Entry::Provider(provider.clone());
+            }
             Action::Fallback(ids) => self.route.fallback = ids.clone(),
             Action::SignIn { .. } => {
                 self.notice = Some((
@@ -499,10 +516,6 @@ impl ProvidersPanel {
     fn entry_item(&self, entry: &Entry, width: u16) -> ListItem<'static> {
         let name_color = if entry == &self.selected { TEAL } else { WHITE };
         let text = match entry {
-            Entry::Rotate => format!(
-                "Auto-rotate  {}",
-                if self.auto_rotate { "on" } else { "off" }
-            ),
             Entry::Direct => format!(
                 "Disable proxy routing{}",
                 if self.route.target().is_none() {
@@ -545,7 +558,7 @@ impl ProvidersPanel {
                 };
                 let summary = account.usage_summary(now);
                 let stale = if account.usage_error.is_some() {
-                    " [stale]"
+                    " [refresh failed]"
                 } else {
                     ""
                 };
@@ -602,13 +615,6 @@ impl ProvidersPanel {
     fn detail_lines(&self) -> Vec<Line<'static>> {
         let mut text = Vec::new();
         match &self.selected {
-            Entry::Rotate => {
-                text.push("Auto-rotate switches saved accounts after a provider confirms a limit and a reset time.".into());
-                text.push("If every account is spent, it tries your fallback providers in order. It does not switch after output starts.".into());
-                text.push(
-                    "Off by default. Changes apply to new requests without a restart.".into(),
-                );
-            }
             Entry::Direct => {
                 text.push(
                     "Restore Claude Code's original settings and login, without the proxy.".into(),
@@ -684,8 +690,15 @@ impl ProvidersPanel {
                         .selected_account()
                         .map_or(&row.usage_error, |account| &account.usage_error);
                     if let Some(error) = usage_error {
+                        let retry = if error.contains("Press r") {
+                            ""
+                        } else {
+                            " Press r to retry."
+                        };
                         text.push(Line::styled(
-                            format!("Refresh failed. Last values may be out of date. {error}"),
+                            format!(
+                                "Refresh failed. Last values may be out of date. {error}{retry}"
+                            ),
                             Style::default().fg(YELLOW),
                         ));
                     }
@@ -1185,7 +1198,7 @@ mod tests {
         for expected in ["5h 17%", "5h 17% left", "resets in 5m"] {
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
-        for old in ["58%", "88%", "[stale]", "refreshing"] {
+        for old in ["58%", "88%", "[refresh failed]", "refreshing"] {
             assert!(!text.contains(old), "{text}");
         }
     }
@@ -1207,7 +1220,7 @@ mod tests {
         for expected in [
             "58%",
             "88%",
-            "[stale]",
+            "[refresh failed]",
             "resets in 2h",
             "Refresh failed",
             "Press r to retry",
@@ -1223,7 +1236,7 @@ mod tests {
         panel.refresh();
         assert_eq!(panel.rows[0].accounts[1].usage, previous);
         let text = render(&mut panel, 160, 30);
-        for expected in ["refreshing", "[stale]", "58%", "Press r to retry"] {
+        for expected in ["refreshing", "[refresh failed]", "58%", "Press r to retry"] {
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
     }
@@ -1249,7 +1262,7 @@ mod tests {
         for expected in ["unavailable", "Press r to retry"] {
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
-        for absent in ["checking...", "Checking usage...", "[stale]", "%"] {
+        for absent in ["checking...", "Checking usage...", "[refresh failed]", "%"] {
             assert!(!text.contains(absent), "{text}");
         }
         assert!(panel.rows[0].accounts[1].usage_error.is_none());
@@ -1301,7 +1314,7 @@ mod tests {
                 .iter()
                 .all(|account| account.usage.is_none())
         );
-        assert_eq!(panel.selected, Entry::Rotate);
+        assert_eq!(panel.selected, Entry::Provider("codex".into()));
     }
 
     #[test]
@@ -1418,12 +1431,43 @@ mod tests {
     }
 
     #[test]
+    fn removal_is_scoped_to_a_saved_login_and_demo_hands_over_the_current_account() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        assert!(
+            !panel
+                .actions()
+                .iter()
+                .any(|(_, action)| matches!(action, Action::RemoveAccount { .. }))
+        );
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        panel.press(KeyCode::Enter);
+        let (at, action) = panel
+            .menu
+            .as_ref()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .find_map(|(at, (_, action))| {
+                matches!(action, Action::RemoveAccount { .. }).then_some((at, action.clone()))
+            })
+            .unwrap();
+        assert!(action.needs_terminal());
+        panel.menu_state.select(Some(at));
+        assert_eq!(panel.press(KeyCode::Enter), Some(action.clone()));
+        panel.preview_action(&action);
+        assert_eq!(panel.rows[0].accounts.len(), 1);
+        assert!(panel.rows[0].accounts[0].current);
+        assert_eq!(panel.selected, Entry::Provider("codex".into()));
+        assert!(render(&mut panel, 110, 25).contains("Nothing on this computer changed"));
+    }
+
+    #[test]
     fn navigation_keeps_selection_visible_and_actions_are_scoped() {
         let mut panel = ProvidersPanel::new(Mode::Demo);
         for _ in 0..12 {
             panel.press(KeyCode::Down);
         }
-        assert_eq!(panel.selected, Entry::Rotate);
+        assert_eq!(panel.selected, Entry::Direct);
         panel.press(KeyCode::Up);
         assert_eq!(panel.selected, Entry::Provider("opencode-zen".into()));
         assert!(render(&mut panel, 40, 14).contains("OpenCode Zen"));
@@ -1740,14 +1784,14 @@ mod tests {
         assert_eq!(
             providers(&panel),
             [
-                "direct",
                 "codex",
                 "kimi",
                 "anthropic",
                 "gemini",
                 "cursor",
                 "grok",
-                "opencode-zen"
+                "opencode-zen",
+                "direct"
             ]
         );
         panel.route.provider = Some("gemini".into());
@@ -1755,34 +1799,56 @@ mod tests {
         assert_eq!(
             providers(&panel),
             [
-                "direct",
                 "gemini",
                 "kimi",
                 "codex",
                 "anthropic",
                 "cursor",
                 "grok",
-                "opencode-zen"
+                "opencode-zen",
+                "direct"
             ]
         );
         panel.route.on = false;
-        assert_eq!(providers(&panel)[0], "direct");
+        assert_eq!(providers(&panel).last().unwrap(), "direct");
     }
 
     #[test]
-    fn claude_subscription_is_pinned_after_direct_and_keeps_its_own_accounts() {
+    fn claude_subscription_follows_the_route_and_keeps_its_own_accounts() {
         let mut panel = ProvidersPanel::new(Mode::Demo);
         let mut claude = panel.rows[0].clone();
         claude.id = "claude".into();
         panel.rows.push(claude);
+        let providers = |panel: &ProvidersPanel| {
+            panel
+                .entries()
+                .into_iter()
+                .filter_map(|entry| {
+                    if let Entry::Provider(id) = entry {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            &panel.entries()[..2],
-            &[Entry::Direct, Entry::Provider("claude".into())]
+            providers(&panel),
+            ["codex", "kimi", "claude", "opencode-zen"]
+        );
+        panel.route.fallback = vec!["claude".into(), "kimi".into()];
+        assert_eq!(
+            providers(&panel),
+            ["codex", "claude", "kimi", "opencode-zen"]
         );
         panel.selected = Entry::Account("claude".into(), "demo-work".into());
         assert!(render(&mut panel, 160, 35).contains("5h 58% left"));
         panel.preview_action(&Action::UseProvider("claude".into()));
         assert_eq!(panel.route.target(), Some("claude"));
+        assert_eq!(
+            providers(&panel),
+            ["claude", "kimi", "codex", "opencode-zen"]
+        );
         panel.selected = Entry::Direct;
         assert_eq!(panel.actions()[0].1, Action::UseProvider("direct".into()));
         panel.preview_action(&Action::UseProvider("direct".into()));
@@ -1792,9 +1858,9 @@ mod tests {
         assert!(text.contains("Disable proxy routing [in use]"), "{text}");
         assert!(text.contains("original settings and login"), "{text}");
         panel.press(KeyCode::Home);
-        assert_eq!(panel.selected, Entry::Direct);
+        assert_eq!(panel.selected, Entry::Provider("kimi".into()));
         panel.press(KeyCode::End);
-        assert_eq!(panel.selected, Entry::Rotate);
+        assert_eq!(panel.selected, Entry::Direct);
     }
 
     #[test]

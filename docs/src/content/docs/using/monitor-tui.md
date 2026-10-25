@@ -1,6 +1,6 @@
 ---
 title: Monitor
-description: Choose providers and accounts, check usage and manage rotation. Inspect requests in the Activity tab.
+description: Choose providers and accounts, check usage and change settings. Inspect requests in the Activity tab.
 ---
 
 Open the monitor:
@@ -20,7 +20,9 @@ terminal.
 ## Accounts
 
 Accounts opens first. It shows where Claude Code goes, your fallback order and
-saved logins grouped by provider. `[primary]` marks the provider Claude Code uses.
+saved logins grouped by provider, in that order: the primary provider, then each
+fallback, then your other connected providers, then providers you have not set up.
+Claude subscription follows the same order. `[primary]` marks the provider Claude Code uses.
 `[current]` marks the saved account choice, not an active request. If that account
 has a confirmed wait, it shows `[current, waiting]`. With auto-rotate on, a new
 request skips accounts still waiting. When every account has a confirmed wait,
@@ -42,31 +44,47 @@ put details below the list.
 - Fallback adds a signed-in provider to the end of the fallback order, removes
   it or moves it earlier. When you choose a fallback provider as primary, it is
   removed from its own fallback list.
-- Auto-rotate turns automatic switching on or off. It is off by default.
-  A provider must confirm a limit and a reset time before the proxy switches.
-  If every saved account is spent, it tries the fallback providers in order.
-  Rotation applies to Messages requests before output starts, not every API.
-- Disable proxy routing is the first row. It sends Claude Code back to its
+- Remove saved account deletes one saved login from this computer. The monitor
+  asks first and names the account. If it was the current account, the first
+  one left takes over. To use it again, sign in again.
+- Disable proxy routing is the last row. It sends Claude Code back to its
   original settings and login. The proxy keeps running, so you can switch back
   here. It does not pick a saved account.
-- Claude subscription is the second row. It is a normal provider with its own
-  saved accounts, usage and rotation, and requests go through the proxy.
+- Claude subscription is a normal provider with its own saved accounts, usage and
+  rotation, and requests go through the proxy.
 
 Changes say what was saved and apply without a restart. A failed action stays
 open with its cause and a retry. If the proxy connection drops, changes pause
 until it reconnects.
 
+## Settings
+
+Press `3` for settings. It is the same list as `cc-proxy config`, with
+auto-rotate first. Use Up and Down to move, Left and Right to change a yes or
+no, and Enter to type a value. Changes save at once and apply to new requests,
+except the port and address, which need `cc-proxy restart`. Type to search the
+list. Escape clears the search first, then goes back to Accounts.
+
+Auto-rotate is off by default. A provider must confirm a limit and a reset time
+before the proxy switches. If every saved account is spent, it tries the
+fallback providers in order. Rotation applies to Messages requests before output
+starts, not every API.
+
 ### Usage and wait timers
 
 Select a saved account to see its usage. Claude, Codex and Kimi show how much is left in
 each window and when it resets. Confirmed limits show how long the account must
-wait, including model-specific limits. Providers that do not report usage still
-show confirmed wait timers. Remaining percentages are bright green from 80%,
+wait, including model-specific limits. The wait shows beside the quota windows
+and never replaces them. Antigravity lists its Gemini and Claude windows
+separately, so one spent family does not mark the whole account as waiting.
+Providers that do not report usage still show confirmed wait timers. Remaining percentages are bright green from 80%,
 green above 30%, yellow above 10% and red at 10% or less. These colors also apply
 to the bars and numbers in `cc-proxy usage`.
 
 Usage loads in the background and refreshes while Accounts is open. Press `r` to
-refresh now. A failed lookup says usage is unavailable, not zero. Page Up and Page
+refresh now. A failed lookup says usage is unavailable, not zero. If a refresh
+fails after a good one, the row keeps the last numbers and shows
+`[refresh failed]`. Details gives the reason. Page Up and Page
 Down scroll long details.
 
 If an environment variable supplies the login, the details name it and explain
@@ -92,20 +110,22 @@ returns. Columns adapt to the terminal width.
 
 ## Keys
 
-| Key                          | Action                                                       |
-| ---------------------------- | ------------------------------------------------------------ |
-| `1`, `p`                     | Open Accounts                                                |
-| `2`                          | Open Activity                                                |
-| `Tab`, `Shift-Tab`, `←`, `→` | Change tab                                                   |
-| `↑`, `↓`, `j`, `k`           | Move through rows or actions                                 |
-| `Home`, `End`                | First or last Accounts row                                   |
-| `Enter`                      | Open actions, run the chosen action or open activity details |
-| `Esc`                        | Go back, then close an attached monitor                      |
-| `Page Up`, `Page Down`       | Scroll account details                                       |
-| `r`                          | Refresh accounts and usage                                   |
-| `?`                          | Show shortcuts                                               |
-| `b`                          | Show connection and setup                                    |
-| `q`, `Ctrl-C`                | Close an attached monitor without stopping the proxy         |
+| Key                    | Action                                                       |
+| ---------------------- | ------------------------------------------------------------ |
+| `1`, `p`               | Open Accounts                                                |
+| `2`                    | Open Activity                                                |
+| `3`                    | Open Settings                                                |
+| `Tab`, `Shift-Tab`     | Change tab                                                   |
+| `←`, `→`               | Change tab, or change a choice in Settings                   |
+| `↑`, `↓`, `j`, `k`     | Move through rows or actions                                 |
+| `Home`, `End`          | First or last Accounts row                                   |
+| `Enter`                | Open actions, run the chosen action or open activity details |
+| `Esc`                  | Go back, then close an attached monitor                      |
+| `Page Up`, `Page Down` | Scroll account details                                       |
+| `r`                    | Refresh accounts and usage                                   |
+| `?`                    | Show shortcuts                                               |
+| `b`                    | Show connection and setup                                    |
+| `q`, `Ctrl-C`          | Close an attached monitor without stopping the proxy         |
 
 ## A different port or computer
 

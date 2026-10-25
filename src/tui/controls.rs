@@ -3,8 +3,10 @@
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    accounts::Accounts, auth_cli, config, config_keys, daemon, registry::Registry, route,
-    start_flow, ui,
+    accounts::{Account, Accounts},
+    auth_cli, config, daemon,
+    registry::Registry,
+    route, start_flow, ui,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,7 +18,10 @@ pub(super) enum Action {
         provider: String,
         id: String,
     },
-    Rotate(bool),
+    RemoveAccount {
+        provider: String,
+        id: String,
+    },
     Fallback(Vec<String>),
     SignIn {
         provider: String,
@@ -29,7 +34,10 @@ impl Action {
     pub fn needs_terminal(&self) -> bool {
         matches!(
             self,
-            Self::StartProxy | Self::UseProvider(_) | Self::SignIn { .. }
+            Self::StartProxy
+                | Self::UseProvider(_)
+                | Self::SignIn { .. }
+                | Self::RemoveAccount { .. }
         )
     }
 
@@ -89,13 +97,7 @@ impl Action {
                     );
                 }
                 let accounts = Accounts::open(provider, support)?;
-                let account = accounts
-                    .list()?
-                    .into_iter()
-                    .find(|account| &account.id == id)
-                    .context(
-                        "This saved login was removed or replaced. Press Esc, then r to refresh.",
-                    )?;
+                let account = saved_account(&accounts, id)?;
                 accounts.set_current(&account.name)?;
                 let _ = crate::rotation::Cooldowns::new().clear_account(provider, &account.id);
                 Ok(format!(
@@ -104,11 +106,34 @@ impl Action {
                     account.name
                 ))
             }
-            Self::Rotate(on) => {
-                config_keys::write_value("auth.autoRotate", (*on).into())?;
+            Self::RemoveAccount { provider, id } => {
+                let registry = Registry::new();
+                let handler = registry
+                    .provider(provider)
+                    .context("This provider was removed. Press r to refresh.")?;
+                let support = handler
+                    .cli()
+                    .accounts()
+                    .context("This provider does not support saved accounts.")?;
+                let accounts = Accounts::open(provider, support)?;
+                let account = saved_account(&accounts, id)?;
+                let question = format!(
+                    "Remove {} account `{}` from this computer? Its saved login will be deleted. You'll need to sign in again to add it back.",
+                    ui::provider_name(provider),
+                    account.name
+                );
+                if !crate::prompt::confirm(&question, false)? {
+                    return Ok("Nothing changed. The account is still saved.".into());
+                }
+                let next = accounts.remove(&account)?;
+                let _ = crate::rotation::Cooldowns::new().clear_account(provider, id);
+                let next = next.map_or_else(String::new, |next| {
+                    format!(" New requests use {}.", next.name)
+                });
                 Ok(format!(
-                    "Saved. Auto-rotate is {} for new requests.",
-                    if *on { "on" } else { "off" }
+                    "Removed {} account {}.{next} Sign in to add it back.",
+                    ui::provider_name(provider),
+                    account.name
                 ))
             }
             Self::Fallback(providers) => {
@@ -132,9 +157,9 @@ impl Action {
                 let cli = handler.cli();
                 if let Some(support) = cli.accounts() {
                     let account = match account {
-                        Some(id) => Some(Accounts::open(provider, support)?.list()?.into_iter()
-                            .find(|account| &account.id == id)
-                            .context("This saved login was removed or replaced. Press Esc, then r to refresh.")?.name),
+                        Some(id) => {
+                            Some(saved_account(&Accounts::open(provider, support)?, id)?.name)
+                        }
                         None => None,
                     };
                     let accounts = auth_cli::AccountCli::open(provider, support)?;
@@ -157,4 +182,12 @@ impl Action {
             }
         }
     }
+}
+
+fn saved_account(accounts: &Accounts, id: &str) -> Result<Account> {
+    accounts
+        .list()?
+        .into_iter()
+        .find(|account| account.id == id)
+        .context("This saved login was removed or replaced. Press Esc, then r to refresh.")
 }

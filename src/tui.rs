@@ -34,7 +34,7 @@ use ratatui::{
 use tokio::sync::oneshot;
 
 use crate::{
-    config, daemon,
+    config, config_keys, daemon,
     monitor::{
         MockMonitor, MonitorHandle, SESSION_TOKEN_BUCKET_SECS, Throughput,
         snapshot::{
@@ -161,6 +161,9 @@ fn run_monitor_loop(
         },
         accounts_mode: config.accounts_mode,
         providers: ProvidersPanel::new(config.accounts_mode),
+        settings: (config.accounts_mode != providers::Mode::Remote).then(|| {
+            config_keys::SettingsPanel::new(config.accounts_mode == providers::Mode::Demo)
+        }),
         detail: None,
         focus: FocusPane::Sessions,
         selected: 0,
@@ -228,6 +231,18 @@ fn run_monitor_events(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                    _ if app.phase == MonitorPhase::Running
+                        && !app.show_help
+                        && !app.show_setup
+                        && app.page == Page::Settings
+                        && !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && app
+                            .settings
+                            .as_ref()
+                            .is_some_and(|settings| settings.captures_input()) =>
+                    {
+                        run_settings_key(terminal, app, key)?;
+                    }
                     KeyCode::Char('q') if app.is_attached() => return Ok(MonitorExit::Detached),
                     KeyCode::Char('c')
                         if app.is_attached() && key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -269,10 +284,18 @@ fn run_monitor_events(
                         app.page = Page::Accounts;
                         run_account_action(terminal, app, state, controls::Action::StartProxy)?;
                     }
-                    KeyCode::Char('1') | KeyCode::Char('p') => app.page = Page::Accounts,
-                    KeyCode::Char('2') => app.page = Page::Activity,
-                    KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
-                        app.page = app.page.next();
+                    KeyCode::Char('1') | KeyCode::Char('p') => app.open_page(Page::Accounts),
+                    KeyCode::Char('2') => app.open_page(Page::Activity),
+                    KeyCode::Char('3') => app.open_page(Page::Settings),
+                    KeyCode::Tab => app.open_page(app.page.next()),
+                    KeyCode::BackTab => app.open_page(app.page.previous()),
+                    KeyCode::Left | KeyCode::Right if app.page == Page::Settings => {
+                        run_settings_key(terminal, app, key)?;
+                    }
+                    KeyCode::Left => app.open_page(app.page.previous()),
+                    KeyCode::Right => app.open_page(app.page.next()),
+                    _ if app.page == Page::Settings => {
+                        run_settings_key(terminal, app, key)?;
                     }
                     _ if app.page == Page::Accounts => {
                         if let Some(action) = app.providers.press(key.code) {
@@ -317,13 +340,23 @@ enum FocusPane {
 enum Page {
     Accounts,
     Activity,
+    Settings,
 }
 
 impl Page {
     fn next(self) -> Self {
         match self {
             Self::Accounts => Self::Activity,
+            Self::Activity => Self::Settings,
+            Self::Settings => Self::Accounts,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Accounts => Self::Settings,
             Self::Activity => Self::Accounts,
+            Self::Settings => Self::Activity,
         }
     }
 }
@@ -349,6 +382,7 @@ struct MonitorApp {
     page: Page,
     accounts_mode: providers::Mode,
     providers: ProvidersPanel,
+    settings: Option<config_keys::SettingsPanel>,
     detail: Option<DetailView>,
     focus: FocusPane,
     selected: usize,
@@ -363,6 +397,16 @@ struct MonitorApp {
 }
 
 impl MonitorApp {
+    fn open_page(&mut self, page: Page) {
+        if page == Page::Settings
+            && self.page != page
+            && let Some(settings) = &mut self.settings
+        {
+            settings.reload();
+        }
+        self.page = page;
+    }
+
     fn is_attached(&self) -> bool {
         self.shutdown.is_none() && self.shutdown_complete.is_none()
     }
@@ -373,6 +417,8 @@ impl MonitorApp {
             self.show_setup = false;
         } else if self.page == Page::Accounts && self.providers.close_menu() {
             // Back from an action goes to the same account.
+        } else if self.page == Page::Settings {
+            self.page = Page::Accounts;
         } else if self.page != Page::Activity || self.detail.take().is_none() {
             if self.is_attached() {
                 return Some(MonitorExit::Detached);
@@ -515,6 +561,27 @@ pub(crate) fn resume_terminal(
     Ok(())
 }
 
+fn run_settings_key(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut MonitorApp,
+    key: event::KeyEvent,
+) -> anyhow::Result<()> {
+    let Some(settings) = &mut app.settings else {
+        return Ok(());
+    };
+    match settings.press(key) {
+        config_keys::SettingsOutcome::Stay => {}
+        config_keys::SettingsOutcome::Quit => app.open_page(Page::Accounts),
+        config_keys::SettingsOutcome::OpenFile(at) => {
+            suspend_terminal()?;
+            let result = settings.open_file(at);
+            resume_terminal(terminal)?;
+            settings.edited(result);
+        }
+    }
+    Ok(())
+}
+
 fn run_account_action(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut MonitorApp,
@@ -581,10 +648,22 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
     .areas(area);
     render_header(frame, header, app, state);
     render_tabs(frame, tabs, app.page);
-    if app.page == Page::Accounts {
-        app.providers.render(frame, body);
-    } else {
-        render_activity(frame, body, app, state);
+    match app.page {
+        Page::Accounts => app.providers.render(frame, body),
+        Page::Activity => render_activity(frame, body, app, state),
+        Page::Settings => {
+            if let Some(settings) = &mut app.settings {
+                settings.render(frame, body);
+            } else {
+                frame.render_widget(
+                    Paragraph::new("Settings belong to the computer running the proxy. This --url connection is read-only.\n\nOpen cc-proxy monitor on that computer to change settings. Press 2 for activity.")
+                        .style(Style::default().fg(DIM_WHITE))
+                        .wrap(Wrap { trim: false })
+                        .block(panel("Remote proxy", false)),
+                    body,
+                );
+            }
+        }
     }
     render_footer(frame, footer, app);
 
@@ -605,6 +684,7 @@ fn render_tabs(frame: &mut ratatui::Frame<'_>, area: Rect, page: Page) {
     let tabs = [
         (Page::Accounts, " 1 Accounts "),
         (Page::Activity, " 2 Activity "),
+        (Page::Settings, " 3 Settings "),
     ];
     frame.render_widget(
         Paragraph::new(Line::from(
@@ -674,7 +754,7 @@ fn render_header(
     state: &MonitorSnapshot,
 ) {
     let (face, mood) = header_face(app, state);
-    if app.page == Page::Accounts {
+    if app.page != Page::Activity {
         let status = if app.phase == MonitorPhase::ShuttingDown {
             "Shutting down"
         } else if app.proxy_off {
@@ -1919,17 +1999,34 @@ fn detail_line<'a>(label: &'static str, value: impl Into<String>, value_color: C
 }
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
-    let hint = if app.page == Page::Accounts && app.providers.menu_open() {
-        " Esc back · ↑/↓ choose · Enter run · q close"
+    let settings_hint = app
+        .settings
+        .as_ref()
+        .filter(|_| app.page == Page::Settings)
+        .map(|settings| {
+            let keys = settings.hints(area.width);
+            // While a field or a search is open, `q` and `?` are typed text.
+            if settings.captures_input() || area.width < 90 {
+                keys.to_string()
+            } else {
+                format!("{keys} · Tab tabs · ? help · q close")
+            }
+        });
+    let hint = if let Some(hint) = settings_hint {
+        hint
+    } else if app.page == Page::Accounts && app.providers.menu_open() {
+        " Esc back · ↑/↓ choose · Enter run · q close".to_string()
     } else if area.width < 80 {
-        " q close · ↑↓ move · Enter · u/d · ?"
+        " q close · ↑↓ move · Enter · u/d · ?".to_string()
     } else if app.page == Page::Accounts {
         " ←/→ or Tab tabs · ↑/↓ move · Enter actions · u/d details · r refresh · ? help · q close"
+            .to_string()
     } else {
         " ←/→ or Tab tabs · ↑/↓ move between panes · j/k move in pane · Enter details · Esc back · ? help · q close"
+            .to_string()
     };
     let hint = if app.is_attached() {
-        hint.to_string()
+        hint
     } else {
         hint.replace("q close", "q stop proxy")
     };
@@ -2019,7 +2116,7 @@ fn render_shutdown_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, tick: usi
 
 fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: bool) {
     let width = 64.min(area.width);
-    let height = 16.min(area.height);
+    let height = 18.min(area.height);
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -2054,9 +2151,10 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ),
         ("?", "toggle help"),
         ("b", "toggle setup"),
-        ("1 / p", "providers, accounts and rotation"),
+        ("1 / p", "providers and saved accounts"),
         ("2", "sessions, requests and errors"),
-        ("← / → / Tab", "switch tab"),
+        ("3", "settings, including auto-rotate"),
+        ("Tab / Shift-Tab", "next / previous tab"),
         ("↑ / ↓", "move between rows and activity panes"),
         ("j / k", "move down / up within a pane"),
         ("Enter", "choose an action or open details"),
@@ -2871,6 +2969,7 @@ mod tests {
             page: Page::Activity,
             accounts_mode: providers::Mode::Demo,
             providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
@@ -2891,6 +2990,55 @@ mod tests {
         assert!(text.contains("streaming"), "{text}");
         assert!(text.contains("gpt-5.6-terra"), "{text}");
         assert!(text.contains("upstream connection closed"), "{text}");
+    }
+
+    #[test]
+    fn settings_is_its_own_tab_and_remote_monitors_cannot_change_settings() {
+        let state: MonitorSnapshot = mock_state().into();
+        let mut app = MonitorApp {
+            listen_url: "mock://tui-demo".to_string(),
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            page: Page::Accounts,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
+            detail: None,
+            focus: FocusPane::Sessions,
+            selected: 0,
+            recent_selected: 0,
+            connected: true,
+            proxy_off: false,
+            tick: 0,
+            phase: MonitorPhase::Running,
+            shutdown: None,
+            shutdown_complete: None,
+        };
+        assert_eq!(app.page.next().next().next(), Page::Accounts);
+        assert_eq!(Page::Accounts.previous(), Page::Settings);
+
+        let accounts = buffer_text(&draw(120, 30, |frame| render(frame, &mut app, &state)));
+        assert!(accounts.contains("3 Settings"), "{accounts}");
+        assert!(!accounts.contains("Auto-rotate"), "{accounts}");
+
+        app.open_page(Page::Settings);
+        let settings = buffer_text(&draw(120, 30, |frame| render(frame, &mut app, &state)));
+        assert!(settings.contains("auth.autoRotate"), "{settings}");
+        // One footer line: the panel's own keys plus the monitor's.
+        assert_eq!(settings.matches("Esc back").count(), 1, "{settings}");
+        assert!(settings.contains("/ search"), "{settings}");
+        assert!(!settings.contains("Esc close"), "{settings}");
+
+        // Escape goes back to Accounts instead of asking to stop the proxy.
+        assert_eq!(app.handle_escape(), None);
+        assert_eq!(app.page, Page::Accounts);
+        assert_eq!(app.phase, MonitorPhase::Running);
+
+        app.settings = None;
+        app.open_page(Page::Settings);
+        let remote = buffer_text(&draw(80, 20, |frame| render(frame, &mut app, &state)));
+        assert!(remote.contains("read-only"), "{remote}");
     }
 
     #[test]
@@ -3068,6 +3216,7 @@ mod tests {
             page: Page::Activity,
             accounts_mode: providers::Mode::Demo,
             providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
             detail: Some(DetailView::Request),
             focus: FocusPane::Sessions,
             selected: 0,
@@ -3102,6 +3251,7 @@ mod tests {
             page: Page::Activity,
             accounts_mode: providers::Mode::Demo,
             providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
@@ -3151,6 +3301,7 @@ mod tests {
             page: Page::Accounts,
             accounts_mode: providers::Mode::Demo,
             providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
@@ -3192,6 +3343,7 @@ mod tests {
             page: Page::Activity,
             accounts_mode: providers::Mode::Demo,
             providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
@@ -3227,6 +3379,7 @@ mod tests {
             page: Page::Activity,
             accounts_mode: providers::Mode::Demo,
             providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
@@ -3260,6 +3413,7 @@ mod tests {
             page: Page::Activity,
             accounts_mode: providers::Mode::Demo,
             providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 0,
@@ -3290,6 +3444,7 @@ mod tests {
             page: Page::Activity,
             accounts_mode: providers::Mode::Demo,
             providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 10,
@@ -3321,6 +3476,7 @@ mod tests {
             page: Page::Activity,
             accounts_mode: providers::Mode::Demo,
             providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 1,
@@ -3352,6 +3508,7 @@ mod tests {
             page: Page::Activity,
             accounts_mode: providers::Mode::Demo,
             providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
             detail: None,
             focus: FocusPane::Sessions,
             selected: 1,

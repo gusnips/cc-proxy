@@ -3662,7 +3662,9 @@ mod tests {
             second.auth_manager().store.auth_path(),
             accounts.file(&second_id).to_string_lossy()
         );
-        accounts.remove("first").unwrap();
+        accounts
+            .remove(&accounts.require("first").unwrap())
+            .unwrap();
         ctx.account = Some(first_id);
         assert!(clients.get_for_accounts(&mut ctx, &accounts).is_err());
         assert!(first.auth_manager().store.load_auth().unwrap().is_none());

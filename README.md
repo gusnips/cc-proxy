@@ -187,7 +187,7 @@ and continues with the text and tool history. See [rotation limits](docs/src/con
 Run `cc-proxy usage claude`, `cc-proxy usage codex`, `cc-proxy usage kimi` or `cc-proxy usage antigravity` to see how much is left on
 each saved account and when each window resets. The monitor's Accounts tab
 shows the same usage and wait timers. Select a row and press Enter to switch
-accounts, add a login, change the fallback order or turn auto-rotate on or off.
+accounts, add or remove a login or change the fallback order. Auto-rotate and the other settings are on the Settings tab.
 Request rows in Activity keep the name of the account they actually used.
 
 Run `cc-proxy config` for keyboard settings: Up and Down move, Left and Right
