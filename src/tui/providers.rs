@@ -50,27 +50,34 @@ impl AccountRow {
     }
 
     fn usage_summary(&self, now: u64) -> Line<'static> {
-        if let Some(until) = self.waiting_until(now) {
-            let depleted = matches!(&self.usage, Some(MonitorUsage::Reported(windows)) if windows.iter().any(|window| window.remaining_percent == 0.0));
-            return Line::from(vec![
-                Span::styled(
-                    if depleted { "0%" } else { "waiting" },
-                    Style::default().fg(if depleted {
-                        ui::remaining_color(0.0)
-                    } else {
-                        YELLOW
-                    }),
-                ),
+        let mut summary = self.usage.as_ref().map_or_else(
+            || "checking...".into(),
+            |usage| usage.compact_line(jiff::Timestamp::now()),
+        );
+        let reset_is_shown = match &self.usage {
+            Some(MonitorUsage::Reported(windows)) => windows.iter().any(|window| {
+                window.remaining_percent == 0.0
+                    && window.resets_at_ms.is_some_and(|reset| reset > now as i64)
+            }),
+            _ => false,
+        };
+        if let Some(until) = self.waiting_until(now)
+            && !reset_is_shown
+        {
+            if self.usage.is_none() || matches!(self.usage, Some(MonitorUsage::Unavailable(_))) {
+                summary = Line::default();
+            } else {
+                summary.spans.push(Span::raw(" · "));
+            }
+            summary.spans.extend([
+                Span::styled("waiting", Style::default().fg(YELLOW)),
                 Span::raw(format!(
                     " · {} left",
                     ui::duration(Duration::from_millis(until - now))
                 )),
             ]);
         }
-        self.usage.as_ref().map_or_else(
-            || "checking...".into(),
-            |usage| usage.compact_line(jiff::Timestamp::now()),
-        )
+        summary
     }
 }
 
@@ -549,8 +556,7 @@ impl ProvidersPanel {
                     let name_width = usize::from(width).saturating_sub(2 + status.len());
                     let summaries = match &account.usage {
                         Some(MonitorUsage::Reported(windows))
-                            if summary.width() + 4 > usize::from(width)
-                                && account.waiting_until(now).is_none() =>
+                            if summary.width() + 4 > usize::from(width) =>
                         {
                             windows
                                 .iter()
@@ -986,7 +992,9 @@ fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String
                     _ => MonitorUsage::NotReported("This provider does not report usage. Confirmed wait timers still appear here."),
                 }
             });
-            if let MonitorUsage::Reported(windows) = &lines {
+            if let MonitorUsage::Reported(windows) = &lines
+                && row.id != "antigravity"
+            {
                 let exhausted_until = windows
                     .iter()
                     .filter(|window| window.remaining_percent <= 0.0)
@@ -1548,8 +1556,8 @@ mod tests {
                 let row = (0..160)
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>();
-                row.find("0% · ")
-                    .map(|x| (row[..x].chars().count() as u16, y))
+                row.find("5h 0% ")
+                    .map(|x| (row[..x].chars().count() as u16 + 3, y))
             })
             .unwrap();
         assert_eq!(buffer[(x, y)].fg, ui::remaining_color(0.0));
@@ -1564,7 +1572,7 @@ mod tests {
         panel.selected = Entry::Provider("codex".into());
         let text = render(&mut panel, 160, 30);
         for expected in [
-            "0% · ",
+            "0% ",
             "[first reset]",
             "[current]",
             "All accounts are waiting. home resets in",
@@ -1634,7 +1642,7 @@ mod tests {
         account.waits = vec![(None, now + 60_000)];
         assert_eq!(
             account.usage_summary(now).to_string(),
-            "waiting · 1m00s left"
+            "5h 58% · week 88% · waiting · 1m00s left"
         );
         account.usage = None;
         assert_eq!(
@@ -1643,6 +1651,65 @@ mod tests {
         );
         account.waits = vec![(Some("one-model".into()), now + 60_000)];
         assert_eq!(account.usage_summary(now).to_string(), "checking...");
+    }
+
+    #[test]
+    fn antigravity_keeps_each_family_visible_across_refreshes() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.rows.truncate(1);
+        panel.rows[0].id = "antigravity".into();
+        panel.rows[0].accounts.truncate(1);
+        panel.selected = Entry::Account("antigravity".into(), "demo-home".into());
+        let now = crate::rotation::now_ms();
+        let windows: Vec<_> = [
+            ("Gemini 5h", 100.0),
+            ("Gemini week", 95.0),
+            ("Claude 5h", 100.0),
+            ("Claude week", 0.0),
+        ]
+        .into_iter()
+        .map(|(label, remaining_percent)| UsageWindow {
+            label,
+            remaining_percent,
+            resets_at_ms: Some(now as i64 + 345_600_000),
+        })
+        .collect();
+        let usage = HashMap::from([(
+            ("antigravity".into(), "demo-home".into()),
+            MonitorUsage::Reported(windows),
+        )]);
+        panel.rows[0].accounts[0].waits = vec![(Some("claude-model".into()), now + 60_000)];
+        apply_account_usage(&mut panel.rows, &usage);
+        assert!(panel.rows[0].accounts[0].waiting_until(now).is_none());
+        let previous = panel.rows[0].clone();
+        let mut refreshing = metadata(panel.rows.clone());
+        refreshing[0].retain_usage(&previous);
+        panel.rows = refreshing;
+        for (width, height) in [(180, 36), (80, 36), (40, 36)] {
+            let text = render(&mut panel, width, height);
+            for expected in [
+                "Gemini 5h 100%",
+                "Gemini week 95%",
+                "Claude 5h 100%",
+                "Claude week 0%",
+            ] {
+                assert!(text.contains(expected), "missing {expected}: {text}");
+            }
+            assert!(!text.contains("All accounts are waiting"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_global_wait_keeps_all_reported_windows_in_the_list() {
+        let mut account = demo_rows().remove(0).accounts.remove(1);
+        let now = crate::rotation::now_ms();
+        account.waits = vec![(None, now + 60_000)];
+        if let Some(MonitorUsage::Reported(windows)) = &mut account.usage {
+            windows[0].remaining_percent = 0.0;
+        }
+        let summary = account.usage_summary(now).to_string();
+        assert!(summary.contains("5h 0%"), "{summary}");
+        assert!(summary.contains("week 88%"), "{summary}");
     }
 
     #[test]
