@@ -3,14 +3,19 @@ title: Monitor
 description: Choose providers and accounts, check usage and manage rotation. Inspect requests in the Activity tab.
 ---
 
-Open the monitor for a running proxy:
+Open the monitor:
 
 ```sh
 cc-proxy monitor
 ```
 
-If the proxy is stopped, run `cc-proxy start` first. Closing this monitor leaves
-the proxy running. You can open it in more than one terminal.
+If the proxy is stopped, the monitor still opens. It says "Proxy off" and shows
+your saved accounts. Press `s` to start the proxy. It uses the provider you
+chose last, or asks if you never chose one. The monitor connects by itself once
+the proxy answers. Until then, changes to accounts and routing wait.
+
+Closing this monitor leaves the proxy running. You can open it in more than one
+terminal.
 
 ## Accounts
 
