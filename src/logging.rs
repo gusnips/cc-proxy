@@ -123,6 +123,12 @@ pub fn create_logger(service: &str) -> Logger {
 }
 
 fn write_log_line(line: &str) -> io::Result<()> {
+    // Unit tests drive code that logs. Left alone they would write their fake
+    // requests into the real proxy.log of whoever runs them, so they log
+    // nowhere unless a test points the state folder at its own.
+    if cfg!(test) && std::env::var_os("XDG_STATE_HOME").is_none() {
+        return Ok(());
+    }
     let file = log_file();
     if let Some(dir) = file.parent() {
         create_dir(dir, 0o700)?;
