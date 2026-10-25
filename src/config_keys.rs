@@ -75,7 +75,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         kind: ConfigKind::Bool,
         env: &["CCP_HOURLY_PING"],
         default: Some("false"),
-        blurb: "ping signed-in providers at the start of every hour to start 5h windows early",
+        blurb: "every hour, ping each saved account of the routed providers with a 5h window, to start it early",
     },
     ConfigKey {
         path: "port",

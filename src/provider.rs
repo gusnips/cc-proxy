@@ -168,7 +168,23 @@ impl ProviderError {
         }
     }
 
+    /// A spent balance that names no reset is a payment problem, not a
+    /// throttle. Claude Code words a 429 as "Request rejected" or "temporarily
+    /// limiting requests", which sends people to wait for something that will
+    /// not come back. A 402 `billing_error` is Anthropic's own shape for it: the
+    /// text "credit balance is too low" gets Claude Code's own message, and any
+    /// other text shows as it is. Rotation reads the hint, not the status.
+    fn is_spent_balance(&self) -> bool {
+        matches!(
+            self.rotation_hint,
+            Some(crate::rotation::RotationHint::Spent)
+        ) && self.retry_after.is_none()
+    }
+
     pub fn error_type(&self) -> &'static str {
+        if self.is_spent_balance() {
+            return "billing_error";
+        }
         match self.kind {
             ProviderErrorKind::Authentication => "authentication_error",
             ProviderErrorKind::Permission => "permission_error",
@@ -181,8 +197,13 @@ impl ProviderError {
 
     /// The Anthropic error response, with the retry headers the client reads.
     pub fn response(self) -> Response {
+        let status = if self.is_spent_balance() {
+            StatusCode::PAYMENT_REQUIRED
+        } else {
+            self.status
+        };
         let mut response =
-            crate::anthropic::error::json_error(self.status, self.error_type(), self.message);
+            crate::anthropic::error::json_error(status, self.error_type(), self.message);
         // A provider that confirmed a reset is spent until then, not
         // throttled. Say so with the headers Claude Code reads, so it names
         // the limit, counts down, and resumes the turn by itself.

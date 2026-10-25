@@ -250,7 +250,12 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 fn retry_deadline(response: &Response, now: u64) -> Option<Sitout> {
-    if response.status() != StatusCode::TOO_MANY_REQUESTS {
+    let hint = response.extensions().get::<RotationHint>().copied();
+    // A spent balance reaches the client as a 402, every other limit as a 429.
+    let status = response.status();
+    let spent_balance =
+        matches!(hint, Some(RotationHint::Spent)) && status == StatusCode::PAYMENT_REQUIRED;
+    if status != StatusCode::TOO_MANY_REQUESTS && !spent_balance {
         return None;
     }
     let wait = |until_ms, per_model| Sitout {
@@ -258,7 +263,6 @@ fn retry_deadline(response: &Response, now: u64) -> Option<Sitout> {
         per_model,
         spent: false,
     };
-    let hint = response.extensions().get::<RotationHint>().copied();
     match hint {
         Some(RotationHint::Stay) => return None,
         Some(RotationHint::RetryAt {
@@ -426,11 +430,12 @@ pub(crate) fn exhausted_response(until_ms: u64, message: &str) -> Response {
     response
 }
 
-/// A 429 for accounts with no credit left. It names no reset, so Claude Code
-/// gets no countdown to resume on: it stops and shows the message. The routed
-/// chain still reads `ExhaustedAt` to try the next provider.
+/// A 402 for accounts with no credit left. It names no reset, so Claude Code
+/// gets no countdown to resume on: it stops and shows the message, not the
+/// "temporarily limiting requests" wording a 429 gets. The routed chain still
+/// reads `ExhaustedAt` to try the next provider.
 fn spent_response(until_ms: u64, message: &str) -> Response {
-    let mut response = json_error(StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", message);
+    let mut response = json_error(StatusCode::PAYMENT_REQUIRED, "billing_error", message);
     response
         .headers_mut()
         .insert("x-should-retry", http::HeaderValue::from_static("false"));
@@ -588,33 +593,83 @@ fn ms_until_next_hour(now_ms: u64) -> u64 {
     HOUR_MS - (now_ms % HOUR_MS)
 }
 
+/// Providers whose plans run a rolling window (5 hours, then a week) that
+/// starts with the first request. Only these gain from an early start.
+/// A pay-as-you-go key (Anthropic, Gemini, OpenCode Zen, a custom provider)
+/// would be charged for every ping, and a monthly plan (Cursor, Copilot) has no
+/// window to start. A provider missing here is never pinged, which costs
+/// nothing; one wrongly added would cost money.
+const WINDOWED_PLANS: &[&str] = &["antigravity", "claude", "codex", "glm", "kimi", "opencode"];
+
+/// The providers one hourly ping reaches: the routed provider and its
+/// fallbacks, in that order, when their plan has a window.
+fn pinged_providers(route: &crate::config::Route) -> Vec<&str> {
+    // Routing off means Claude Code bypasses the proxy: there is no pool.
+    let Some(primary) = route.target() else {
+        return Vec::new();
+    };
+    let mut pool: Vec<&str> = Vec::new();
+    for name in std::iter::once(primary).chain(route.fallback().iter().map(String::as_str)) {
+        if WINDOWED_PLANS.contains(&name) && !pool.contains(&name) {
+            pool.push(name);
+        }
+    }
+    pool
+}
+
 /// Sends a one-token Messages request at the start of every hour (`XX:00`) to
-/// every signed-in provider account that is not currently waiting on a limit,
-/// so rolling 5-hour quota windows start counting down early while `cc-proxy`
-/// is running. Controlled by `auth.hourlyPing` (read on each tick).
+/// every saved account, not only the current one, of each routed provider
+/// whose plan has a rolling window (see `WINDOWED_PLANS`), skipping accounts
+/// that are waiting on a limit. The windows start counting down early while
+/// `cc-proxy` is running. Controlled by `auth.hourlyPing` (read on each tick).
 pub(crate) fn spawn_hourly_ping(registry: Arc<Registry>) {
     tokio::spawn(async move {
         loop {
             let wait_ms = ms_until_next_hour(now_ms());
             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
             if crate::config::auth_hourly_ping() {
-                ping_signed_in_providers(&registry, &Cooldowns::new()).await;
+                ping_routed_providers(&registry, &crate::config::route(), &Cooldowns::new()).await;
             }
         }
     });
 }
 
-async fn ping_signed_in_providers(registry: &Registry, cooldowns: &Cooldowns) {
-    let route = crate::config::route();
+/// Every saved account that is not waiting on a limit, not only the current
+/// one: a window only starts on the account that is asked.
+fn ping_targets(
+    list: &[Account],
+    cooldowns: &[Cooldown],
+    provider: &str,
+    model: &str,
+    now: u64,
+) -> Vec<Option<String>> {
+    list.iter()
+        .filter(|account| {
+            !cooldowns.iter().any(|c| {
+                c.provider == provider
+                    && c.account == account.id
+                    && c.model.as_deref().is_none_or(|m| m == model)
+                    && c.until_ms > now
+            })
+        })
+        .map(|account| Some(account.id.clone()))
+        .collect()
+}
+
+async fn ping_routed_providers(
+    registry: &Registry,
+    route: &crate::config::Route,
+    cooldowns: &Cooldowns,
+) {
     let log = crate::logging::create_logger("auth");
-    for name in registry.list_provider_names() {
+    for name in pinged_providers(route).into_iter().map(str::to_string) {
         let Some(provider) = registry.provider(&name) else {
             continue;
         };
         if provider.cli().auth_state() == crate::provider::AuthState::Missing {
             continue;
         }
-        let Some(model) = ping_model_for(registry, &route, &name) else {
+        let Some(model) = ping_model_for(registry, route, &name) else {
             continue;
         };
         let targets: Vec<Option<String>> = match provider
@@ -626,18 +681,7 @@ async fn ping_signed_in_providers(registry: &Registry, cooldowns: &Cooldowns) {
         {
             Some(list) if !list.is_empty() => {
                 let snapshot = cooldowns.read().unwrap_or_default();
-                let now = now_ms();
-                list.into_iter()
-                    .filter(|account| {
-                        !snapshot.iter().any(|c| {
-                            c.provider == name
-                                && c.account == account.id
-                                && c.model.as_deref().is_none_or(|m| m == model)
-                                && c.until_ms > now
-                        })
-                    })
-                    .map(|account| Some(account.id))
-                    .collect()
+                ping_targets(&list, &snapshot, &name, &model, now_ms())
             }
             _ => vec![None],
         };
@@ -1380,7 +1424,8 @@ mod tests {
     #[test]
     fn a_spent_balance_sits_out_for_a_recheck_and_a_named_reset_beats_it() {
         let mut response = spent_balance();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        // A spent balance reaches the client as a payment error, not a throttle.
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
         assert!(!response.headers().contains_key(http::header::RETRY_AFTER));
         assert_eq!(
             retry_deadline(&response, 10_000),
@@ -1402,8 +1447,12 @@ mod tests {
                 spent: false
             })
         );
-        // Only a 429 sits an account out.
+        // A success never sits an account out, whatever hint rides along.
+        *response.status_mut() = StatusCode::OK;
+        assert_eq!(retry_deadline(&response, 10_000), None);
+        // Neither does a 402 nobody marked as a spent balance.
         *response.status_mut() = StatusCode::PAYMENT_REQUIRED;
+        response.extensions_mut().remove::<RotationHint>();
         assert_eq!(retry_deadline(&response, 10_000), None);
     }
 
@@ -1440,7 +1489,7 @@ mod tests {
         let (_dir, accounts, cooldowns, list) = fixture();
         let broke = broke(list.iter().map(|a| a.id.clone()).collect());
         let response = call_broke(&broke, &accounts, &cooldowns).await;
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
         // No usage-limit headers: there is no reset for Claude Code to count down to.
         assert!(
             !response
@@ -1467,7 +1516,7 @@ mod tests {
 
         // The next request does not call a spent key again.
         let again = call_broke(&broke, &accounts, &cooldowns).await;
-        assert_eq!(again.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(again.status(), StatusCode::PAYMENT_REQUIRED);
         assert_eq!(broke.calls.lock().unwrap().len(), 2);
 
         // After a top-up, choosing the account clears its wait and it is tried at once.
@@ -1683,7 +1732,7 @@ mod tests {
         // Both out of credit: the answer has no countdown and says what to do.
         let response =
             routed_call_with(credit, recheck, recheck, &chain_route(&["antigravity"])).await;
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
         assert!(
             !response
                 .headers()
@@ -1767,6 +1816,164 @@ mod tests {
             spent_until: None,
             out_of_credit: false,
         }) as Arc<dyn Provider>]);
-        ping_signed_in_providers(&registry, &cooldowns).await;
+        ping_routed_providers(&registry, &crate::config::Route::default(), &cooldowns).await;
+    }
+
+    /// Answers 200 and counts the calls. It has a model, so a ping reaches it.
+    struct Counting {
+        name: &'static str,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl CliHandlers for Counting {
+        fn auth_state(&self) -> AuthState {
+            AuthState::SignedIn {
+                account: None,
+                expires_ms: None,
+            }
+        }
+        fn login(&self) -> Result<()> {
+            unreachable!()
+        }
+        fn device(&self) -> Result<()> {
+            unreachable!()
+        }
+        fn status(&self) -> Result<()> {
+            unreachable!()
+        }
+        fn logout(&self) -> Result<()> {
+            unreachable!()
+        }
+    }
+    #[async_trait]
+    impl Provider for Counting {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn supported_models(&self) -> Vec<String> {
+            vec![format!("{}-model", self.name)]
+        }
+        fn cli(&self) -> &dyn CliHandlers {
+            self
+        }
+        async fn handle_count_tokens(&self, _: MessagesRequest, _: RequestContext) -> Response {
+            unreachable!()
+        }
+        async fn handle_messages(&self, _: MessagesRequest, _: RequestContext) -> Response {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Response::new(axum::body::Body::from("pong"))
+        }
+    }
+
+    fn route_to(primary: &str, fallback: &[&str]) -> crate::config::Route {
+        crate::config::Route {
+            on: true,
+            provider: Some(primary.into()),
+            fallback: fallback.iter().map(|name| (*name).to_string()).collect(),
+            tiers: Default::default(),
+        }
+    }
+
+    #[test]
+    fn the_hourly_ping_reaches_only_routed_providers_with_a_window() {
+        // Primary first, then fallbacks in order. Pay-as-you-go keys and monthly
+        // plans are left out, and so is a provider named twice.
+        let route = route_to(
+            "codex",
+            &[
+                "antigravity",
+                "anthropic",
+                "cursor",
+                "claude",
+                "codex",
+                "gemini",
+            ],
+        );
+        assert_eq!(pinged_providers(&route), ["codex", "antigravity", "claude"]);
+        // A key that bills every token is never the target, even as the primary.
+        assert!(pinged_providers(&route_to("anthropic", &[])).is_empty());
+        // Routing off: Claude Code bypasses the proxy, so there is no pool.
+        let mut off = route_to("codex", &["kimi"]);
+        off.on = false;
+        assert!(pinged_providers(&off).is_empty());
+        // Flat plans that sign in with a key still count: their windows are the point.
+        assert_eq!(
+            pinged_providers(&route_to("opencode", &["glm"])),
+            ["opencode", "glm"]
+        );
+        for billed in ["anthropic", "gemini", "opencode-zen", "cursor", "copilot"] {
+            assert!(!WINDOWED_PLANS.contains(&billed), "{billed}");
+        }
+    }
+
+    #[test]
+    fn the_hourly_ping_asks_every_account_that_is_not_waiting_not_only_the_current_one() {
+        let (_dir, accounts, cooldowns, list) = fixture();
+        accounts.set_current("b").unwrap();
+        let now = now_ms();
+        let ids = |targets: Vec<Option<String>>| targets.into_iter().flatten().collect::<Vec<_>>();
+        let snapshot = cooldowns.read().unwrap();
+        assert_eq!(
+            ids(ping_targets(&list, &snapshot, "codex", "test", now)),
+            [list[0].id.clone(), list[1].id.clone()]
+        );
+        // An account that is waiting is skipped, and so is one out of credit.
+        cooldowns
+            .mark_with("codex", &list[0].id, None, now + 60_000, true)
+            .unwrap();
+        let snapshot = cooldowns.read().unwrap();
+        assert_eq!(
+            ids(ping_targets(&list, &snapshot, "codex", "test", now)),
+            [list[1].id.clone()]
+        );
+        // A wait on another model or another provider does not stop the ping.
+        cooldowns
+            .mark("codex", &list[1].id, Some("other-model"), now + 60_000)
+            .unwrap();
+        let snapshot = cooldowns.read().unwrap();
+        assert_eq!(
+            ids(ping_targets(&list, &snapshot, "codex", "test", now)),
+            [list[1].id.clone()]
+        );
+        assert_eq!(
+            ids(ping_targets(&list, &snapshot, "kimi", "test", now)).len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn the_hourly_ping_calls_each_pooled_provider_and_nothing_outside_it() {
+        let count = |name| {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Arc::new(Counting {
+                    name,
+                    calls: calls.clone(),
+                }) as Arc<dyn Provider>,
+                calls,
+            )
+        };
+        let (codex, codex_calls) = count("codex");
+        let (kimi, kimi_calls) = count("kimi");
+        let (anthropic, anthropic_calls) = count("anthropic");
+        let (antigravity, antigravity_calls) = count("antigravity");
+        let registry = Registry::from_providers([codex, kimi, anthropic, antigravity]);
+        let dir = tempfile::tempdir().unwrap();
+        let cooldowns = Cooldowns {
+            path: dir.path().join("rotation.json"),
+        };
+        // Kimi is signed in but not routed. Anthropic is routed but bills per token.
+        ping_routed_providers(
+            &registry,
+            &route_to("codex", &["anthropic", "antigravity"]),
+            &cooldowns,
+        )
+        .await;
+        let calls = |counter: &Arc<std::sync::atomic::AtomicUsize>| {
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        assert_eq!(calls(&codex_calls), 1);
+        assert_eq!(calls(&antigravity_calls), 1);
+        assert_eq!(calls(&kimi_calls), 0);
+        assert_eq!(calls(&anthropic_calls), 0);
     }
 }

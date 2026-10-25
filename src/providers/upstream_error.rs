@@ -552,14 +552,21 @@ mod tests {
             None,
             "Kimi",
         );
+        // Rotation sees a 429. The client sees what it is: a payment problem.
+        assert_eq!(failure.status, StatusCode::TOO_MANY_REQUESTS);
         let response = failure.response();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
         assert!(response.headers().get(http::header::RETRY_AFTER).is_none());
         assert_eq!(response.headers()["x-should-retry"], "false");
 
+        // A throttle, or a spent quota that names its own reset, stays a 429.
         let throttle = from_http(429, "", Some("12"), "GLM").response();
+        assert_eq!(throttle.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(throttle.headers()[http::header::RETRY_AFTER], "12");
         assert!(throttle.headers().get("x-should-retry").is_none());
+        let named = from_http(429, "insufficient balance", Some("3600"), "Kimi").response();
+        assert_eq!(named.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(named.headers()[http::header::RETRY_AFTER], "3600");
     }
 
     #[test]
