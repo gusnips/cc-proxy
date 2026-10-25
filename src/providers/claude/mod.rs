@@ -229,16 +229,17 @@ fn quota_reset(headers: &http::HeaderMap, now: u64) -> Option<u64> {
     let value = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
     let mut resets = Vec::new();
     for window in ["5h", "7d"] {
-        if value(&format!("anthropic-ratelimit-unified-{window}-status")) == Some("rejected") {
-            if let Some(reset) = value(&format!("anthropic-ratelimit-unified-{window}-reset")) {
-                resets.push(reset);
-            }
-        }
-    }
-    if resets.is_empty() && value("anthropic-ratelimit-unified-status") == Some("rejected") {
-        if let Some(reset) = value("anthropic-ratelimit-unified-reset") {
+        if value(&format!("anthropic-ratelimit-unified-{window}-status")) == Some("rejected")
+            && let Some(reset) = value(&format!("anthropic-ratelimit-unified-{window}-reset"))
+        {
             resets.push(reset);
         }
+    }
+    if resets.is_empty()
+        && value("anthropic-ratelimit-unified-status") == Some("rejected")
+        && let Some(reset) = value("anthropic-ratelimit-unified-reset")
+    {
+        resets.push(reset);
     }
     resets
         .into_iter()

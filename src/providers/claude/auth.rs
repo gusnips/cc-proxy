@@ -230,6 +230,13 @@ impl<S: AuthStorage<StoredAuth>> AuthManager<S> {
     }
 }
 
+pub(super) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,11 +290,4 @@ mod tests {
         assert!(manager.get_auth().await.is_err());
         server.abort();
     }
-}
-
-pub(super) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
