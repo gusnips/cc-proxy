@@ -161,7 +161,7 @@ cc-proxy logout codex --all
 | `copilot`     | Device code            | Same as `login` | Account, host, token expiry, storage | Delete proxy credential and model list |
 | `cursor`      | Browser polling flow   | Unsupported     | Source, claims, expiry               | Delete proxy credential                |
 | `glm`         | API key entry          | Unsupported     | Env and stored key presence          | Delete proxy credential                |
-| `opencode`    | API key entry (hidden) | Unsupported     | Key source and base URL              | Delete stored key                      |
+| `opencode`    | API key entry (masked) | Unsupported     | Key source and base URL              | Delete stored key                      |
 
 Examples:
 
@@ -336,8 +336,8 @@ In a terminal, `cc-proxy config` with no subcommand lists every setting:
 Every change saves as soon as you make it, exactly as `config set` would, so
 there is nothing to confirm and nothing to undo when you close the screen. The
 line under the list says what was saved, whether an environment variable still
-wins, and whether the running proxy needs `cc-proxy restart`. A key is hidden
-while you type it and never shown again.
+wins, and whether the running proxy needs `cc-proxy restart`. A key shows as `*` while
+you type it and is never shown again.
 
 The `providers` and `config.json` rows open the file in your editor, on the
 line of the `providers` key. When the editor closes, the screen reads the file

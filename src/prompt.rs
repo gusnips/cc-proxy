@@ -6,7 +6,7 @@ use std::io::{BufRead, IsTerminal, Write};
 
 use anyhow::{Context, Result, bail};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 
@@ -74,44 +74,81 @@ pub fn read_visible_line() -> std::io::Result<String> {
     Ok(read_line()?.unwrap_or_default())
 }
 
-/// Read a line without echoing it, so a pasted API key never shows on
-/// screen. Uses termios on unix (already a dependency via libc); elsewhere
-/// falls back to a visible read with a warning.
-#[cfg(unix)]
-pub fn read_hidden_line(prompt: &str) -> std::io::Result<String> {
-    use std::os::unix::io::AsRawFd;
-
-    let fd = std::io::stdin().as_raw_fd();
-    // SAFETY: tcgetattr/tcsetattr only touch the termios struct for our own
-    // stdin fd, and the original flags are restored before returning.
-    unsafe {
-        let mut original: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(fd, &mut original) != 0 {
-            print!("{prompt}");
-            // Not a TTY (piped stdin in tests and scripts): plain read.
-            return read_visible_line();
-        }
-        // Turn off any lingering terminal mouse reporting before prompting so
-        // clicking the window to paste does not inject `\x1b[<...M` into stdin.
-        print!("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l{prompt}");
-        std::io::stdout().flush()?;
-        let mut hidden = original;
-        hidden.c_lflag &= !libc::ECHO;
-        if libc::tcsetattr(fd, libc::TCSANOW, &hidden) != 0 {
-            return read_visible_line();
-        }
-        let line = read_visible_line();
-        libc::tcsetattr(fd, libc::TCSANOW, &original);
-        println!();
-        line
-    }
+/// What one key press did to a secret being typed.
+#[derive(Debug, PartialEq, Eq)]
+enum SecretKey {
+    Typing,
+    Done,
+    Cancelled,
 }
 
-#[cfg(not(unix))]
+fn apply_secret_key(secret: &mut String, key: KeyEvent) -> SecretKey {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Enter => return SecretKey::Done,
+        KeyCode::Esc => return SecretKey::Cancelled,
+        KeyCode::Char('c') if control => return SecretKey::Cancelled,
+        KeyCode::Char('u') if control => secret.clear(),
+        KeyCode::Backspace => {
+            secret.pop();
+        }
+        // Windows reports AltGr (`@`, `{`) as Ctrl and Alt together.
+        KeyCode::Char(ch) if control == alt => secret.push(ch),
+        _ => {}
+    }
+    SecretKey::Typing
+}
+
+/// The prompt line while a secret is typed: one `*` for each character. A long
+/// secret stops at the edge of the terminal, so the line never wraps and the
+/// next redraw always clears all of it.
+fn masked_line(prompt: &str, typed: usize, columns: u16) -> String {
+    let room = usize::from(columns).saturating_sub(prompt.chars().count() + 1);
+    format!("\r\x1b[K{prompt}{}", "*".repeat(typed.min(room)))
+}
+
+/// Read a secret such as an API key. Each character shows as `*`, so a paste
+/// is seen to land and the key itself never shows on screen.
 pub fn read_hidden_line(prompt: &str) -> std::io::Result<String> {
-    eprintln!("warning: hidden input is not supported on this platform; the key will echo.");
-    print!("{prompt}");
-    read_visible_line()
+    if !std::io::stdin().is_terminal() {
+        // Piped input (tests and scripts): nothing to hide or draw.
+        print!("{prompt}");
+        return read_visible_line();
+    }
+    // Turn off any lingering terminal mouse reporting before prompting so
+    // clicking the window to paste does not inject `\x1b[<...M` into stdin.
+    print!("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
+    let guard = RawModeGuard::enter_typing()?;
+    let mut secret = String::new();
+    let outcome = 'typing: loop {
+        let columns = crossterm::terminal::size().map_or(80, |(columns, _)| columns);
+        print!("{}", masked_line(prompt, secret.chars().count(), columns));
+        std::io::stdout().flush()?;
+        // A paste arrives as one burst of keys: draw once after the burst.
+        loop {
+            if let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                match apply_secret_key(&mut secret, key) {
+                    SecretKey::Typing => {}
+                    finished => break 'typing finished,
+                }
+            }
+            if !event::poll(std::time::Duration::ZERO)? {
+                break;
+            }
+        }
+    };
+    drop(guard);
+    println!();
+    match outcome {
+        SecretKey::Cancelled => Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "Cancelled. Nothing was saved.",
+        )),
+        _ => Ok(secret.trim().to_string()),
+    }
 }
 
 /// Print `options` and read the pick. In a terminal, uses ↑/↓ arrow keys and
@@ -199,22 +236,34 @@ pub fn search(question: &str, options: &[String]) -> Result<Option<usize>> {
     }
 }
 
-struct RawModeGuard;
+struct RawModeGuard {
+    hides_cursor: bool,
+}
 
 impl RawModeGuard {
     fn enter() -> std::io::Result<Self> {
         enable_raw_mode()?;
         print!("\x1b[?25l");
         std::io::stdout().flush()?;
-        Ok(Self)
+        Ok(Self { hides_cursor: true })
+    }
+
+    /// For typed text: the cursor stays visible.
+    fn enter_typing() -> std::io::Result<Self> {
+        enable_raw_mode()?;
+        Ok(Self {
+            hides_cursor: false,
+        })
     }
 }
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        print!("\x1b[?25h");
-        let _ = std::io::stdout().flush();
+        if self.hides_cursor {
+            print!("\x1b[?25h");
+            let _ = std::io::stdout().flush();
+        }
     }
 }
 
@@ -494,5 +543,86 @@ mod tests {
         assert_eq!(matching(&options, "OPUS claude"), [0]);
         assert_eq!(matching(&options, "free llama"), [3]);
         assert!(matching(&options, "gpt").is_empty());
+    }
+
+    fn type_keys(secret: &mut String, keys: &[(KeyCode, KeyModifiers)]) -> SecretKey {
+        let mut last = SecretKey::Typing;
+        for (code, modifiers) in keys {
+            last = apply_secret_key(secret, KeyEvent::new(*code, *modifiers));
+        }
+        last
+    }
+
+    #[test]
+    fn a_secret_collects_typed_characters_and_edits_with_backspace_and_ctrl_u() {
+        let none = KeyModifiers::NONE;
+        let mut secret = String::new();
+        let typed = "sk-ab12".chars().map(|ch| (KeyCode::Char(ch), none));
+        assert_eq!(
+            type_keys(&mut secret, &typed.collect::<Vec<_>>()),
+            SecretKey::Typing
+        );
+        assert_eq!(secret, "sk-ab12");
+        type_keys(&mut secret, &[(KeyCode::Backspace, none)]);
+        assert_eq!(secret, "sk-ab1");
+        // A shifted letter and an AltGr character both count as typing.
+        type_keys(
+            &mut secret,
+            &[
+                (KeyCode::Char('Z'), KeyModifiers::SHIFT),
+                (
+                    KeyCode::Char('@'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                ),
+            ],
+        );
+        assert_eq!(secret, "sk-ab1Z@");
+        // Other Ctrl and Alt combinations and arrow keys type nothing.
+        type_keys(
+            &mut secret,
+            &[
+                (KeyCode::Char('a'), KeyModifiers::CONTROL),
+                (KeyCode::Char('b'), KeyModifiers::ALT),
+                (KeyCode::Left, none),
+            ],
+        );
+        assert_eq!(secret, "sk-ab1Z@");
+        type_keys(&mut secret, &[(KeyCode::Char('u'), KeyModifiers::CONTROL)]);
+        assert!(secret.is_empty());
+        // Backspace on an empty secret is harmless.
+        type_keys(&mut secret, &[(KeyCode::Backspace, none)]);
+        assert!(secret.is_empty());
+    }
+
+    #[test]
+    fn enter_finishes_and_escape_or_ctrl_c_cancel_a_secret() {
+        let mut secret = String::from("sk-123");
+        let press = |secret: &mut String, code, modifiers| {
+            apply_secret_key(secret, KeyEvent::new(code, modifiers))
+        };
+        assert_eq!(
+            press(&mut secret, KeyCode::Enter, KeyModifiers::NONE),
+            SecretKey::Done
+        );
+        assert_eq!(
+            press(&mut secret, KeyCode::Esc, KeyModifiers::NONE),
+            SecretKey::Cancelled
+        );
+        assert_eq!(
+            press(&mut secret, KeyCode::Char('c'), KeyModifiers::CONTROL),
+            SecretKey::Cancelled
+        );
+        assert_eq!(secret, "sk-123");
+    }
+
+    #[test]
+    fn the_masked_line_shows_one_star_per_character_and_never_the_secret() {
+        assert_eq!(masked_line("API key: ", 0, 80), "\r\x1b[KAPI key: ");
+        assert_eq!(masked_line("API key: ", 5, 80), "\r\x1b[KAPI key: *****");
+        // A key longer than the terminal stops one column short of the edge.
+        let long = masked_line("API key: ", 200, 40);
+        assert_eq!(long.matches('*').count(), 40 - "API key: ".len() - 1);
+        // A terminal narrower than the prompt draws no stars and never underflows.
+        assert_eq!(masked_line("API key: ", 7, 5), "\r\x1b[KAPI key: ");
     }
 }
