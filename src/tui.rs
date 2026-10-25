@@ -166,6 +166,7 @@ fn run_monitor_loop(
         selected: 0,
         recent_selected: 0,
         connected: true,
+        proxy_off: false,
         tick: 0,
         phase: MonitorPhase::Running,
         shutdown: config.shutdown,
@@ -194,6 +195,10 @@ fn run_monitor_events(
         let update = snapshot();
         let state = update.snapshot();
         app.connected = update.connection_error().is_none();
+        // A refused local connection is cheap to check, so this runs each tick.
+        app.proxy_off = !app.connected
+            && app.accounts_mode == providers::Mode::Local
+            && matches!(daemon::describe(), daemon::DaemonStatus::Stopped);
         app.clamp_selection(state.sessions.len(), state.recent.len());
         app.tick = app.tick.wrapping_add(1);
         if app.page == Page::Accounts {
@@ -201,7 +206,8 @@ fn run_monitor_events(
         }
         terminal.draw(|frame| {
             render(frame, app, state);
-            if let Some(error) = update.connection_error() {
+            // The footer carries the start key while the proxy is off, so no banner covers it.
+            if let Some(error) = update.connection_error().filter(|_| !app.proxy_off) {
                 let area = frame.area();
                 let banner = Rect::new(
                     area.x,
@@ -257,6 +263,11 @@ fn run_monitor_events(
                         if let Some(action) = app.providers.press(key.code) {
                             run_account_action(terminal, app, state, action)?;
                         }
+                    }
+                    KeyCode::Char('s') if app.proxy_off => {
+                        // The result shows on Accounts, so a failure is never missed.
+                        app.page = Page::Accounts;
+                        run_account_action(terminal, app, state, controls::Action::StartProxy)?;
                     }
                     KeyCode::Char('1') | KeyCode::Char('p') => app.page = Page::Accounts,
                     KeyCode::Char('2') => app.page = Page::Activity,
@@ -343,6 +354,8 @@ struct MonitorApp {
     selected: usize,
     recent_selected: usize,
     connected: bool,
+    /// A local monitor whose proxy is not running: it offers to start it.
+    proxy_off: bool,
     tick: usize,
     phase: MonitorPhase,
     shutdown: Option<oneshot::Sender<()>>,
@@ -516,15 +529,26 @@ fn run_account_action(
         }
         providers::Mode::Local => {}
     }
-    if !app.connected {
-        app.providers.finish_action(Err(anyhow::anyhow!("The proxy connection is lost. Wait for it to reconnect before changing accounts or routing")));
+    let starting = action == controls::Action::StartProxy;
+    if !app.connected && !starting {
+        let reason = if app.proxy_off {
+            "The proxy is off. Press s to start it, then change accounts or routing"
+        } else {
+            "The proxy connection is lost. Wait for it to reconnect before changing accounts or routing"
+        };
+        app.providers.finish_action(Err(anyhow::anyhow!(reason)));
         return Ok(());
     }
     terminal.draw(|frame| {
         render(frame, app, state);
         let area = frame.area();
         frame.render_widget(
-            Paragraph::new(" Saving...").style(Style::default().fg(TEAL).bg(BG)),
+            Paragraph::new(if starting {
+                " Starting the proxy..."
+            } else {
+                " Saving..."
+            })
+            .style(Style::default().fg(TEAL).bg(BG)),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         );
     })?;
@@ -536,7 +560,11 @@ fn run_account_action(
         // Always restore the monitor, including a cancelled sign-in.
         resume_terminal(terminal)?;
     }
-    app.providers.finish_action(result);
+    if starting {
+        app.providers.finish_start(result);
+    } else {
+        app.providers.finish_action(result);
+    }
     Ok(())
 }
 
@@ -649,6 +677,8 @@ fn render_header(
     if app.page == Page::Accounts {
         let status = if app.phase == MonitorPhase::ShuttingDown {
             "Shutting down"
+        } else if app.proxy_off {
+            "Proxy off. Press s to start it"
         } else if !app.connected {
             "Disconnected: retrying"
         } else if app.accounts_mode == providers::Mode::Demo {
@@ -670,11 +700,15 @@ fn render_header(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!(
-                        "  {status}  {} active  up {}",
-                        state.active.len(),
-                        ui::duration(state.uptime)
-                    ),
+                    if app.proxy_off {
+                        format!("  {status}")
+                    } else {
+                        format!(
+                            "  {status}  {} active  up {}",
+                            state.active.len(),
+                            ui::duration(state.uptime)
+                        )
+                    },
                     Style::default().fg(WHITE),
                 ),
             ])),
@@ -760,7 +794,7 @@ fn header_face(app: &MonitorApp, state: &MonitorSnapshot) -> (&'static str, Mood
                 .duration_since(request.finished_at)
                 .is_ok_and(|age| age < RECENT_ERROR)
     });
-    if app.phase == MonitorPhase::ShuttingDown {
+    if app.phase == MonitorPhase::ShuttingDown || app.proxy_off {
         (Mood::Asleep.face(), Mood::Asleep)
     } else if !app.connected || recent_error {
         (Mood::Unsure.face(), Mood::Unsure)
@@ -1899,6 +1933,11 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
     } else {
         hint.replace("q close", "q stop proxy")
     };
+    let hint = if app.proxy_off {
+        format!(" s start proxy ·{hint}")
+    } else {
+        hint
+    };
     frame.render_widget(
         Paragraph::new(hint).style(Style::default().fg(TEAL).bg(BG)),
         area,
@@ -2023,6 +2062,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ("Enter", "choose an action or open details"),
         ("u / d", "scroll account details"),
         ("r", "refresh accounts and usage"),
+        ("s", "start the proxy when it is off"),
         (
             "Esc",
             if attached {
@@ -2836,6 +2876,7 @@ mod tests {
             selected: 0,
             recent_selected: 0,
             connected: true,
+            proxy_off: false,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3032,6 +3073,7 @@ mod tests {
             selected: 0,
             recent_selected: 0,
             connected: true,
+            proxy_off: false,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3065,6 +3107,7 @@ mod tests {
             selected: 0,
             recent_selected: 0,
             connected: true,
+            proxy_off: false,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: Some(shutdown_tx),
@@ -3099,6 +3142,45 @@ mod tests {
     }
 
     #[test]
+    fn an_off_proxy_says_so_and_offers_the_start_key_on_every_screen() {
+        let mut app = MonitorApp {
+            listen_url: "http://127.0.0.1:3000".to_string(),
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            page: Page::Accounts,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
+            detail: None,
+            focus: FocusPane::Sessions,
+            selected: 0,
+            recent_selected: 0,
+            connected: false,
+            proxy_off: true,
+            tick: 0,
+            phase: MonitorPhase::Running,
+            shutdown: None,
+            shutdown_complete: None,
+        };
+        let state = MonitorSnapshot::empty();
+        let text = buffer_text(&draw(100, 24, |frame| render(frame, &mut app, &state)));
+        assert!(text.contains("Proxy off. Press s to start it"), "{text}");
+        assert!(text.contains("s start proxy"), "{text}");
+        assert!(!text.contains("active  up"), "{text}");
+
+        app.page = Page::Activity;
+        let text = buffer_text(&draw(100, 24, |frame| render(frame, &mut app, &state)));
+        assert!(text.contains("s start proxy"), "{text}");
+
+        // A proxy that is on but unreachable offers no start key.
+        app.proxy_off = false;
+        app.page = Page::Accounts;
+        let text = buffer_text(&draw(100, 24, |frame| render(frame, &mut app, &state)));
+        assert!(!text.contains("s start proxy"), "{text}");
+        assert!(text.contains("Disconnected: retrying"), "{text}");
+    }
+
+    #[test]
     fn ctrl_c_starts_shutdown_then_requests_force_quit() {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let (_shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel();
@@ -3115,6 +3197,7 @@ mod tests {
             selected: 0,
             recent_selected: 0,
             connected: true,
+            proxy_off: false,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: Some(shutdown_tx),
@@ -3149,6 +3232,7 @@ mod tests {
             selected: 0,
             recent_selected: 0,
             connected: true,
+            proxy_off: false,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3181,6 +3265,7 @@ mod tests {
             selected: 0,
             recent_selected: 0,
             connected: true,
+            proxy_off: false,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3210,6 +3295,7 @@ mod tests {
             selected: 10,
             recent_selected: 10,
             connected: true,
+            proxy_off: false,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3240,6 +3326,7 @@ mod tests {
             selected: 1,
             recent_selected: 0,
             connected: true,
+            proxy_off: false,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3270,6 +3357,7 @@ mod tests {
             selected: 1,
             recent_selected: 0,
             connected: true,
+            proxy_off: false,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,

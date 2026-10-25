@@ -3,11 +3,14 @@
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    accounts::Accounts, auth_cli, config, config_keys, registry::Registry, route, start_flow, ui,
+    accounts::Accounts, auth_cli, config, config_keys, daemon, registry::Registry, route,
+    start_flow, ui,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Action {
+    /// Starts the proxy from a monitor opened while it was off.
+    StartProxy,
     UseProvider(String),
     UseAccount {
         provider: String,
@@ -24,11 +27,37 @@ pub(super) enum Action {
 
 impl Action {
     pub fn needs_terminal(&self) -> bool {
-        matches!(self, Self::UseProvider(_) | Self::SignIn { .. })
+        matches!(
+            self,
+            Self::StartProxy | Self::UseProvider(_) | Self::SignIn { .. }
+        )
     }
 
     pub fn run(&self, base_url: &str) -> Result<String> {
         match self {
+            Self::StartProxy => {
+                route::preflight()?;
+                // The saved provider needs no question. Without one, `start` asks.
+                let pick = start_flow::pick(config::route().provider.as_deref())?;
+                let label = format!("starting cc-proxy on port {}", config::port());
+                let info = match ui::waiting(&label, || daemon::serve_background(None))? {
+                    daemon::ServeOutcome::AlreadyRunning(info)
+                    | daemon::ServeOutcome::Started(info) => info,
+                };
+                match pick {
+                    start_flow::Pick::Provider(provider) => {
+                        route::activate(provider, &info.listen_url())?;
+                        Ok(format!(
+                            "The proxy is on. Claude Code uses {} through it. Open windows follow within a few seconds.",
+                            ui::provider_name(provider)
+                        ))
+                    }
+                    start_flow::Pick::Direct => Ok(
+                        "The proxy is on. Claude Code still uses its original settings and login."
+                            .into(),
+                    ),
+                }
+            }
             Self::UseProvider(provider) => {
                 route::preflight()?;
                 match start_flow::pick(Some(provider))? {

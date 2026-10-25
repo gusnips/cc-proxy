@@ -78,6 +78,21 @@ pub struct MonitorSnapshot {
     pub recent: Vec<CompletedSnapshot>,
 }
 
+impl MonitorSnapshot {
+    /// What the dashboard shows before any proxy has answered.
+    pub fn empty() -> Self {
+        let now = SystemTime::now();
+        Self {
+            started_at: now,
+            snapshot_at: now,
+            uptime: Duration::ZERO,
+            sessions: Vec::new(),
+            active: Vec::new(),
+            recent: Vec::new(),
+        }
+    }
+}
+
 impl From<MonitorState> for MonitorSnapshot {
     fn from(state: MonitorState) -> Self {
         Self {
