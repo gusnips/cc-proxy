@@ -104,6 +104,19 @@ pub struct StoredAntigravityAuth {
     pub plan: Option<String>,
 }
 
+/// The plan id Google gives an account that pays nothing.
+const FREE_PLAN: &str = "free-tier";
+
+/// A plan id in words. Only the free plan is named: Google's other ids are
+/// shown as it spells them, because what each one includes keeps changing.
+fn plan_label(plan: &str) -> String {
+    if plan == FREE_PLAN {
+        "free plan".to_string()
+    } else {
+        format!("{plan} plan")
+    }
+}
+
 fn account_store(id: Option<&str>) -> Result<AccountAuthStore<StoredAntigravityAuth>> {
     Accounts::open("antigravity", &ANTIGRAVITY_CLI)?.for_request(id)
 }
@@ -1239,12 +1252,25 @@ impl crate::accounts::AccountSupport for AntigravityCli {
 
     fn state(&self, login: &Value) -> AuthState {
         match serde_json::from_value::<StoredAntigravityAuth>(login.clone()) {
-            Ok(auth) => AuthState::SignedIn {
-                account: auth.email.or(Some(auth.project_id)),
-                expires_ms: Some(auth.expires),
-            },
+            Ok(auth) => {
+                let who = auth.email.unwrap_or(auth.project_id);
+                AuthState::SignedIn {
+                    account: Some(match auth.plan.as_deref() {
+                        Some(plan) => format!("{who} ({})", plan_label(plan)),
+                        None => who,
+                    }),
+                    expires_ms: Some(auth.expires),
+                }
+            }
             Err(_) => AuthState::Missing,
         }
+    }
+
+    fn note(&self, login: &Value) -> Option<String> {
+        let auth: StoredAntigravityAuth = serde_json::from_value(login.clone()).ok()?;
+        (auth.plan.as_deref() == Some(FREE_PLAN)).then(|| {
+            "Free plan. The numbers above are a weekly allowance, not a list of the models this plan can use. Google can refuse a model with \"Resource has been exhausted\" while this still shows 100%.".to_string()
+        })
     }
 
     fn single_login(&self) -> Box<dyn AuthStorage<Value>> {
@@ -1303,6 +1329,31 @@ mod tests {
             email: Some(format!("{name}@example.com")),
             plan: Some("test-plan".into()),
         }
+    }
+
+    #[test]
+    fn the_plan_shows_beside_the_account_and_a_free_one_gets_a_note() {
+        let mut login = serde_json::to_value(stored_auth("first")).unwrap();
+        let state = |login: &Value| ANTIGRAVITY_CLI.state(login).describe();
+        assert!(state(&login).starts_with("signed in as first@example.com (test-plan plan)"));
+        assert_eq!(ANTIGRAVITY_CLI.note(&login), None);
+
+        login["plan"] = json!("free-tier");
+        assert!(state(&login).starts_with("signed in as first@example.com (free plan)"));
+        let note = ANTIGRAVITY_CLI.note(&login).unwrap();
+        for expected in [
+            "Free plan",
+            "weekly allowance",
+            "Resource has been exhausted",
+            "100%",
+        ] {
+            assert!(note.contains(expected), "{expected}: {note}");
+        }
+
+        // A login with no plan says nothing about one.
+        login["plan"] = Value::Null;
+        assert!(state(&login).starts_with("signed in as first@example.com,"));
+        assert_eq!(ANTIGRAVITY_CLI.note(&login), None);
     }
 
     #[test]
