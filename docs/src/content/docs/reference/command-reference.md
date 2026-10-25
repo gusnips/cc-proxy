@@ -24,13 +24,13 @@ Each prints `cc-proxy <version>`.
 ## `start`
 
 ```sh
-cc-proxy start [--port <PORT>] [--no-monitor | --monitor]
+cc-proxy start [provider|direct] [--port <PORT>] [--no-monitor | --monitor]
 ```
 
-Turns routing on and starts the proxy as a background service. It exits once the proxy answers health checks, printing its pid and listening address.
+Starts the proxy as a background service and turns routing on, unless you pick `direct`. It exits once the proxy answers health checks, printing its pid and listening address.
 
 1. It removes the shell hook that older versions added, if it finds one.
-2. It picks the provider. With one provider signed in, it uses that one. With several, it asks, and the last choice is the default. "Claude Code subscription, no routing" is always on the list. With none signed in, it asks which one to sign in to.
+2. It picks the provider. With one provider signed in, it uses that one. With several, it asks, and the last choice is the default. "Claude Code login, no proxy (direct)" is always on the list. With none signed in, it asks which one to sign in to.
 3. It asks which model a Claude name should use, only for names it can't match with confidence. Answers are saved. See [Claude names](/using/models-and-routing/#claude-names).
 4. It starts the service, or reuses one that already answers on the port, such as a Homebrew service.
 5. It writes the `env` block in Claude Code's `settings.json` and sets `route.on` in `config.json`. Open Claude Code windows follow within a few seconds.
@@ -52,10 +52,12 @@ If `settings.json` isn't valid JSON, `start` stops before it does anything and n
 ## `use`
 
 ```sh
-cc-proxy use <provider>... | claude
+cc-proxy use <provider>... | direct
 ```
 
-Changes where Claude Code goes, with the proxy kept running. The provider is `codex`, `kimi`, `cursor`, `grok`, `copilot`, `glm` or `opencode`. `claude` sends Claude Code back to your Claude subscription.
+Changes where Claude Code goes, with the proxy kept running. `claude` uses a saved Claude subscription through the proxy, like any other provider. `cc-proxy provider list` shows all provider names.
+
+`cc-proxy use direct` bypasses the proxy and restores Claude Code's original settings and login. It needs no provider sign-in, never selects a saved cc-proxy account and does not start or stop the proxy. Use `direct` on its own, not in a fallback chain.
 
 More than one provider is a fallback chain, tried in the order you list them:
 
@@ -80,7 +82,7 @@ cc-proxy reload
 
 `status` reports how long the service has run, its pid and listening address, where Claude Code goes, and warnings about `settings.json` (a pinned model, or an API key that hides limit reset times). It also warns when the proxy runs an older version than the installed binary, which happens after `brew upgrade` until you restart. It exits 1 when the service is down.
 
-`stop` sends Claude Code back to your Claude subscription first, even if the proxy is already dead, then shuts the service down gracefully (exit 0 when there is nothing to stop). Routing does not come back until you run `start` or `use`. If something answers on the port that cc-proxy didn't start, such as a Homebrew service, `stop` leaves it alone and says to use `brew services stop cc-proxy`.
+`stop` restores Claude Code's original settings and login first, even if the proxy is already dead, then shuts the service down gracefully (exit 0 when there is nothing to stop). It does not select a saved cc-proxy account. Routing does not come back until you run `start` or `use`. If something answers on the port that cc-proxy didn't start, such as a Homebrew service, `stop` leaves it alone and says to use `brew services stop cc-proxy`.
 
 `restart` stops and starts again, keeping the previous port unless `--port` overrides it. If the port changes, it points Claude Code at the new one. `reload` validates `config.json` and asks a running service to re-read it; file-backed settings apply on the next request, while bind address, port, and environment need `restart`. `reload` exits 1 when no service is running (after validating the config) and validates only on platforms without SIGHUP.
 

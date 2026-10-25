@@ -32,13 +32,18 @@ impl Action {
             Self::UseProvider(provider) => {
                 route::preflight()?;
                 match start_flow::pick(Some(provider))? {
-                    start_flow::Pick::Provider(provider) => route::activate(provider, base_url)?,
-                    start_flow::Pick::Claude => route::deactivate()?,
+                    start_flow::Pick::Provider(provider) => {
+                        route::activate(provider, base_url)?;
+                        Ok(format!(
+                            "Saved. Claude Code uses {} through the proxy. Open windows follow within a few seconds.",
+                            ui::provider_name(provider)
+                        ))
+                    }
+                    start_flow::Pick::Direct => {
+                        route::deactivate()?;
+                        Ok("Saved. Claude Code uses its original settings and login, without the proxy. The proxy keeps running.".into())
+                    }
                 }
-                Ok(format!(
-                    "Saved. Claude Code uses {}. Open windows follow within a few seconds.",
-                    ui::provider_name(provider)
-                ))
             }
             Self::UseAccount { provider, id } => {
                 let registry = Registry::new();

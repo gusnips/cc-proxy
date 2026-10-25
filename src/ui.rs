@@ -36,7 +36,7 @@ pub fn provider_color(provider: &str) -> Color {
         "grok" => Color::Rgb(240, 130, 170),
         "opencode" | "opencode-go" | "opencode-zen" => Color::Rgb(240, 165, 100),
         "copilot" => Color::Rgb(160, 150, 255),
-        "anthropic" => Color::Rgb(230, 145, 110),
+        "claude" | "anthropic" => Color::Rgb(230, 145, 110),
         "gemini" | "antigravity" => Color::Rgb(110, 170, 250),
         _ => DIM_WHITE,
     }
@@ -51,6 +51,7 @@ pub fn provider_name(provider: &str) -> &str {
         "cursor" => "Cursor",
         "kimi" => "Kimi",
         "grok" => "Grok",
+        "claude" => "Claude subscription",
         "anthropic" => "Anthropic",
         "gemini" => "Gemini",
         "antigravity" => "Antigravity",
@@ -440,6 +441,13 @@ mod tests {
     }
 
     #[test]
+    fn claude_subscription_is_distinct_from_direct_bypass() {
+        assert_eq!(provider_name("claude"), "Claude subscription");
+        assert_eq!(provider_name("anthropic"), "Anthropic");
+        assert_eq!(provider_color("claude"), provider_color("anthropic"));
+    }
+
+    #[test]
     fn plain_output_is_the_lines_alone() {
         let lines = [
             "cc-proxy started".to_string(),
@@ -479,8 +487,8 @@ mod tests {
     #[test]
     fn wrapping_never_splits_a_command() {
         assert_eq!(
-            wrap("run `cc-proxy use claude` now", 12),
-            ["run", "`cc-proxy use claude`", "now"]
+            wrap("run `cc-proxy use direct` now", 12),
+            ["run", "`cc-proxy use direct`", "now"]
         );
     }
 

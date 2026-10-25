@@ -55,7 +55,7 @@ Set the key through `cc-proxy login opencode`, `CCP_OPENCODE_API_KEY`,
 
 ## Model returns HTTP 400
 
-If the message says routing is off, that Claude Code window still points at the proxy but you ran `cc-proxy stop` or `cc-proxy use claude`. Restart the window, or run `cc-proxy start` to route it again. If it says cc-proxy has no model for a name, run `cc-proxy models choose`.
+If the message says routing is off, that Claude Code window still points at the proxy but you ran `cc-proxy stop` or `cc-proxy use direct`. Restart the window, or run `cc-proxy start` to route it again. If it says cc-proxy has no model for a name, run `cc-proxy models choose`.
 
 Otherwise run:
 

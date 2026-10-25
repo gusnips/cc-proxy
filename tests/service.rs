@@ -279,7 +279,9 @@ fn start_routes_claude_code_through_settings_and_stop_switches_it_off() {
         .arg("stop")
         .assert()
         .success()
-        .stdout(contains("Claude Code uses your Claude subscription"));
+        .stdout(contains(
+            "Claude Code uses its original settings and login, without the proxy",
+        ));
 
     // Neutral values, not deleted keys: Claude Code never unsets a key it
     // stops seeing, so a deleted key would leave the window on the proxy.
@@ -292,7 +294,7 @@ fn start_routes_claude_code_through_settings_and_stop_switches_it_off() {
 }
 
 #[test]
-fn use_switches_provider_and_claude_without_restarting_the_proxy() {
+fn use_switches_provider_and_direct_without_restarting_the_proxy() {
     let sandbox = Sandbox::new();
     sandbox.sign_in("codex");
     sandbox.sign_in("kimi");
@@ -319,10 +321,12 @@ fn use_switches_provider_and_claude_without_restarting_the_proxy() {
 
     sandbox
         .cmd()
-        .args(["use", "claude"])
+        .args(["use", "direct"])
         .assert()
         .success()
-        .stdout(contains("Claude Code uses your Claude subscription"));
+        .stdout(contains(
+            "Claude Code uses its original settings and login, without the proxy",
+        ));
     sandbox.assert_routed_to_anthropic();
     assert_eq!(sandbox.route(), json!({"on": false, "provider": "kimi"}));
 
@@ -330,6 +334,106 @@ fn use_switches_provider_and_claude_without_restarting_the_proxy() {
     sandbox.cmd().args(["use", "codex"]).assert().success();
     sandbox.assert_routed_to_proxy();
     assert_eq!(sandbox.pid(), pid);
+}
+
+#[test]
+fn direct_and_stop_restore_the_original_settings_and_login() {
+    let sandbox = Sandbox::new();
+    sandbox.sign_in("kimi");
+    let original = json!({"theme": "dark", "env": {
+        "ANTHROPIC_BASE_URL": "https://original.example.com",
+        "CLAUDE_CODE_OAUTH_TOKEN": "original-login",
+        "FOO": "keep"
+    }});
+    sandbox.write_settings(&original.to_string());
+
+    for stop in [false, true] {
+        sandbox.cmd().args(["use", "kimi"]).assert().success();
+        sandbox.wait_for_status(true);
+        let pid = sandbox.pid();
+        sandbox.assert_routed_to_proxy();
+
+        let mut command = sandbox.cmd();
+        if stop {
+            command.arg("stop");
+        } else {
+            command.args(["use", "direct"]);
+        }
+        command.assert().success().stdout(contains(
+            "Claude Code uses its original settings and login, without the proxy",
+        ));
+        let restored = sandbox.settings();
+        for key in ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "FOO"] {
+            assert_eq!(restored["env"][key], original["env"][key]);
+        }
+        assert_eq!(restored["theme"], original["theme"]);
+        assert_eq!(sandbox.route()["on"], false);
+        assert_eq!(sandbox.route()["provider"], "kimi");
+        sandbox.wait_for_status(!stop);
+        if !stop {
+            assert_eq!(sandbox.pid(), pid);
+        }
+    }
+}
+
+#[test]
+fn direct_without_a_proxy_does_not_start_one_or_change_settings() {
+    let sandbox = Sandbox::new();
+    let original = "{\"theme\": \"dark\"}\n";
+    sandbox.write_settings(original);
+    sandbox.cmd().args(["use", " Direct "]).assert().success();
+    assert_eq!(
+        std::fs::read_to_string(sandbox.settings_path()).unwrap(),
+        original
+    );
+    assert_eq!(sandbox.route(), Value::Null);
+    sandbox.wait_for_status(false);
+}
+
+#[test]
+fn direct_cannot_be_part_of_a_fallback_chain_and_changes_nothing() {
+    let sandbox = Sandbox::new();
+    let original = "{\"theme\": \"dark\"}\n";
+    sandbox.write_settings(original);
+    for targets in [["direct", "codex"], ["codex", " Direct "]] {
+        sandbox
+            .cmd()
+            .arg("use")
+            .args(targets)
+            .assert()
+            .failure()
+            .stderr(contains("can't be part of a fallback chain"));
+    }
+    assert_eq!(
+        std::fs::read_to_string(sandbox.settings_path()).unwrap(),
+        original
+    );
+    assert_eq!(sandbox.route(), Value::Null);
+    sandbox.wait_for_status(false);
+}
+
+#[test]
+fn claude_and_direct_cannot_be_added_as_custom_providers() {
+    let sandbox = Sandbox::new();
+    for (name, reason) in [
+        ("claude", "is a built-in provider name"),
+        ("direct", "bypasses the proxy"),
+    ] {
+        sandbox
+            .cmd()
+            .args([
+                "provider",
+                "add",
+                name,
+                "http://127.0.0.1:9",
+                "--model",
+                "test-model",
+            ])
+            .assert()
+            .failure()
+            .stderr(contains(reason));
+    }
+    assert_eq!(sandbox.route(), Value::Null);
 }
 
 #[test]
@@ -395,7 +499,7 @@ fn picker_labels_follow_active_provider_maps_and_restore_the_original_picker() {
         .success();
     assert_eq!(opus_label(&sandbox.settings()), "kimi/k3");
 
-    sandbox.cmd().args(["use", "claude"]).assert().success();
+    sandbox.cmd().args(["use", "direct"]).assert().success();
     sandbox.assert_routed_to_anthropic();
     let restored = sandbox.settings();
     assert_eq!(restored["modelPicker"], original["modelPicker"]);
@@ -666,7 +770,7 @@ fn stop_still_succeeds_when_the_settings_file_is_not_json() {
         .arg("stop")
         .assert()
         .success()
-        .stdout(contains("Couldn't switch Claude Code back"));
+        .stdout(contains("Couldn't restore Claude Code's original settings"));
     assert_eq!(
         std::fs::read_to_string(sandbox.settings_path()).unwrap(),
         "{ not json"

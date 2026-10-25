@@ -49,7 +49,7 @@ When two lines of models compete for a name, cc-proxy isn't sure. `start` and `u
 
 On a reseller, `start` and `use` ask for each name that has no model, the same way `cc-proxy models choose` does. Press Enter to skip a name. A skipped name stays empty, and the next `start` or `use` asks about it again.
 
-An explicit provider model ID skips this tier lookup. Codex's `codex.model` override still applies. A name can point at a model of another provider.
+An explicit provider model ID skips this tier lookup. On `claude` and `anthropic`, a concrete Claude ID such as `claude-opus-4-8` keeps that exact model unless you chose a tier override. Short aliases such as `opus` and `claude-opus` still use the tier mapping. Codex's `codex.model` override still applies. A name can point at a model of another provider.
 
 ### See or change a name
 
@@ -151,7 +151,7 @@ For Claude Code itself, cc-proxy writes native `modelPicker` labels. Its header,
 
 These are display names, not new routing IDs. `codex/gpt-6.1-sol` is a label; use `gpt-6.1-sol` in a request. The selected native ID stays unchanged, as do Claude Code's context policy and effort controls. Codex's `codex.model` override is reflected in the label. Cursor's automatic selection shows `cursor/default`, not a guessed model.
 
-Your custom picker rows stay. A custom label for the same ID wins. If you edit the picker while routing is on, cc-proxy stops updating it and keeps your edit when routing turns off. Otherwise, `cc-proxy use claude` and `cc-proxy stop` restore your original picker.
+Your custom picker rows stay. A custom label for the same ID wins. If you edit the picker while routing is on, cc-proxy stops updating it and keeps your edit when routing turns off. Otherwise, `cc-proxy use direct` and `cc-proxy stop` restore your original picker.
 
 Claude Code's `/status` view still shows the selected native ID. Managed settings or a `--settings` picker can take priority over the user file. Older clients that do not support `modelPicker` may keep their built-in names.
 

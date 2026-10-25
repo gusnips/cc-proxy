@@ -52,6 +52,7 @@ pub const BUILTIN_PROVIDER_NAMES: &[&str] = &[
     "grok",
     "copilot",
     "glm",
+    "claude",
     "anthropic",
     "opencode",
     "opencode-go",
@@ -800,7 +801,10 @@ pub fn validate_custom_provider_name(name: &str) -> Result<String> {
     if trimmed.is_empty() {
         bail!("provider name must not be empty");
     }
-    if trimmed == crate::route::CLAUDE || BUILTIN_PROVIDER_NAMES.contains(&trimmed.as_str()) {
+    if trimmed == crate::route::DIRECT {
+        bail!("`{trimmed}` bypasses the proxy. Pick a different provider name.");
+    }
+    if BUILTIN_PROVIDER_NAMES.contains(&trimmed.as_str()) {
         bail!("`{trimmed}` is a built-in provider name. Pick a different name.");
     }
     if !trimmed
@@ -938,13 +942,13 @@ pub fn run_provider_list(registry: &crate::registry::Registry) -> Result<()> {
     println!();
     if active.is_some() {
         println!(
-            "Switch with `cc-proxy use <provider>`, or go back to your Claude subscription with \
-             `cc-proxy use claude`."
+            "Switch with `cc-proxy use <provider>`, or bypass the proxy with \
+             `cc-proxy use direct`."
         );
     } else {
         println!(
-            "Claude Code uses your Claude subscription. `cc-proxy use <provider>` sends it through \
-             one."
+            "Claude Code uses its original settings and login, without the proxy. \
+             `cc-proxy use <provider>` sends it through one."
         );
     }
     println!(

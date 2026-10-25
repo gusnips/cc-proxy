@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::provider::AuthState;
 use crate::registry::Registry;
-use crate::route::{CLAUDE, routable_providers};
+use crate::route::{DIRECT, routable_providers};
 use crate::tiers::{self, Basis};
 use crate::ui::{self, Mood};
 use crate::{config, config_keys, models_map, prompt};
@@ -17,11 +17,11 @@ use crate::{config, config_keys, models_map, prompt};
 pub enum Pick {
     /// Through the proxy, to this provider.
     Provider(&'static str),
-    /// Straight to Anthropic, on the user's Claude subscription.
-    Claude,
+    /// Use Claude Code's original settings and login, without the proxy.
+    Direct,
 }
 
-/// `asked` is what the user typed after `cc-proxy use`: a provider or `claude`.
+/// `asked` is what the user typed after `cc-proxy use`: a provider or `direct`.
 /// Without it, `start` works the answer out and asks only when it has to.
 pub fn pick(asked: Option<&str>) -> Result<Pick> {
     let registry = Registry::new();
@@ -99,14 +99,14 @@ fn settle_tiers(registry: &Registry, provider: &str) -> Result<()> {
 
 fn pick_named(registry: &Registry, asked: &str) -> Result<Pick> {
     let asked = asked.trim().to_ascii_lowercase();
-    if asked == CLAUDE {
-        return Ok(Pick::Claude);
+    if asked == DIRECT {
+        return Ok(Pick::Direct);
     }
     let providers = routable_providers(registry);
     let Some(&provider) = providers.iter().find(|provider| **provider == asked) else {
         bail!(
-            "cc-proxy can't send Claude Code to `{asked}`. Use one of: {}, or `{CLAUDE}` for your \
-             Claude subscription.",
+            "cc-proxy can't send Claude Code to `{asked}`. Use one of: {}, or `{DIRECT}` to \
+             bypass the proxy.",
             providers.join(", ")
         );
     };
@@ -129,7 +129,7 @@ fn pick_for_start(registry: &Registry) -> Result<Pick> {
         .filter(|provider| is_signed_in(registry, provider))
         .collect();
     let remembered = config::route().provider;
-    let claude_option = "Claude Code subscription, no routing".to_string();
+    let direct_option = "Claude Code login, no proxy (direct)".to_string();
 
     if prompt::is_interactive() {
         let mut options: Vec<String> = providers
@@ -143,7 +143,7 @@ fn pick_for_start(registry: &Registry) -> Result<Pick> {
                 format!("{} ({provider}) · {status}", ui::provider_name(provider))
             })
             .collect();
-        options.push(claude_option);
+        options.push(direct_option);
         let default = providers
             .iter()
             .position(|provider| Some(*provider) == remembered.as_deref())
@@ -155,7 +155,7 @@ fn pick_for_start(registry: &Registry) -> Result<Pick> {
             .unwrap_or(0);
         let answer = prompt::choose("Where should Claude Code go?", &options, default)?;
         let Some(&provider) = providers.get(answer) else {
-            return Ok(Pick::Claude);
+            return Ok(Pick::Direct);
         };
         if !is_signed_in(registry, provider) {
             sign_in(registry, provider)?;
@@ -180,14 +180,14 @@ fn pick_for_start(registry: &Registry) -> Result<Pick> {
                 .iter()
                 .map(|provider| ui::provider_name(provider).to_string())
                 .collect();
-            options.push(claude_option);
+            options.push(direct_option);
             let answer = prompt::choose(
                 "You aren't signed in to any provider yet. Which one do you want to sign in to?",
                 &options,
                 0,
             )?;
             let Some(&provider) = providers.get(answer) else {
-                return Ok(Pick::Claude);
+                return Ok(Pick::Direct);
             };
             sign_in(registry, provider)?;
             Ok(Pick::Provider(provider))
@@ -197,7 +197,7 @@ fn pick_for_start(registry: &Registry) -> Result<Pick> {
                 .iter()
                 .map(|provider| ui::provider_name(provider).to_string())
                 .collect();
-            options.push(claude_option);
+            options.push(direct_option);
             let default = several
                 .iter()
                 .position(|provider| Some(*provider) == remembered.as_deref())
@@ -205,7 +205,7 @@ fn pick_for_start(registry: &Registry) -> Result<Pick> {
             let answer = prompt::choose("Where should Claude Code go?", &options, default)?;
             Ok(match several.get(answer) {
                 Some(provider) => Pick::Provider(provider),
-                None => Pick::Claude,
+                None => Pick::Direct,
             })
         }
     }
@@ -237,11 +237,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn use_takes_a_provider_or_claude_in_any_case() {
+    fn use_takes_a_provider_or_direct_in_any_case() {
         let registry = Registry::new();
-        assert_eq!(pick_named(&registry, " Claude ").unwrap(), Pick::Claude);
+        assert_eq!(pick_named(&registry, " Direct ").unwrap(), Pick::Direct);
         let error = pick_named(&registry, "unknown").unwrap_err().to_string();
         assert!(error.contains("codex, kimi, cursor, grok"), "{error}");
-        assert!(error.contains("`claude`"), "{error}");
+        assert!(error.contains("`direct`"), "{error}");
+    }
+
+    #[test]
+    fn claude_needs_a_registered_provider_instead_of_bypassing_the_proxy() {
+        let registry = Registry::from_providers([]);
+        assert!(pick_named(&registry, " Claude ").is_err());
+        assert_eq!(pick_named(&registry, "direct").unwrap(), Pick::Direct);
     }
 }
