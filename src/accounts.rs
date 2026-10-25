@@ -423,12 +423,16 @@ impl Accounts {
 
     /// Removes one account and its login. When it was the current one, the
     /// first account left takes over; returns that account.
-    pub fn remove(&self, name: &str) -> Result<Option<Account>> {
+    pub fn remove(&self, account: &Account) -> Result<Option<Account>> {
         self.locked(|| {
             let mut index = self.read_index()?;
+            let name = account.name.as_str();
             let Some(at) = index.position(name) else {
                 bail!(self.missing(name, &index));
             };
+            if index.accounts[at].id != account.id {
+                bail!("The `{name}` login was replaced. Nothing was removed. Refresh the account list, then try again.");
+            }
             let removed = index.accounts.remove(at);
             let was_current = index.current.as_deref() == Some(name);
             if was_current {
@@ -784,7 +788,7 @@ mod tests {
             "second"
         );
         assert!(accounts.install(" MAIN ", None, &json!({}), None).is_err());
-        accounts.remove("main").unwrap();
+        accounts.remove(&accounts.require("main").unwrap()).unwrap();
         write_atomically(
             &accounts.file(&first.id).to_string_lossy(),
             &json!({"access":"leftover"}),
@@ -835,10 +839,18 @@ mod tests {
         let main_file = accounts.file(&accounts.require("main").unwrap().id);
 
         // Another account going away changes nothing.
-        assert!(accounts.remove("home").unwrap().is_none());
+        assert!(
+            accounts
+                .remove(&accounts.require("home").unwrap())
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(accounts.current().unwrap().unwrap().name, "work");
 
-        let next = accounts.remove("work").unwrap().unwrap();
+        let next = accounts
+            .remove(&accounts.require("work").unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(next.name, "main");
         assert_eq!(accounts.current().unwrap().unwrap().name, "main");
         assert!(!work_file.exists());
@@ -848,6 +860,27 @@ mod tests {
         assert!(accounts.list().unwrap().is_empty());
         assert!(!main_file.exists());
         assert!(accounts.index_path().exists());
+    }
+
+    #[test]
+    fn removing_an_old_selection_never_deletes_its_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts
+            .install("work", None, &json!({"access": "old"}), None)
+            .unwrap();
+        let old = accounts.require("work").unwrap();
+        accounts
+            .install("work", Some(&old.id), &json!({"access": "new"}), None)
+            .unwrap();
+        let replacement = accounts.require("work").unwrap();
+        let error = accounts.remove(&old).unwrap_err().to_string();
+        assert!(
+            error.contains("replaced") && error.contains("Nothing was removed"),
+            "{error}"
+        );
+        assert_eq!(accounts.require("work").unwrap(), replacement);
+        assert_eq!(accounts.login("work").unwrap().unwrap()["access"], "new");
     }
 
     #[test]

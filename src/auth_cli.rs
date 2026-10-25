@@ -225,7 +225,7 @@ impl<'a> AccountCli<'a> {
                 names_of(&list)
             ),
         };
-        let next = self.accounts.remove(&name)?;
+        let next = self.accounts.remove(&self.accounts.require(&name)?)?;
         if list.len() == 1 {
             println!("Signed out of {label}.");
         } else {

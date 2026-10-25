@@ -480,10 +480,7 @@ pub(crate) fn account_usage() -> HashMap<(String, String), MonitorUsage> {
                 for account in accounts {
                     let report = match account.result {
                         AccountResult::Usage { usage } => usage.monitor_usage(),
-                        AccountResult::Unavailable { .. } => MonitorUsage::Unavailable(format!(
-                            "Usage unavailable. Press r to retry, or run cc-proxy usage {}.",
-                            provider.id()
-                        )),
+                        AccountResult::Unavailable { error } => MonitorUsage::Unavailable(error),
                     };
                     usage.insert((provider.id().to_string(), account.id), report);
                 }
