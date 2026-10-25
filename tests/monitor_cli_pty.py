@@ -124,6 +124,25 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
         except OSError:
             return False
 
+    # A monitor opened while the proxy is off says so, and `s` starts it.
+    saved_config = file.read_text()
+    off = Monitor(env, "monitor")
+    try:
+        off.text("Proxy off. Press s to start it")
+        off.text("s start proxy")
+        off.keys(b"s")
+        wait_for(alive, "The monitor did not start the proxy")
+        off.text("The proxy is on")
+        off.text("Ready for requests")
+        settings = json.loads((root / "claude/settings.json").read_text())
+        assert settings["env"]["ANTHROPIC_BASE_URL"].rstrip("/") == url
+    finally:
+        off.close()
+    assert alive(), "Closing the monitor stopped the proxy"
+    subprocess.run([binary, "stop"], env=env, check=True, capture_output=True)
+    wait_for(lambda: not alive(), "The proxy did not stop")
+    file.write_text(saved_config)
+
     with (root / "server.log").open("wb") as log:
         server = subprocess.Popen([binary, "start", "--no-monitor"], env=env, stdout=log, stderr=log)
         try:
@@ -199,4 +218,4 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 server.kill()
                 server.wait()
 
-print("PASS: account/provider selection, rotation, fallback, cancel, detach, remote read-only and safe demo")
+print("PASS: start from an off proxy, account/provider selection, rotation, fallback, cancel, detach, remote read-only and safe demo")

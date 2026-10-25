@@ -83,7 +83,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Open accounts, rotation controls and live activity for a running proxy
+    /// Open accounts, rotation controls and live activity. If the proxy is off, press s to start it
     Monitor {
         #[arg(long)]
         url: Option<reqwest::Url>,
@@ -307,12 +307,6 @@ fn run() -> Result<()> {
                     .parse()
                     .expect("local proxy URL")
             });
-            if !from_flag && matches!(daemon::describe(), daemon::DaemonStatus::Stopped) {
-                anyhow::bail!(
-                    "proxy is not running. Start it with `cc-proxy start`, \
-                     then attach with `cc-proxy monitor`."
-                );
-            }
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
@@ -321,10 +315,15 @@ fn run() -> Result<()> {
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(2))
                 .build()?;
-            let monitor = runtime.block_on(cc_proxy::monitor::remote::RemoteMonitor::connect(
-                client,
-                url.clone(),
-            ))?;
+            // A local proxy may be off: the monitor opens anyway and offers to start it.
+            // An explicit URL that doesn't answer is most likely a typo, so it fails.
+            let monitor = runtime.block_on(async {
+                if from_flag {
+                    cc_proxy::monitor::remote::RemoteMonitor::connect(client, url.clone()).await
+                } else {
+                    cc_proxy::monitor::remote::RemoteMonitor::wait_for(client, url.clone()).await
+                }
+            })?;
             tui::run_attached_monitor(|| monitor.snapshot(), url.to_string(), !from_flag)?;
             Ok(())
         }

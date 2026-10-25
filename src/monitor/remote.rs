@@ -16,22 +16,32 @@ pub struct RemoteMonitor {
 }
 
 impl RemoteMonitor {
+    /// Attaches to a proxy that answers now. A typo in `--url` fails here.
     pub async fn connect(client: Client, base_url: Url) -> Result<Self> {
-        if !matches!(base_url.scheme(), "http" | "https")
-            || !base_url.username().is_empty()
-            || base_url.password().is_some()
-            || base_url.query().is_some()
-            || base_url.fragment().is_some()
-        {
-            bail!("monitor URL must be an HTTP(S) base URL without credentials, query or fragment");
-        }
-        let endpoint = base_url.join("monitor").context("invalid monitor URL")?;
+        let endpoint = monitor_endpoint(&base_url)?;
         let initial = fetch_snapshot(&client, &endpoint)
             .await
             .context("cannot attach to proxy monitor")?;
-        let (sender, updates) = watch::channel(SnapshotUpdate::Live(initial.clone()));
+        Ok(Self::poll(client, endpoint, SnapshotUpdate::Live(initial)))
+    }
+
+    /// Starts even when nothing answers yet, and attaches once the proxy is up.
+    pub async fn wait_for(client: Client, base_url: Url) -> Result<Self> {
+        let endpoint = monitor_endpoint(&base_url)?;
+        let initial = match fetch_snapshot(&client, &endpoint).await {
+            Ok(snapshot) => SnapshotUpdate::Live(snapshot),
+            Err(error) => SnapshotUpdate::Disconnected {
+                snapshot: MonitorSnapshot::empty(),
+                error: error.to_string(),
+            },
+        };
+        Ok(Self::poll(client, endpoint, initial))
+    }
+
+    fn poll(client: Client, endpoint: Url, initial: SnapshotUpdate) -> Self {
+        let (sender, updates) = watch::channel(initial.clone());
         let poller = tokio::spawn(async move {
-            let mut current = SnapshotUpdate::Live(initial);
+            let mut current = initial;
             let mut interval = tokio::time::interval(POLL_INTERVAL);
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             interval.tick().await;
@@ -46,7 +56,7 @@ impl RemoteMonitor {
                 }
             }
         });
-        Ok(Self { updates, poller })
+        Self { updates, poller }
     }
 
     pub fn snapshot(&self) -> SnapshotUpdate {
@@ -58,6 +68,18 @@ impl Drop for RemoteMonitor {
     fn drop(&mut self) {
         self.poller.abort();
     }
+}
+
+fn monitor_endpoint(base_url: &Url) -> Result<Url> {
+    if !matches!(base_url.scheme(), "http" | "https")
+        || !base_url.username().is_empty()
+        || base_url.password().is_some()
+        || base_url.query().is_some()
+        || base_url.fragment().is_some()
+    {
+        bail!("monitor URL must be an HTTP(S) base URL without credentials, query or fragment");
+    }
+    base_url.join("monitor").context("invalid monitor URL")
 }
 
 async fn fetch_snapshot(client: &Client, endpoint: &Url) -> Result<MonitorSnapshot> {
@@ -83,4 +105,57 @@ async fn fetch_snapshot(client: &Client, endpoint: &Url) -> Result<MonitorSnapsh
         );
     }
     Ok(response.snapshot)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use axum::{Json, Router, routing::get};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn waiting_for_an_off_proxy_starts_disconnected_and_attaches_when_it_answers() {
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = free.local_addr().unwrap();
+        drop(free);
+        let url: Url = format!("http://{address}").parse().unwrap();
+        let client = Client::builder().no_proxy().build().unwrap();
+
+        assert!(
+            RemoteMonitor::connect(client.clone(), url.clone())
+                .await
+                .is_err()
+        );
+        let monitor = RemoteMonitor::wait_for(client, url).await.unwrap();
+        let first = monitor.snapshot();
+        assert!(first.connection_error().is_some());
+        assert!(first.snapshot().sessions.is_empty());
+
+        let app = Router::new().route(
+            "/monitor",
+            get(|| async {
+                Json(MonitorResponse {
+                    version: PROTOCOL_VERSION,
+                    snapshot: MonitorSnapshot::empty(),
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut attached = false;
+        for _ in 0..40 {
+            if monitor.snapshot().connection_error().is_none() {
+                attached = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        server.abort();
+        assert!(
+            attached,
+            "the monitor never attached once the proxy answered"
+        );
+    }
 }

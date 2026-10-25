@@ -442,8 +442,22 @@ impl ProvidersPanel {
         }
     }
 
+    /// Like `finish_action`, but a failed start retries with `s`, not Enter.
+    pub fn finish_start(&mut self, result: anyhow::Result<String>) {
+        match result {
+            Ok(_) => self.finish_action(result),
+            Err(error) => {
+                self.notice = Some((
+                    format!("Couldn't start the proxy: {error:#}. Press s to try again."),
+                    true,
+                ))
+            }
+        }
+    }
+
     pub fn preview_action(&mut self, action: &Action) {
         match action {
+            Action::StartProxy => {}
             Action::UseProvider(id) => {
                 if id == "direct" {
                     self.route.on = false;
