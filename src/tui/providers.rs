@@ -38,6 +38,8 @@ struct AccountRow {
     usage: Option<MonitorUsage>,
     usage_error: Option<String>,
     waits: Vec<(Option<String>, u64)>,
+    /// The account-wide wait is a spent balance: its time is a recheck, not a reset.
+    spent: bool,
 }
 
 impl AccountRow {
@@ -47,6 +49,11 @@ impl AccountRow {
             .filter(|(model, until)| model.is_none() && *until > now)
             .map(|(_, until)| *until)
             .max()
+    }
+
+    /// When cc-proxy tries this account again, if its balance is spent.
+    fn out_of_credit_until(&self, now: u64) -> Option<u64> {
+        self.waiting_until(now).filter(|_| self.spent)
     }
 
     fn usage_summary(&self, now: u64) -> Line<'static> {
@@ -62,20 +69,34 @@ impl AccountRow {
             _ => false,
         };
         if let Some(until) = self.waiting_until(now)
-            && !reset_is_shown
+            && (self.spent || !reset_is_shown)
         {
-            if self.usage.is_none() || matches!(self.usage, Some(MonitorUsage::Unavailable(_))) {
+            let replaces = match &self.usage {
+                None | Some(MonitorUsage::Unavailable(_)) => true,
+                // "out of credit" says more than "not reported".
+                Some(MonitorUsage::NotReported(_)) => self.spent,
+                Some(MonitorUsage::Reported(_)) => false,
+            };
+            if replaces {
                 summary = Line::default();
             } else {
                 summary.spans.push(Span::raw(" · "));
             }
-            summary.spans.extend([
-                Span::styled("waiting", Style::default().fg(YELLOW)),
-                Span::raw(format!(
-                    " · {} left",
-                    ui::duration(Duration::from_millis(until - now))
-                )),
-            ]);
+            let left = ui::duration(Duration::from_millis(until - now));
+            if self.spent {
+                summary.spans.extend([
+                    Span::styled(
+                        "out of credit",
+                        Style::default().fg(ui::remaining_color(0.0)),
+                    ),
+                    Span::raw(format!(" · tries again in {left}")),
+                ]);
+            } else {
+                summary.spans.extend([
+                    Span::styled("waiting", Style::default().fg(YELLOW)),
+                    Span::raw(format!(" · {left} left")),
+                ]);
+            }
         }
         summary
     }
@@ -121,13 +142,24 @@ impl ProviderRow {
         }
     }
 
+    /// Set only when every account waits. A spent balance has no reset, so it
+    /// never counts as the first one to reset.
     fn first_reset(&self, now: u64) -> Option<(&AccountRow, u64)> {
         self.accounts
             .iter()
             .map(|account| account.waiting_until(now).map(|until| (account, until)))
             .collect::<Option<Vec<_>>>()?
             .into_iter()
+            .filter(|(account, _)| !account.spent)
             .min_by_key(|(_, until)| *until)
+    }
+
+    fn all_out_of_credit(&self, now: u64) -> bool {
+        !self.accounts.is_empty()
+            && self
+                .accounts
+                .iter()
+                .all(|account| account.out_of_credit_until(now).is_some())
     }
 }
 
@@ -652,6 +684,16 @@ impl ProvidersPanel {
                         let now = crate::rotation::now_ms();
                         for (model, until) in &account.waits {
                             if *until > now {
+                                if model.is_none() && account.spent {
+                                    text.push(Line::styled(
+                                        format!(
+                                            "Out of credit. cc-proxy tries this account again in {}. After you add credit, choose Use account for new requests to try it now.",
+                                            ui::duration(Duration::from_millis(until - now))
+                                        ),
+                                        Style::default().fg(ui::remaining_color(0.0)),
+                                    ));
+                                    continue;
+                                }
                                 let scope = model
                                     .as_ref()
                                     .map_or(String::new(), |model| format!(" for {model}"));
@@ -700,6 +742,12 @@ impl ProvidersPanel {
                                 "Refresh failed. Last values may be out of date. {error}{retry}"
                             ),
                             Style::default().fg(YELLOW),
+                        ));
+                    }
+                    if row.all_out_of_credit(crate::rotation::now_ms()) {
+                        text.push(Line::styled(
+                            "Every saved account is out of credit. Add credit to one, then choose it and Use account for new requests.",
+                            Style::default().fg(ui::remaining_color(0.0)),
                         ));
                     }
                     if self.auto_rotate
@@ -938,7 +986,9 @@ fn account_rows(
             Ok(waits) => waits,
             Err(error) => { state.push_str(&format!(". Can't read the wait timer: {error:#}")); Vec::new() }
         };
-        Ok(AccountRow { current: current.as_ref() == Some(&account.id), waits, id: account.id, name: account.name, state, usage: None, usage_error: None })
+        let spent = waits.iter().any(|wait| wait.model.is_none() && wait.spent);
+        let waits = waits.into_iter().map(|wait| (wait.model, wait.until_ms)).collect();
+        Ok(AccountRow { current: current.as_ref() == Some(&account.id), waits, spent, id: account.id, name: account.name, state, usage: None, usage_error: None })
     }).collect()
 }
 
@@ -1002,7 +1052,7 @@ fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String
                     "opencode" if account.current => row.usage.clone().unwrap_or_else(|| MonitorUsage::Unavailable("Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into())),
                     "opencode" => MonitorUsage::NotReported("OpenCode Go reports usage for the current account only."),
                     "claude" | "codex" | "kimi" | "antigravity" => MonitorUsage::Unavailable(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id)),
-                    _ => MonitorUsage::NotReported("This provider does not report usage. Confirmed wait timers still appear here."),
+                    _ => MonitorUsage::NotReported("This provider does not report a balance or usage. With auto-rotate on, cc-proxy moves to the next account when the provider says this one is out of credit."),
                 }
             });
             if let MonitorUsage::Reported(windows) = &lines
@@ -1014,7 +1064,9 @@ fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String
                     .filter_map(|window| window.resets_at_ms.and_then(|ms| u64::try_from(ms).ok()))
                     .filter(|until| *until > now)
                     .max();
-                account.waits.retain(|(model, _)| model.is_some());
+                // A spent balance stays: the usage windows do not know about it.
+                let spent = account.spent;
+                account.waits.retain(|(model, _)| model.is_some() || spent);
                 if let Some(until) = exhausted_until {
                     account.waits.push((None, until));
                 }
@@ -1051,6 +1103,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                     }])),
                     usage_error: None,
                     waits: vec![(None, crate::rotation::now_ms() + 3_600_000)],
+                    spent: false,
                 },
                 AccountRow {
                     id: "demo-work".into(),
@@ -1073,6 +1126,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                     ])),
                     usage_error: None,
                     waits: Vec::new(),
+                    spent: false,
                 },
             ],
         },
@@ -1100,6 +1154,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                 }])),
                 usage_error: None,
                 waits: Vec::new(),
+                spent: false,
             }],
         },
         ProviderRow {
@@ -1754,6 +1809,97 @@ mod tests {
         let summary = account.usage_summary(now).to_string();
         assert!(summary.contains("5h 0%"), "{summary}");
         assert!(summary.contains("week 88%"), "{summary}");
+    }
+
+    #[test]
+    fn an_account_out_of_credit_says_so_and_never_claims_a_reset() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        let now = crate::rotation::now_ms();
+        let recheck = now + 30 * 60_000;
+        for account in &mut panel.rows[0].accounts {
+            account.usage = Some(MonitorUsage::NotReported("no balance"));
+            account.waits = vec![(None, recheck)];
+            account.spent = true;
+        }
+        panel.selected = Entry::Account("codex".into(), "demo-home".into());
+        for (width, height) in [(160, 30), (80, 24), (40, 24)] {
+            let text = render(&mut panel, width, height);
+            assert!(text.contains("out of credit"), "{width}: {text}");
+            assert!(text.contains("tries again in"), "{width}: {text}");
+            for never in ["[first reset]", "waiting", "resets in", "not reported"] {
+                assert!(!text.contains(never), "{width}: {never}: {text}");
+            }
+        }
+        // Wide enough that the sentence does not wrap inside the details panel.
+        let wide = render(&mut panel, 400, 30);
+        assert!(wide.contains("Out of credit. cc-proxy tries this account again in"));
+        assert!(wide.contains("choose Use account for new requests to try it now"));
+        assert!(!wide.contains("At its limit"), "{wide}");
+
+        // The provider row says what to do once every account is spent.
+        panel.selected = Entry::Provider("codex".into());
+        let provider = render(&mut panel, 160, 30);
+        assert!(
+            provider.contains("Every saved account is out of credit"),
+            "{provider}"
+        );
+        assert!(!provider.contains("All accounts are waiting"), "{provider}");
+    }
+
+    #[test]
+    fn a_spent_account_keeps_its_quota_windows_and_a_real_reset_still_counts_as_first() {
+        let now = crate::rotation::now_ms();
+        let mut rows = demo_rows();
+        let codex = &mut rows[0];
+        // Windows stay beside the note: a wait never hides measured quota.
+        codex.accounts[1].waits = vec![(None, now + 1_800_000)];
+        codex.accounts[1].spent = true;
+        let summary = codex.accounts[1].usage_summary(now).to_string();
+        assert!(summary.starts_with("5h 58% · week 88% · out of credit · tries again in"));
+
+        // One account out of credit and one with a real reset: the real one is first.
+        codex.accounts[0].waits = vec![(None, now + 3_600_000)];
+        let (first, until) = codex.first_reset(now).unwrap();
+        assert_eq!((first.id.as_str(), until), ("demo-home", now + 3_600_000));
+        // All accounts out of credit: nobody resets, so nobody is first.
+        codex.accounts[0].spent = true;
+        assert!(codex.first_reset(now).is_none());
+        assert!(codex.all_out_of_credit(now));
+        // A wait that ended is not out of credit any more.
+        assert!(!codex.all_out_of_credit(now + 3_600_001));
+    }
+
+    #[test]
+    fn refresh_keeps_an_out_of_credit_wait_when_usage_windows_arrive() {
+        let now = crate::rotation::now_ms();
+        let mut rows = demo_rows();
+        rows[0].accounts[1].waits = vec![(None, now + 1_800_000)];
+        rows[0].accounts[1].spent = true;
+        rows[0].accounts[0].waits = vec![(None, now + 600_000)];
+        apply_account_usage(
+            &mut rows,
+            &HashMap::from([
+                (
+                    ("codex".into(), "demo-work".into()),
+                    MonitorUsage::Reported(vec![UsageWindow {
+                        label: "5h",
+                        remaining_percent: 40.0,
+                        resets_at_ms: None,
+                    }]),
+                ),
+                (
+                    ("codex".into(), "demo-home".into()),
+                    MonitorUsage::Reported(vec![UsageWindow {
+                        label: "5h",
+                        remaining_percent: 40.0,
+                        resets_at_ms: None,
+                    }]),
+                ),
+            ]),
+        );
+        // The usage lookup clears a reset wait it no longer finds, not a spent balance.
+        assert!(rows[0].accounts[0].waits.is_empty());
+        assert_eq!(rows[0].accounts[1].waits, vec![(None, now + 1_800_000)]);
     }
 
     #[test]

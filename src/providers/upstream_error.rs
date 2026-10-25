@@ -173,9 +173,10 @@ fn provider_error(
         .map(str::to_string);
     // A spent balance does not refill on a backoff. `x-should-retry: false`
     // stops Claude Code's retry loop, the same signal the Codex quota wall
-    // sends.
+    // sends. With no reset named, rotation sits the account out instead.
     if kind == FailureKind::Quota {
         error.should_retry = Some(false);
+        error.rotation_hint = Some(crate::rotation::RotationHint::Spent);
     }
     error
 }
@@ -559,6 +560,61 @@ mod tests {
         let throttle = from_http(429, "", Some("12"), "GLM").response();
         assert_eq!(throttle.headers()[http::header::RETRY_AFTER], "12");
         assert!(throttle.headers().get("x-should-retry").is_none());
+    }
+
+    #[test]
+    fn a_spent_balance_asks_rotation_to_sit_the_account_out_whatever_its_status() {
+        // The shapes providers document for a balance that ran out: Anthropic's
+        // 402 `billing_error`, its older 400, Z.ai's business code on a 429, and
+        // OpenRouter's 402.
+        for (status, body) in [
+            (
+                402,
+                r#"{"type":"error","error":{"type":"billing_error","message":"Billing problem"}}"#,
+            ),
+            (
+                400,
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#,
+            ),
+            (
+                429,
+                r#"{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}"#,
+            ),
+            (
+                402,
+                r#"{"error":{"code":402,"message":"Insufficient credits. Add more using https://openrouter.ai/credits"}}"#,
+            ),
+        ] {
+            let failure = from_http(status, body, None, "Anthropic");
+            assert_eq!(failure.status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+            assert!(
+                matches!(
+                    failure.rotation_hint,
+                    Some(crate::rotation::RotationHint::Spent)
+                ),
+                "{body}"
+            );
+            assert_eq!(failure.should_retry, Some(false), "{body}");
+        }
+        // A short throttle, a bad key and a prompt that is too long are not a spent balance.
+        for (status, body) in [
+            (
+                429,
+                r#"{"error":{"message":"Rate limit reached, slow down"}}"#,
+            ),
+            (401, r#"{"error":{"message":"invalid x-api-key"}}"#),
+            (
+                400,
+                r#"{"error":{"message":"prompt is too long: 250000 tokens"}}"#,
+            ),
+        ] {
+            assert!(
+                from_http(status, body, None, "Anthropic")
+                    .rotation_hint
+                    .is_none(),
+                "{body}"
+            );
+        }
     }
 
     #[test]

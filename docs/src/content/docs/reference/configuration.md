@@ -102,8 +102,22 @@ applies on the next request.
 When a Messages request returns HTTP 429 with a valid `Retry-After` or a
 provider-confirmed future reset time, the account waits until that time.
 cc-proxy tries another saved account from the same provider. Each account is
-tried at most once per request. No retry time means no automatic switch.
-Quota percentages alone never trigger a switch.
+tried at most once per request. Quota percentages alone never trigger a switch.
+
+An API key has no reset time. When a provider answers that the credit is
+spent (a payment error such as Anthropic's 402 `billing_error` or "credit
+balance is too low", or a spent quota with no clock), cc-proxy moves the request
+to the next saved account and sits the spent one out. It tries that account
+again 30 minutes later, because a top-up is not visible to cc-proxy. That try is
+a recheck, never a claimed reset. After you add credit, run
+`cc-proxy auth use <provider> <account>` (or choose Use account for new requests
+in the monitor) to try it at once. A failed recheck costs one quick error that
+the next account absorbs in the same request. A timeout, a bad key or a short
+rate limit without a reset time never sits an account out.
+
+If every saved account is out of credit, the answer says so, names the commands
+above and carries no countdown, so Claude Code stops instead of waiting for a
+reset that does not exist.
 
 Codex's usage-limit reset clock works even when it omits `Retry-After`.
 Antigravity's `QUOTA_EXHAUSTED` errors use Google's retry delay or reset
@@ -150,7 +164,10 @@ When every provider in the chain is spent, the proxy answers one 429 that names
 the provider freeing up first and when. The response carries the
 `anthropic-ratelimit-unified-*` headers, so Claude Code shows "You've hit your
 limit · resets at ..." and resumes the turn when that time arrives instead of
-treating it as a retryable error.
+treating it as a retryable error. When the first one to come back is an account
+out of credit, there is no reset to show: the answer has no headers and Claude
+Code stops. A provider whose accounts are all out of credit is skipped like any
+other spent provider.
 
 Rotation never replays output after a stream starts. Codex reasoning signatures
 name the saved login that created them, so they remain usable after a proxy

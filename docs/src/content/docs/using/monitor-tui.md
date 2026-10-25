@@ -67,9 +67,12 @@ no, and Enter to type a value. Changes save at once and apply to new requests,
 except the port and address, which need `cc-proxy restart`. Type to search the
 list. Escape clears the search first, then goes back to Accounts.
 
-Auto-rotate is off by default. A provider must confirm a limit and a reset time
-before the proxy switches. If every saved account is spent, it tries the
-fallback providers in order. Rotation applies to Messages requests before output
+Auto-rotate is off by default. A provider must confirm a limit and a reset time,
+or say the credit is spent, before the proxy switches. An account out of credit
+shows `out of credit` and when cc-proxy tries it again (a recheck every 30
+minutes, not a reset). Choose Use account for new requests after you add credit
+to try it at once. If every saved account is spent, it tries the fallback
+providers in order. Rotation applies to Messages requests before output
 starts, not every API.
 
 ### Usage and wait timers

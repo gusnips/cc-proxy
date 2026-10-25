@@ -281,11 +281,14 @@ impl<'a> AccountCli<'a> {
             Ok(waits) => {
                 let waits = waits
                     .into_iter()
-                    .map(|(model, until)| {
+                    .map(|wait| {
                         let duration = ui::duration(std::time::Duration::from_millis(
-                            until.saturating_sub(crate::rotation::now_ms()),
+                            wait.until_ms.saturating_sub(crate::rotation::now_ms()),
                         ));
-                        let clock = i64::try_from(until)
+                        if wait.spent {
+                            return format!("out of credit, cc-proxy tries it again in {duration}");
+                        }
+                        let clock = i64::try_from(wait.until_ms)
                             .ok()
                             .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
                             .map(|at| {
@@ -293,7 +296,9 @@ impl<'a> AccountCli<'a> {
                                     .strftime("%H:%M")
                                     .to_string()
                             });
-                        let scope = model.map_or(String::new(), |model| format!(" for {model}"));
+                        let scope = wait
+                            .model
+                            .map_or(String::new(), |model| format!(" for {model}"));
                         format!(
                             "at its limit{scope}, back in {duration}{}",
                             clock.map_or(String::new(), |clock| format!(" ({clock})"))
