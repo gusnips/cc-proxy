@@ -80,6 +80,7 @@ struct ProviderRow {
     state: AuthState,
     usage: Option<MonitorUsage>,
     usage_error: Option<String>,
+    config_key_hash: Option<[u8; 32]>,
     accounts: Vec<AccountRow>,
     supports_accounts: bool,
     pinned: Option<String>,
@@ -99,7 +100,9 @@ impl ProviderRow {
                     .iter()
                     .any(|old| old.current && old.id == account.id)
         });
-        if self.state != AuthState::Missing && same_current {
+        let same_config_key =
+            self.config_key_hash.is_some() && self.config_key_hash == previous.config_key_hash;
+        if self.state != AuthState::Missing && (same_current || same_config_key) {
             self.usage_error =
                 retain_previous_usage(&mut self.usage, &previous.usage, &previous.usage_error);
         }
@@ -927,6 +930,7 @@ fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
                 id: id.into(),
                 usage: None,
                 usage_error: None,
+                config_key_hash: None,
                 accounts: Vec::new(),
                 supports_accounts: cli.accounts().is_some(),
                 pinned: cli
@@ -944,6 +948,11 @@ fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
                         ))
                     }
                 }
+            }
+            if id == "opencode" && !row.accounts.iter().any(|account| account.current) {
+                use sha2::{Digest, Sha256};
+                row.config_key_hash =
+                    config::opencode_api_key().map(|key| Sha256::digest(key.as_bytes()).into());
             }
             Some(row)
         })
@@ -999,6 +1008,7 @@ fn demo_rows() -> Vec<ProviderRow> {
             },
             usage: None,
             usage_error: None,
+            config_key_hash: None,
             error: None,
             supports_accounts: true,
             pinned: None,
@@ -1048,6 +1058,7 @@ fn demo_rows() -> Vec<ProviderRow> {
             },
             usage: None,
             usage_error: None,
+            config_key_hash: None,
             error: None,
             supports_accounts: true,
             pinned: None,
@@ -1070,6 +1081,7 @@ fn demo_rows() -> Vec<ProviderRow> {
             state: AuthState::Missing,
             usage: None,
             usage_error: None,
+            config_key_hash: None,
             accounts: Vec::new(),
             supports_accounts: true,
             pinned: None,
@@ -1334,6 +1346,21 @@ mod tests {
         let mut unidentified = metadata(vec![old.clone()]).remove(0);
         unidentified.retain_usage(&old);
         assert!(unidentified.usage.is_none());
+
+        // Config-only usage can be reused only while the key digest matches.
+        old.config_key_hash = Some([1; 32]);
+        let mut configured = metadata(vec![old.clone()]).remove(0);
+        configured.retain_usage(&old);
+        assert_eq!(configured.usage, old.usage);
+        configured.usage = Some(MonitorUsage::Unavailable("Press r to retry.".into()));
+        configured.retain_usage(&old);
+        assert_eq!(configured.usage, old.usage);
+        assert!(configured.usage_error.is_some());
+        let mut replaced = metadata(vec![old.clone()]).remove(0);
+        replaced.config_key_hash = Some([2; 32]);
+        replaced.retain_usage(&old);
+        assert!(replaced.usage.is_none());
+        assert!(replaced.usage_error.is_none());
     }
 
     #[test]
