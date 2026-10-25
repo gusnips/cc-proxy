@@ -134,12 +134,12 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 # Home opens rotation. Enter first chooses an action, then runs it.
                 monitor.keys(b"\x1b[H\r\r")
                 monitor.wait(lambda: read().get("auth", {}).get("autoRotate") is True, "Rotation did not save")
-                # End selects work, the last saved account. It must not switch provider.
-                monitor.keys(b"\x1b[F\r\r")
+                # Primary provider comes first, followed by its saved accounts.
+                monitor.keys(b"\x1b[H\x1b[B\x1b[B\x1b[B\r\r")
                 monitor.wait(lambda: json.loads(index.read_text())["current"] == "work", "Account did not switch")
                 assert read()["route"]["provider"] == "ztest"
-                # ytest is directly before ztest and its two accounts.
-                monitor.keys(b"\x1b[F\x1b[A\x1b[A\x1b[A\r\x1b[B\r")
+                # The other connected provider follows the primary's accounts.
+                monitor.keys(b"\x1b[H\x1b[B\x1b[B\x1b[B\x1b[B\r\x1b[B\r")
                 monitor.wait(lambda: read()["route"]["fallback"] == ["ytest"], "Fallback did not save")
                 # Choose that provider. The model choices and login already exist.
                 monitor.keys(b"\r\r")
@@ -158,7 +158,7 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.text("Recent requests")
                 assert (file.read_bytes(), index.read_bytes()) == before
                 # Reuse hidden key entry, then return to the same action on failure.
-                monitor.keys(b"1\x1b[F\r\x1b[B\x1b[B\x1b[B\r")
+                monitor.keys(b"1\x1b[H\x1b[B\x1b[B\x1b[B\x1b[B\r\x1b[B\x1b[B\x1b[B\r")
                 monitor.text("API key:")
                 monitor.keys(b"\r")
                 monitor.text("Couldn't save the change")
