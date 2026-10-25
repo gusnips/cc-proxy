@@ -35,7 +35,7 @@ enum Commands {
     /// Start the proxy as a background service and send Claude Code through it (default)
     #[command(alias = "serve")]
     Start {
-        /// Provider to send Claude Code to (or `claude`). Leave it out to pick from a list
+        /// Provider to send Claude Code to (or `direct` to bypass the proxy). Leave it out to pick from a list
         target: Option<String>,
         #[arg(long)]
         port: Option<u16>,
@@ -46,9 +46,9 @@ enum Commands {
         #[arg(long, conflicts_with = "no_monitor", action = ArgAction::SetTrue)]
         monitor: bool,
     },
-    /// Switch where Claude Code goes: providers in the order to try them, or `claude` for your own subscription
+    /// Switch provider, set a fallback order, or use `direct` to bypass the proxy
     Use {
-        /// A provider, or `claude`. More than one is a fallback chain, tried in this order. Leave it out to pick from a list
+        /// A provider, or `direct` to bypass the proxy. Multiple providers form a fallback chain. Leave it out to pick from a list
         #[arg(value_name = "PROVIDER")]
         targets: Vec<String>,
     },
@@ -135,7 +135,7 @@ enum ServiceCommand {
     /// Start the proxy as a background service and send Claude Code through it
     #[command(alias = "serve")]
     Start {
-        /// Provider to send Claude Code to (or `claude`). Leave it out to pick from a list
+        /// Provider to send Claude Code to (or `direct` to bypass the proxy). Leave it out to pick from a list
         target: Option<String>,
         #[arg(long)]
         port: Option<u16>,
@@ -661,11 +661,11 @@ fn ensure_proxy(port: Option<u16>) -> Result<Proxy> {
     )
 }
 
-/// Point Claude Code at the proxy for a provider, or back at Anthropic.
+/// Point Claude Code at the proxy for a provider, or restore its original settings.
 fn set_route(pick: Pick, url: &str) -> Result<()> {
     match pick {
         Pick::Provider(provider) => route::activate(provider, url),
-        Pick::Claude => route::deactivate(),
+        Pick::Direct => route::deactivate(),
     }
 }
 
@@ -701,6 +701,16 @@ fn start_daemon(target: Option<&str>, port: Option<u16>) -> Result<()> {
 
 /// `cc-proxy use`: switch where Claude Code goes, with the proxy kept running.
 fn use_target(targets: &[String]) -> Result<()> {
+    if targets.len() > 1
+        && targets
+            .iter()
+            .any(|target| target.trim().eq_ignore_ascii_case(route::DIRECT))
+    {
+        anyhow::bail!(
+            "`direct` bypasses the proxy and can't be part of a fallback chain. \
+             Run `cc-proxy use direct` on its own, or list only providers."
+        );
+    }
     route::preflight()?;
     let pick = start_flow::pick(targets.first().map(String::as_str))?;
     let mut lines = Vec::new();
@@ -714,7 +724,10 @@ fn use_target(targets: &[String]) -> Result<()> {
             proxy_port = Some(proxy.port);
             lines.extend(proxy.lines);
         }
-        Pick::Claude => route::deactivate()?,
+        Pick::Direct => {
+            route::deactivate()?;
+            lines.push("Routing is off. This command does not stop the proxy.".into());
+        }
     }
     lines.extend(route_lines(pick));
     lines.extend(proxy_port.and_then(route::version_note));
@@ -792,7 +805,7 @@ fn serve_with_monitor(target: Option<&str>, port: Option<u16>) -> Result<()> {
         ui::eprint_note(
             Mood::Unsure,
             &[format!(
-                "Couldn't switch Claude Code back to your subscription: {error:#}"
+                "Couldn't restore Claude Code's original settings: {error:#}"
             )],
         );
     }
@@ -815,8 +828,8 @@ fn start_hint() -> &'static str {
 }
 
 fn stop_daemon() -> Result<()> {
-    // Routing goes off first, so Claude Code is back on your subscription even
-    // when the proxy is slow to stop or isn't ours to stop.
+    // Restore Claude Code's settings first, even when the proxy is slow to stop
+    // or isn't ours to stop.
     let routing_off = route::deactivate();
     let (mood, mut lines) = match ui::waiting("stopping cc-proxy", daemon::stop_service)? {
         daemon::StopOutcome::NotRunning => (Mood::Asleep, vec!["cc-proxy is not running".into()]),
@@ -833,9 +846,10 @@ fn stop_daemon() -> Result<()> {
         ),
     };
     match &routing_off {
-        Ok(()) => lines.push("Claude Code uses your Claude subscription.".into()),
+        Ok(()) => lines
+            .push("Claude Code uses its original settings and login, without the proxy.".into()),
         Err(error) => lines.push(format!(
-            "Couldn't switch Claude Code back to your subscription: {error:#}"
+            "Couldn't restore Claude Code's original settings: {error:#}"
         )),
     }
     lines.push(start_hint().into());
@@ -1135,6 +1149,7 @@ fn print_models(registry: &Registry, full: bool, filter_provider: Option<&str>) 
         "copilot",
         "cursor",
         "glm",
+        "claude",
         "anthropic",
         "gemini",
         "antigravity",
@@ -1268,7 +1283,11 @@ mod tests {
             vec!["cc-proxy", "use"],
             vec!["cc-proxy", "use", "kimi"],
             vec!["cc-proxy", "use", "kimi", "codex", "antigravity"],
+            vec!["cc-proxy", "start", "claude"],
+            vec!["cc-proxy", "start", "direct"],
             vec!["cc-proxy", "use", "claude"],
+            vec!["cc-proxy", "use", "claude", "codex"],
+            vec!["cc-proxy", "use", "direct"],
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
         }

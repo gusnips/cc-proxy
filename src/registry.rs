@@ -68,6 +68,10 @@ impl Registry {
                 Arc::new(crate::providers::copilot::CopilotProvider::new()),
             ),
             (
+                "claude".into(),
+                Arc::new(crate::providers::claude::ClaudeProvider::new()),
+            ),
+            (
                 "anthropic".into(),
                 Arc::new(crate::providers::custom::CustomProvider::new_anthropic()),
             ),
@@ -246,6 +250,7 @@ impl Registry {
                 "opencode-zen",
                 "copilot",
                 "anthropic",
+                "claude",
             ]
             .contains(&name.as_str())
                 && handler
@@ -659,6 +664,8 @@ mod tests {
             ("opencode-zen/gemini-4-argon", "opencode-zen"),
             ("opencode-zen/claude-sonnet-5-5", "opencode-zen"),
             ("opencode-zen/big-pickle", "opencode-zen"),
+            ("claude/claude-sonnet-5-5", "claude"),
+            ("claude/claude-future-99", "claude"),
             ("anthropic/claude-sonnet-5-5", "anthropic"),
             ("anthropic/claude-opus-4-8", "anthropic"),
         ] {

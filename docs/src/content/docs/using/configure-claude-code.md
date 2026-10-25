@@ -30,12 +30,12 @@ cc-proxy keeps the order of your keys and the text of every value it doesn't cha
 
 ## Turning it off
 
-`cc-proxy stop` and `cc-proxy use claude` restore your original picker, or remove it if you had none. They don't delete the `env` keys. Claude Code adds `env` values from this file but never removes one it stops seeing, so a deleted key would leave an open window pointed at the proxy. cc-proxy writes values that point back at Anthropic instead:
+`cc-proxy stop` and `cc-proxy use direct` restore your original picker, or remove it if you had none. They don't delete the `env` keys. Claude Code adds `env` values from this file but never removes one it stops seeing, so a deleted key would leave an open window pointed at the proxy. cc-proxy writes values that point back at Anthropic instead:
 
 - `ANTHROPIC_BASE_URL` becomes `https://api.anthropic.com`, or your saved value.
 - `CLAUDE_CODE_OAUTH_TOKEN` becomes an empty string, or your saved value.
 
-Your Claude Code login is used again right away.
+Your original settings and Claude Code login are used again right away. This does not select or change a saved cc-proxy account. `cc-proxy use claude` is different: it sends requests through the proxy using a saved Claude subscription.
 
 If the proxy stops without a `stop` (a crash, a reboot, `kill`), the next `cc-proxy` command notices that nothing answers and does the same. Until then, new Claude Code windows can't connect.
 

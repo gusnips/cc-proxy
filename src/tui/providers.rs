@@ -36,6 +36,7 @@ struct AccountRow {
     current: bool,
     state: String,
     usage: Option<MonitorUsage>,
+    usage_error: Option<String>,
     waits: Vec<(Option<String>, u64)>,
 }
 
@@ -78,6 +79,8 @@ struct ProviderRow {
     id: String,
     state: AuthState,
     usage: Option<MonitorUsage>,
+    usage_error: Option<String>,
+    config_key_hash: Option<[u8; 32]>,
     accounts: Vec<AccountRow>,
     supports_accounts: bool,
     pinned: Option<String>,
@@ -85,6 +88,32 @@ struct ProviderRow {
 }
 
 impl ProviderRow {
+    fn retain_usage(&mut self, previous: &Self) {
+        if self.pinned != previous.pinned {
+            return;
+        }
+        // Provider-wide usage belongs to the current login, not the provider name.
+        let same_current = self.accounts.iter().any(|account| {
+            account.current
+                && previous
+                    .accounts
+                    .iter()
+                    .any(|old| old.current && old.id == account.id)
+        });
+        let same_config_key =
+            self.config_key_hash.is_some() && self.config_key_hash == previous.config_key_hash;
+        if self.state != AuthState::Missing && (same_current || same_config_key) {
+            self.usage_error =
+                retain_previous_usage(&mut self.usage, &previous.usage, &previous.usage_error);
+        }
+        for account in &mut self.accounts {
+            if let Some(old) = previous.accounts.iter().find(|old| old.id == account.id) {
+                account.usage_error =
+                    retain_previous_usage(&mut account.usage, &old.usage, &old.usage_error);
+            }
+        }
+    }
+
     fn first_reset(&self, now: u64) -> Option<(&AccountRow, u64)> {
         self.accounts
             .iter()
@@ -98,7 +127,7 @@ impl ProviderRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Entry {
     Rotate,
-    Claude,
+    Direct,
     Provider(String),
     Account(String, String),
 }
@@ -154,7 +183,12 @@ impl ProvidersPanel {
         if let Some(pending) = &self.pending {
             loop {
                 match pending.try_recv() {
-                    Ok(rows) => {
+                    Ok(mut rows) => {
+                        for row in &mut rows {
+                            if let Some(previous) = self.rows.iter().find(|old| old.id == row.id) {
+                                row.retain_usage(previous);
+                            }
+                        }
                         if self.rows.is_empty() {
                             self.selected = rows
                                 .iter()
@@ -199,33 +233,23 @@ impl ProvidersPanel {
     }
 
     fn entries(&self) -> Vec<Entry> {
-        let mut entries = vec![Entry::Rotate];
-        if self.route.target().is_none() {
-            entries.push(Entry::Claude);
-        }
+        let mut entries = vec![Entry::Direct];
         let mut rows: Vec<_> = self.rows.iter().collect();
         rows.sort_by_cached_key(|row| {
-            let role = if self.route.target() == Some(row.id.as_str()) {
+            let role = if row.id == "claude" {
                 (0, 0)
+            } else if self.route.target() == Some(row.id.as_str()) {
+                (1, 0)
             } else if let Some(at) = self.route.fallback.iter().position(|id| id == &row.id) {
-                (1, at)
+                (2, at)
             } else if row.state != AuthState::Missing {
-                (2, 0)
-            } else {
                 (3, 0)
+            } else {
+                (4, 0)
             };
             (role, ui::provider_name(&row.id).to_lowercase(), &row.id)
         });
-        let mut native_added = self.route.target().is_none();
         for row in rows {
-            if !native_added
-                && row.state == AuthState::Missing
-                && self.route.target() != Some(row.id.as_str())
-                && !self.route.fallback.contains(&row.id)
-            {
-                entries.push(Entry::Claude);
-                native_added = true;
-            }
             entries.push(Entry::Provider(row.id.clone()));
             entries.extend(
                 row.accounts
@@ -233,9 +257,7 @@ impl ProvidersPanel {
                     .map(|account| Entry::Account(row.id.clone(), account.id.clone())),
             );
         }
-        if !native_added {
-            entries.push(Entry::Claude);
-        }
+        entries.push(Entry::Rotate);
         entries
     }
 
@@ -278,7 +300,7 @@ impl ProvidersPanel {
             KeyCode::PageUp | KeyCode::Char('u') | KeyCode::Char('[') => {
                 self.detail_scroll = self.detail_scroll.saturating_sub(3)
             }
-            KeyCode::Home if self.menu.is_none() => self.selected = Entry::Rotate,
+            KeyCode::Home if self.menu.is_none() => self.selected = Entry::Direct,
             KeyCode::End if self.menu.is_none() => {
                 self.selected = self.entries().last().unwrap().clone()
             }
@@ -334,10 +356,10 @@ impl ProvidersPanel {
                     Action::Rotate(!self.auto_rotate),
                 )];
             }
-            Entry::Claude => {
+            Entry::Direct => {
                 return vec![(
-                    "Use my Claude subscription (no proxy)".into(),
-                    Action::UseProvider("claude".into()),
+                    "Disable proxy routing".into(),
+                    Action::UseProvider("direct".into()),
                 )];
             }
             _ => {}
@@ -423,9 +445,13 @@ impl ProvidersPanel {
     pub fn preview_action(&mut self, action: &Action) {
         match action {
             Action::UseProvider(id) => {
-                self.route.on = id != "claude";
-                self.route.provider = Some(id.clone());
-                self.route.fallback.retain(|name| name != id);
+                if id == "direct" {
+                    self.route.on = false;
+                } else {
+                    self.route.on = true;
+                    self.route.provider = Some(id.clone());
+                    self.route.fallback.retain(|name| name != id);
+                }
             }
             Action::UseAccount { provider, id } => {
                 if let Some(row) = self.rows.iter_mut().find(|row| &row.id == provider) {
@@ -456,8 +482,8 @@ impl ProvidersPanel {
                 "Auto-rotate  {}",
                 if self.auto_rotate { "on" } else { "off" }
             ),
-            Entry::Claude => format!(
-                "Claude subscription{}",
+            Entry::Direct => format!(
+                "Disable proxy routing{}",
                 if self.route.target().is_none() {
                     " [in use]"
                 } else {
@@ -497,7 +523,12 @@ impl ProvidersPanel {
                     ""
                 };
                 let summary = account.usage_summary(now);
-                let status = format!("{current}{first}");
+                let stale = if account.usage_error.is_some() {
+                    " [stale]"
+                } else {
+                    ""
+                };
+                let status = format!("{current}{first}{stale}");
                 let name_width =
                     usize::from(width).saturating_sub(4 + summary.width() + status.len());
                 if name_width < 8 {
@@ -558,10 +589,9 @@ impl ProvidersPanel {
                     "Off by default. Changes apply to new requests without a restart.".into(),
                 );
             }
-            Entry::Claude => {
+            Entry::Direct => {
                 text.push(
-                    "Send Claude Code straight to your Claude subscription, without the proxy."
-                        .into(),
+                    "Restore Claude Code's original settings and login, without the proxy.".into(),
                 );
                 text.push(
                     "The proxy keeps running. You can switch back to a provider here.".into(),
@@ -630,6 +660,15 @@ impl ProvidersPanel {
                             text.push("Use provider sends Claude Code here. Open windows follow within a few seconds.".into());
                         }
                     }
+                    let usage_error = self
+                        .selected_account()
+                        .map_or(&row.usage_error, |account| &account.usage_error);
+                    if let Some(error) = usage_error {
+                        text.push(Line::styled(
+                            format!("Refresh failed. Last values may be out of date. {error}"),
+                            Style::default().fg(YELLOW),
+                        ));
+                    }
                     if self.auto_rotate
                         && row.pinned.is_none()
                         && let Some((account, until)) = row.first_reset(crate::rotation::now_ms())
@@ -686,7 +725,7 @@ impl ProvidersPanel {
             .route
             .target()
             .map(ui::provider_name)
-            .unwrap_or("Claude subscription (no proxy)");
+            .unwrap_or("Claude Code login (no proxy)");
         let fallback = if self.route.fallback.is_empty() {
             "none".into()
         } else {
@@ -744,7 +783,14 @@ impl ProvidersPanel {
             .select(entries.iter().position(|entry| entry == &self.selected));
         frame.render_stateful_widget(
             List::new(items)
-                .block(panel("Providers and accounts", self.menu.is_none()))
+                .block(panel(
+                    if self.pending.is_some() {
+                        "Providers and accounts · refreshing"
+                    } else {
+                        "Providers and accounts"
+                    },
+                    self.menu.is_none(),
+                ))
                 .highlight_symbol("❯ ")
                 .style(Style::default().fg(DIM_WHITE))
                 .highlight_style(
@@ -807,11 +853,6 @@ impl ProvidersPanel {
                         Style::default().fg(TEAL),
                     ),
                 );
-            } else if self.pending.is_some() {
-                lines.push(Line::styled(
-                    "Refreshing usage...",
-                    Style::default().fg(TEAL),
-                ));
             }
             let paragraph = Paragraph::new(lines)
                 .style(Style::default().fg(DIM_WHITE).bg(BG))
@@ -824,6 +865,27 @@ impl ProvidersPanel {
             );
             frame.render_widget(paragraph.scroll((self.detail_scroll, 0)), inner);
         }
+    }
+}
+
+fn retain_previous_usage(
+    next: &mut Option<MonitorUsage>,
+    previous: &Option<MonitorUsage>,
+    previous_error: &Option<String>,
+) -> Option<String> {
+    match (next.as_ref(), previous) {
+        (None, _) => {
+            *next = previous.clone();
+            previous_error.clone()
+        }
+        (Some(MonitorUsage::Unavailable(error)), Some(MonitorUsage::Reported(windows)))
+            if !windows.is_empty() =>
+        {
+            let error = error.clone();
+            *next = previous.clone();
+            Some(error)
+        }
+        _ => None,
     }
 }
 
@@ -843,7 +905,7 @@ fn account_rows(
             Ok(waits) => waits,
             Err(error) => { state.push_str(&format!(". Can't read the wait timer: {error:#}")); Vec::new() }
         };
-        Ok(AccountRow { current: current.as_ref() == Some(&account.id), waits, id: account.id, name: account.name, state, usage: None })
+        Ok(AccountRow { current: current.as_ref() == Some(&account.id), waits, id: account.id, name: account.name, state, usage: None, usage_error: None })
     }).collect()
 }
 
@@ -858,6 +920,8 @@ fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
                 state: cli.auth_state(),
                 id: id.into(),
                 usage: None,
+                usage_error: None,
+                config_key_hash: None,
                 accounts: Vec::new(),
                 supports_accounts: cli.accounts().is_some(),
                 pinned: cli
@@ -875,6 +939,11 @@ fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
                         ))
                     }
                 }
+            }
+            if id == "opencode" && !row.accounts.iter().any(|account| account.current) {
+                use sha2::{Digest, Sha256};
+                row.config_key_hash =
+                    config::opencode_api_key().map(|key| Sha256::digest(key.as_bytes()).into());
             }
             Some(row)
         })
@@ -899,7 +968,7 @@ fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String
                 match row.id.as_str() {
                     "opencode" if account.current => row.usage.clone().unwrap_or_else(|| MonitorUsage::Unavailable("Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into())),
                     "opencode" => MonitorUsage::NotReported("OpenCode Go reports usage for the current account only."),
-                    "codex" | "kimi" => MonitorUsage::Unavailable(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id)),
+                    "claude" | "codex" | "kimi" => MonitorUsage::Unavailable(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id)),
                     _ => MonitorUsage::NotReported("This provider does not report usage. Confirmed wait timers still appear here."),
                 }
             });
@@ -929,6 +998,8 @@ fn demo_rows() -> Vec<ProviderRow> {
                 expires_ms: None,
             },
             usage: None,
+            usage_error: None,
+            config_key_hash: None,
             error: None,
             supports_accounts: true,
             pinned: None,
@@ -943,6 +1014,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                         remaining_percent: 0.0,
                         resets_at_ms: Some(jiff::Timestamp::now().as_millisecond() + 3_600_000),
                     }])),
+                    usage_error: None,
                     waits: vec![(None, crate::rotation::now_ms() + 3_600_000)],
                 },
                 AccountRow {
@@ -964,6 +1036,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                             ),
                         },
                     ])),
+                    usage_error: None,
                     waits: Vec::new(),
                 },
             ],
@@ -975,6 +1048,8 @@ fn demo_rows() -> Vec<ProviderRow> {
                 expires_ms: None,
             },
             usage: None,
+            usage_error: None,
+            config_key_hash: None,
             error: None,
             supports_accounts: true,
             pinned: None,
@@ -988,6 +1063,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                     remaining_percent: 72.0,
                     resets_at_ms: Some(jiff::Timestamp::now().as_millisecond() + 10_800_000),
                 }])),
+                usage_error: None,
                 waits: Vec::new(),
             }],
         },
@@ -995,6 +1071,8 @@ fn demo_rows() -> Vec<ProviderRow> {
             id: "opencode-zen".into(),
             state: AuthState::Missing,
             usage: None,
+            usage_error: None,
+            config_key_hash: None,
             accounts: Vec::new(),
             supports_accounts: true,
             pinned: None,
@@ -1022,6 +1100,258 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn pending_refresh(panel: &mut ProvidersPanel) -> mpsc::Sender<Vec<ProviderRow>> {
+        let (send, receive) = mpsc::channel();
+        panel.mode = Mode::Local;
+        panel.pending = Some(receive);
+        send
+    }
+
+    fn metadata(mut rows: Vec<ProviderRow>) -> Vec<ProviderRow> {
+        for row in &mut rows {
+            row.usage = None;
+            row.usage_error = None;
+            for account in &mut row.accounts {
+                account.usage = None;
+                account.usage_error = None;
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn refresh_keeps_quota_and_reset_times_in_rows_and_details() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        let previous = panel.rows[0].accounts[1].usage.clone();
+        let send = pending_refresh(&mut panel);
+        panel.refresh();
+        send.send(metadata(demo_rows())).unwrap();
+        panel.refresh();
+        assert_eq!(panel.rows[0].accounts[1].usage, previous);
+        for (width, height) in [(160, 30), (80, 24), (40, 24)] {
+            let text = render(&mut panel, width, height);
+            for expected in ["refreshing", "58%", "88%", "5h 58% left", "resets in 2h"] {
+                assert!(text.contains(expected), "missing {expected}: {text}");
+            }
+            assert!(!text.to_ascii_lowercase().contains("checking"), "{text}");
+        }
+    }
+
+    #[test]
+    fn successful_refresh_replaces_cached_values_and_clears_stale_feedback() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        panel.rows[0].accounts[1].usage_error = Some("Press r to retry.".into());
+        let send = pending_refresh(&mut panel);
+        let mut rows = demo_rows();
+        let next = Some(MonitorUsage::Reported(vec![UsageWindow {
+            label: "5h",
+            remaining_percent: 17.0,
+            resets_at_ms: Some(jiff::Timestamp::now().as_millisecond() + 300_000),
+        }]));
+        rows[0].accounts[1].usage = next.clone();
+        send.send(rows).unwrap();
+        drop(send);
+        panel.refresh();
+        assert_eq!(panel.rows[0].accounts[1].usage, next);
+        assert!(panel.rows[0].accounts[1].usage_error.is_none());
+        assert!(panel.pending.is_none());
+        let text = render(&mut panel, 160, 30);
+        for expected in ["5h 17%", "5h 17% left", "resets in 5m"] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        for old in ["58%", "88%", "[stale]", "refreshing"] {
+            assert!(!text.contains(old), "{text}");
+        }
+    }
+
+    #[test]
+    fn failed_refresh_keeps_last_values_and_marks_them_stale_with_a_retry() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        let previous = panel.rows[0].accounts[1].usage.clone();
+        let send = pending_refresh(&mut panel);
+        let mut rows = metadata(demo_rows());
+        apply_account_usage(&mut rows, &HashMap::new());
+        send.send(rows).unwrap();
+        drop(send);
+        panel.refresh();
+        assert_eq!(panel.rows[0].accounts[1].usage, previous);
+        assert!(panel.rows[0].accounts[1].usage_error.is_some());
+        let text = render(&mut panel, 160, 30);
+        for expected in [
+            "58%",
+            "88%",
+            "[stale]",
+            "resets in 2h",
+            "Refresh failed",
+            "Press r to retry",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        assert!(!text.to_ascii_lowercase().contains("checking"), "{text}");
+        assert!(!text.contains("refreshing"), "{text}");
+
+        let send = pending_refresh(&mut panel);
+        panel.press(KeyCode::Char('r'));
+        send.send(metadata(demo_rows())).unwrap();
+        panel.refresh();
+        assert_eq!(panel.rows[0].accounts[1].usage, previous);
+        let text = render(&mut panel, 160, 30);
+        for expected in ["refreshing", "[stale]", "58%", "Press r to retry"] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+    }
+
+    #[test]
+    fn first_load_checks_until_a_result_and_never_turns_failure_into_zero() {
+        let mut panel = ProvidersPanel::new(Mode::Local);
+        let send = pending_refresh(&mut panel);
+        send.send(metadata(demo_rows())).unwrap();
+        panel.refresh();
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        let text = render(&mut panel, 160, 30);
+        assert!(text.contains("checking..."), "{text}");
+        assert!(text.contains("Checking usage..."), "{text}");
+        assert!(!text.contains('%'), "{text}");
+
+        let mut rows = metadata(demo_rows());
+        apply_account_usage(&mut rows, &HashMap::new());
+        send.send(rows).unwrap();
+        drop(send);
+        panel.refresh();
+        let text = render(&mut panel, 160, 30);
+        for expected in ["unavailable", "Press r to retry"] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        for absent in ["checking...", "Checking usage...", "[stale]", "%"] {
+            assert!(!text.contains(absent), "{text}");
+        }
+        assert!(panel.rows[0].accounts[1].usage_error.is_none());
+
+        let send = pending_refresh(&mut panel);
+        send.send(metadata(demo_rows())).unwrap();
+        panel.refresh();
+        assert!(matches!(
+            panel.rows[0].accounts[1].usage,
+            Some(MonitorUsage::Unavailable(_))
+        ));
+        send.send(demo_rows()).unwrap();
+        drop(send);
+        panel.refresh();
+        let text = render(&mut panel, 160, 30);
+        assert!(text.contains("5h 58% left"), "{text}");
+        assert!(!text.contains("unavailable"), "{text}");
+    }
+
+    #[test]
+    fn refresh_caches_follow_provider_and_account_ids_not_names_or_order() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        let previous = panel.rows[0].accounts[1].usage.clone();
+        let other_account = panel.rows[0].accounts[0].usage.clone();
+        let send = pending_refresh(&mut panel);
+        let mut rows = metadata(demo_rows());
+        rows[0].accounts.swap(0, 1);
+        rows[0].accounts[0].name = "renamed".into();
+        send.send(rows.clone()).unwrap();
+        panel.refresh();
+        assert_eq!(panel.rows[0].accounts[0].usage, previous);
+        assert_eq!(panel.rows[0].accounts[0].name, "renamed");
+
+        // A new login gets a new UUID even when its saved name is unchanged.
+        rows[0].accounts[0].id = "replacement".into();
+        rows[0].accounts[1].name = "work".into();
+        let mut other_provider = rows[0].clone();
+        other_provider.id = "another-provider".into();
+        rows.push(other_provider);
+        send.send(rows).unwrap();
+        drop(send);
+        panel.refresh();
+        assert!(panel.rows[0].accounts[0].usage.is_none());
+        assert_eq!(panel.rows[0].accounts[1].usage, other_account);
+        assert!(
+            panel.rows[3]
+                .accounts
+                .iter()
+                .all(|account| account.usage.is_none())
+        );
+        assert_eq!(panel.selected, Entry::Rotate);
+    }
+
+    #[test]
+    fn provider_headline_cache_stays_with_its_current_account() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.rows[0].id = "opencode".into();
+        panel.rows[0].usage = panel.rows[0].accounts[1].usage.clone();
+        panel.selected = Entry::Provider("opencode".into());
+        let previous = panel.rows[0].usage.clone();
+        let send = pending_refresh(&mut panel);
+        let mut rows = metadata(panel.rows.clone());
+        send.send(rows.clone()).unwrap();
+        panel.refresh();
+        assert_eq!(panel.rows[0].usage, previous);
+        rows[0].usage = Some(MonitorUsage::Unavailable("Press r to retry.".into()));
+        send.send(rows.clone()).unwrap();
+        panel.refresh();
+        assert_eq!(panel.rows[0].usage, previous);
+        let text = render(&mut panel, 160, 30);
+        for expected in ["5h 58% left", "Refresh failed", "Press r to retry"] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+
+        rows[0].usage = None;
+        rows[0].accounts[0].current = true;
+        rows[0].accounts[1].current = false;
+        send.send(rows.clone()).unwrap();
+        panel.refresh();
+        assert!(panel.rows[0].usage.is_none());
+        assert!(panel.rows[0].usage_error.is_none());
+
+        rows[0].accounts[0].id = "replacement".into();
+        rows[0].accounts.remove(1);
+        send.send(rows).unwrap();
+        drop(send);
+        panel.refresh();
+        assert!(panel.rows[0].usage.is_none());
+        assert!(panel.rows[0].accounts[0].usage.is_none());
+
+        let mut old = demo_rows().remove(0);
+        old.usage = previous;
+        let mut changed = metadata(vec![old.clone()]).remove(0);
+        changed.pinned = Some("OTHER_KEY".into());
+        changed.retain_usage(&old);
+        assert!(changed.usage.is_none());
+        assert!(
+            changed
+                .accounts
+                .iter()
+                .all(|account| account.usage.is_none())
+        );
+
+        // Without an account UUID, matching provider names do not prove identity.
+        old.accounts.clear();
+        let mut unidentified = metadata(vec![old.clone()]).remove(0);
+        unidentified.retain_usage(&old);
+        assert!(unidentified.usage.is_none());
+
+        // Config-only usage can be reused only while the key digest matches.
+        old.config_key_hash = Some([1; 32]);
+        let mut configured = metadata(vec![old.clone()]).remove(0);
+        configured.retain_usage(&old);
+        assert_eq!(configured.usage, old.usage);
+        configured.usage = Some(MonitorUsage::Unavailable("Press r to retry.".into()));
+        configured.retain_usage(&old);
+        assert_eq!(configured.usage, old.usage);
+        assert!(configured.usage_error.is_some());
+        let mut replaced = metadata(vec![old.clone()]).remove(0);
+        replaced.config_key_hash = Some([2; 32]);
+        replaced.retain_usage(&old);
+        assert!(replaced.usage.is_none());
+        assert!(replaced.usage_error.is_none());
     }
 
     #[test]
@@ -1071,6 +1401,8 @@ mod tests {
         for _ in 0..12 {
             panel.press(KeyCode::Down);
         }
+        assert_eq!(panel.selected, Entry::Rotate);
+        panel.press(KeyCode::Up);
         assert_eq!(panel.selected, Entry::Provider("opencode-zen".into()));
         assert!(render(&mut panel, 40, 14).contains("OpenCode Zen"));
         assert!(
@@ -1319,7 +1651,7 @@ mod tests {
                 .into_iter()
                 .filter_map(|entry| match entry {
                     Entry::Provider(id) => Some(id),
-                    Entry::Claude => Some("claude".into()),
+                    Entry::Direct => Some("direct".into()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -1327,11 +1659,11 @@ mod tests {
         assert_eq!(
             providers(&panel),
             [
+                "direct",
                 "codex",
                 "kimi",
                 "anthropic",
                 "gemini",
-                "claude",
                 "cursor",
                 "grok",
                 "opencode-zen"
@@ -1342,18 +1674,46 @@ mod tests {
         assert_eq!(
             providers(&panel),
             [
+                "direct",
                 "gemini",
                 "kimi",
                 "codex",
                 "anthropic",
-                "claude",
                 "cursor",
                 "grok",
                 "opencode-zen"
             ]
         );
         panel.route.on = false;
-        assert_eq!(providers(&panel)[0], "claude");
+        assert_eq!(providers(&panel)[0], "direct");
+    }
+
+    #[test]
+    fn claude_subscription_is_pinned_after_direct_and_keeps_its_own_accounts() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        let mut claude = panel.rows[0].clone();
+        claude.id = "claude".into();
+        panel.rows.push(claude);
+        assert_eq!(
+            &panel.entries()[..2],
+            &[Entry::Direct, Entry::Provider("claude".into())]
+        );
+        panel.selected = Entry::Account("claude".into(), "demo-work".into());
+        assert!(render(&mut panel, 160, 35).contains("5h 58% left"));
+        panel.preview_action(&Action::UseProvider("claude".into()));
+        assert_eq!(panel.route.target(), Some("claude"));
+        panel.selected = Entry::Direct;
+        assert_eq!(panel.actions()[0].1, Action::UseProvider("direct".into()));
+        panel.preview_action(&Action::UseProvider("direct".into()));
+        assert!(panel.route.target().is_none());
+        assert_eq!(panel.route.provider.as_deref(), Some("claude"));
+        let text = render(&mut panel, 160, 35);
+        assert!(text.contains("Disable proxy routing [in use]"), "{text}");
+        assert!(text.contains("original settings and login"), "{text}");
+        panel.press(KeyCode::Home);
+        assert_eq!(panel.selected, Entry::Direct);
+        panel.press(KeyCode::End);
+        assert_eq!(panel.selected, Entry::Rotate);
     }
 
     #[test]

@@ -85,7 +85,7 @@ cc-proxy models list
 Sign out with `cc-proxy logout codex` (or `cc-proxy auth logout codex`).
 Both forms take the same options.
 
-`cc-proxy usage` shows how much of your Codex, Kimi and OpenCode Go plans
+`cc-proxy usage` shows how much of your Claude, Codex, Kimi and OpenCode Go plans
 you have used, and when each limit resets.
 
 Tune the proxy without editing files by hand, and keep it current:
@@ -109,8 +109,9 @@ Switch whenever you want:
 
 ```sh
 cc-proxy use kimi     # send Claude Code to another provider
-cc-proxy use claude   # back to your Claude subscription; the proxy keeps running
-cc-proxy stop         # routing off and the proxy stops
+cc-proxy use claude   # use a saved Claude subscription through the proxy
+cc-proxy use direct   # restore Claude Code's login; leave the proxy running
+cc-proxy stop         # restore Claude Code's login and stop the proxy
 ```
 
 Routing never comes back by itself. It starts again only when you run
@@ -183,7 +184,7 @@ saved login that created it, including after a restart. When a conversation
 carries reasoning from another saved login, cc-proxy drops only that reasoning
 and continues with the text and tool history. See [rotation limits](docs/src/content/docs/reference/configuration.md#saved-accounts-and-auto-rotate).
 
-Run `cc-proxy usage codex` or `cc-proxy usage kimi` to see how much is left on
+Run `cc-proxy usage claude`, `cc-proxy usage codex` or `cc-proxy usage kimi` to see how much is left on
 each saved account and when each window resets. The monitor's Accounts tab
 shows the same usage and wait timers. Select a row and press Enter to switch
 accounts, add a login, change the fallback order or turn auto-rotate on or off.

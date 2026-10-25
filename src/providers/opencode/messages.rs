@@ -51,9 +51,25 @@ where
     S: futures_util::Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
     E: Send + 'static,
 {
+    stream_body_with_transform(upstream, provider, monitor, req_id, traffic, None)
+}
+
+pub fn stream_body_with_transform<S, E>(
+    upstream: S,
+    provider: &'static str,
+    monitor: Option<MonitorHandle>,
+    req_id: String,
+    traffic: Option<Arc<TrafficCapture>>,
+    transform: Option<fn(&mut serde_json::Value)>,
+) -> Body
+where
+    S: futures_util::Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
+    E: Send + 'static,
+{
     let state = MessagesStreamState {
         upstream,
         provider,
+        transform,
         decoder: SseDecoder::default(),
         terminal: false,
         error_sent: false,
@@ -76,6 +92,7 @@ where
 struct MessagesStreamState<S> {
     upstream: S,
     provider: &'static str,
+    transform: Option<fn(&mut serde_json::Value)>,
     decoder: SseDecoder,
     terminal: bool,
     error_sent: bool,
@@ -151,7 +168,7 @@ where
                 output.extend(self.fail_at("protocol", "event_after_message_stop"));
                 return Some(output);
             }
-            let value: serde_json::Value = match serde_json::from_str(&event.data) {
+            let mut value: serde_json::Value = match serde_json::from_str(&event.data) {
                 Ok(value) => value,
                 Err(_) => {
                     output.extend(self.fail_at("json", "malformed_event"));
@@ -160,6 +177,11 @@ where
             };
             if let Some(capture) = self.stream_capture.as_mut() {
                 capture.upstream_event(event.event.as_deref(), &value);
+            }
+            if let Some(transform) = self.transform {
+                transform(&mut value);
+            }
+            if let Some(capture) = self.stream_capture.as_mut() {
                 capture
                     .downstream_event(event.event.as_deref().unwrap_or("message"), value.clone());
             }
@@ -190,7 +212,11 @@ where
                 ));
                 return Some(output);
             }
-            output.extend(encode_sse_event(event.event.as_deref(), &event.data));
+            let data = self.transform.map(|_| value.to_string());
+            output.extend(encode_sse_event(
+                event.event.as_deref(),
+                data.as_deref().unwrap_or(&event.data),
+            ));
             if event.event.as_deref() == Some("message_stop") || kind == Some("message_stop") {
                 terminal = true;
             }
@@ -336,6 +362,7 @@ mod tests {
         MessagesStreamState {
             upstream: futures_util::stream::iter(reads.map(|read| Ok(Bytes::from_static(read)))),
             provider: "OpenCode Go",
+            transform: None,
             decoder: SseDecoder::default(),
             terminal: false,
             error_sent: false,
@@ -346,6 +373,25 @@ mod tests {
             stream_capture: None,
             traffic: None,
         }
+    }
+
+    #[tokio::test]
+    async fn oauth_transform_runs_after_a_split_frame_is_complete() {
+        let mut state = relay([
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"custom_",
+            b"Read\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+        state.transform = Some(|value| {
+            if let Some(block) = value.get_mut("content_block") {
+                block["name"] = "Read".into();
+            }
+        });
+        let bytes = state.next_output().await.unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("\"name\":\"Read\""), "{text}");
+        assert!(!text.contains("custom_"));
+        assert!(text.contains("message_stop"));
+        assert!(state.next_output().await.is_none());
     }
 
     #[tokio::test]

@@ -131,15 +131,15 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
             monitor = Monitor(env, "monitor")
             try:
                 monitor.text("work")
-                # Home opens rotation. Enter first chooses an action, then runs it.
-                monitor.keys(b"\x1b[H\r\r")
+                # End opens rotation, the last row. Enter first chooses an action, then runs it.
+                monitor.keys(b"\x1b[F\r\r")
                 monitor.wait(lambda: read().get("auth", {}).get("autoRotate") is True, "Rotation did not save")
-                # Primary provider comes first, followed by its saved accounts.
-                monitor.keys(b"\x1b[H\x1b[B\x1b[B\x1b[B\r\r")
+                # Direct and Claude subscription come first, then the primary provider and its saved accounts.
+                monitor.keys(b"\x1b[H" + b"\x1b[B" * 4 + b"\r\r")
                 monitor.wait(lambda: json.loads(index.read_text())["current"] == "work", "Account did not switch")
                 assert read()["route"]["provider"] == "ztest"
                 # The other connected provider follows the primary's accounts.
-                monitor.keys(b"\x1b[H\x1b[B\x1b[B\x1b[B\x1b[B\r\x1b[B\r")
+                monitor.keys(b"\x1b[H" + b"\x1b[B" * 5 + b"\r\x1b[B\r")
                 monitor.wait(lambda: read()["route"]["fallback"] == ["ytest"], "Fallback did not save")
                 # Choose that provider. The model choices and login already exist.
                 monitor.keys(b"\r\r")
@@ -150,7 +150,7 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 assert settings["env"]["ANTHROPIC_BASE_URL"].rstrip("/") == url
                 # A cancelled action must not save anything or exit the monitor.
                 before = file.read_bytes(), index.read_bytes()
-                monitor.keys(b"\x1b[H\r")
+                monitor.keys(b"\x1b[F\r")
                 monitor.text("Choose an action")
                 monitor.keys(b"\x1b")
                 monitor.text("Details")
@@ -158,7 +158,7 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.text("Recent requests")
                 assert (file.read_bytes(), index.read_bytes()) == before
                 # Reuse hidden key entry, then return to the same action on failure.
-                monitor.keys(b"1\x1b[H\x1b[B\x1b[B\x1b[B\x1b[B\r\x1b[B\x1b[B\x1b[B\r")
+                monitor.keys(b"1\x1b[H" + b"\x1b[B" * 5 + b"\r\x1b[B\x1b[B\x1b[B\r")
                 monitor.text("API key:")
                 monitor.keys(b"\r")
                 monitor.text("Couldn't save the change")
@@ -184,7 +184,7 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
             demo = Monitor(env, "demo", width=40, height=16)
             try:
                 demo.text("Providers and accounts")
-                demo.keys(b"\x1b[H\r\r")
+                demo.keys(b"\x1b[F\r\r")
                 demo.text("Demo only")
                 demo.keys(b"2")
                 demo.text("Recent requests")

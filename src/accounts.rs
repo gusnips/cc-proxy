@@ -37,6 +37,10 @@ pub trait AccountSupport: Send + Sync {
     fn state(&self, login: &Value) -> AuthState;
     /// Where the provider kept its one login before accounts existed.
     fn single_login(&self) -> Box<dyn AuthStorage<Value>>;
+    /// Copy an existing local login without taking ownership of its source.
+    fn prepare(&self, _accounts: &Accounts) -> Result<()> {
+        Ok(())
+    }
     /// A credential override pins all requests to one login and disables rotation.
     fn pinned_credentials(&self) -> Option<&'static str> {
         None
@@ -117,6 +121,7 @@ impl Accounts {
         accounts.migrate(support.single_login().as_ref(), |login| {
             support.identity(login)
         })?;
+        support.prepare(&accounts)?;
         Ok(accounts)
     }
 
@@ -143,6 +148,25 @@ impl Accounts {
 
     fn index_path(&self) -> PathBuf {
         self.dir.join("accounts.json")
+    }
+
+    pub(crate) fn has_index_file(&self) -> bool {
+        self.index_path().exists()
+    }
+
+    /// Copy a native login only before the first account list is saved.
+    pub(crate) fn import_once(
+        &self,
+        login: &Value,
+        identity: Option<String>,
+        email: Option<&str>,
+    ) -> Result<()> {
+        self.locked(|| {
+            if self.has_index_file() {
+                return Ok(());
+            }
+            self.save_unlocked(&self.next_name(email)?, login, identity)
+        })
     }
 
     /// Where an account's login is kept.

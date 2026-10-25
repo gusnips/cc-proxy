@@ -41,8 +41,11 @@ put details below the list.
   A provider must confirm a limit and a reset time before the proxy switches.
   If every saved account is spent, it tries the fallback providers in order.
   Rotation applies to Messages requests before output starts, not every API.
-- Claude subscription sends Claude Code straight to your own Claude plan.
-  The proxy keeps running, so you can switch back here.
+- Disable proxy routing is the first row. It sends Claude Code back to its
+  original settings and login. The proxy keeps running, so you can switch back
+  here. It does not pick a saved account.
+- Claude subscription is the second row. It is a normal provider with its own
+  saved accounts, usage and rotation, and requests go through the proxy.
 
 Changes say what was saved and apply without a restart. A failed action stays
 open with its cause and a retry. If the proxy connection drops, changes pause
@@ -50,7 +53,7 @@ until it reconnects.
 
 ### Usage and wait timers
 
-Select a saved account to see its usage. Codex and Kimi show how much is left in
+Select a saved account to see its usage. Claude, Codex and Kimi show how much is left in
 each window and when it resets. Confirmed limits show how long the account must
 wait, including model-specific limits. Providers that do not report usage still
 show confirmed wait timers. Remaining percentages are bright green from 80%,

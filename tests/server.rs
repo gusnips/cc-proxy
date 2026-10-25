@@ -1635,7 +1635,7 @@ async fn claude_names_follow_the_route_with_no_restart() {
         (StatusCode::OK, "grok".to_string())
     );
 
-    // `cc-proxy stop` and `cc-proxy use claude` write this.
+    // `cc-proxy stop` and `cc-proxy use direct` write this.
     routed.set(false, "grok");
     let (status, message) = responses_answer(&app, "sonnet").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
