@@ -83,8 +83,9 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Open accounts, rotation controls and live activity. If the proxy is off, press s to start it
-    Monitor {
+    /// Open accounts, settings and live activity. If the proxy is off, press s to start it
+    #[command(visible_alias = "monitor")]
+    Open {
         #[arg(long)]
         url: Option<reqwest::Url>,
     },
@@ -300,7 +301,7 @@ fn run() -> Result<()> {
             let registry = Registry::new();
             tui::run_mock_monitor(config::port(), &registry)
         }
-        Commands::Monitor { url } => {
+        Commands::Open { url } => {
             let from_flag = url.is_some();
             let url = url.unwrap_or_else(|| {
                 format!("http://127.0.0.1:{}", config::port())
@@ -565,7 +566,7 @@ fn heals_first(command: &Commands) -> bool {
             }
             | Commands::Version
             | Commands::Demo
-            | Commands::Monitor { url: Some(_) }
+            | Commands::Open { url: Some(_) }
             | Commands::Claude { .. }
     )
 }
@@ -693,7 +694,7 @@ fn start_daemon(target: Option<&str>, port: Option<u16>) -> Result<()> {
     lines.extend(route_lines(pick));
     lines.extend(route::version_note(proxy.port));
     lines.extend(hook_note);
-    lines.push("`cc-proxy monitor` shows traffic. `cc-proxy stop` switches routing off.".into());
+    lines.push("`cc-proxy open` shows traffic. `cc-proxy stop` switches routing off.".into());
     ui::print_card(Mood::Awake, &lines);
     tips::print("start");
     Ok(())
@@ -1339,10 +1340,21 @@ mod tests {
     }
 
     #[test]
-    fn explicit_monitor_connections_never_heal_local_routing() {
-        let cli = Cli::try_parse_from(["cc-proxy", "monitor", "--url", "http://127.0.0.1:19999"])
-            .unwrap();
+    fn explicit_open_connections_never_heal_local_routing() {
+        let cli =
+            Cli::try_parse_from(["cc-proxy", "open", "--url", "http://127.0.0.1:19999"]).unwrap();
         assert!(!heals_first(&cli.command.unwrap()));
+    }
+
+    #[test]
+    fn open_is_the_command_and_monitor_still_works_as_its_name() {
+        for name in ["open", "monitor"] {
+            let cli = Cli::try_parse_from(["cc-proxy", name]).unwrap();
+            assert!(
+                matches!(cli.command, Some(Commands::Open { url: None })),
+                "{name}"
+            );
+        }
     }
 
     #[test]

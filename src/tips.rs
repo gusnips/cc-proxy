@@ -10,8 +10,8 @@ use crate::ui;
 /// a test in `main.rs` parses them.
 pub const TIPS: &[(&str, &str)] = &[
     (
-        "monitor",
-        "`cc-proxy monitor` shows your accounts, how much quota each one has left and the requests running now.",
+        "open",
+        "`cc-proxy open` shows your accounts, how much quota each one has left and the requests running now.",
     ),
     (
         "usage",

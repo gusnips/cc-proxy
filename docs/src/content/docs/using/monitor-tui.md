@@ -6,8 +6,10 @@ description: Choose providers and accounts, check usage and change settings. Ins
 Open the monitor:
 
 ```sh
-cc-proxy monitor
+cc-proxy open
 ```
+
+`cc-proxy monitor` still works. It is another name for the same command.
 
 If the proxy is stopped, the monitor still opens. It says "Proxy off" and shows
 your saved accounts. Press `s` to start the proxy. It uses the provider you
@@ -130,12 +132,12 @@ returns. Columns adapt to the terminal width.
 ## A different port or computer
 
 ```sh
-cc-proxy monitor --url http://127.0.0.1:19999
+cc-proxy open --url http://127.0.0.1:19999
 ```
 
 An explicit `--url` connection is read-only and opens Activity. It does not need
 provider credentials, load this computer's accounts or change its settings.
-Manage accounts by running `cc-proxy monitor` on the computer running the proxy.
+Manage accounts by running `cc-proxy open` on the computer running the proxy.
 
 The monitor endpoint accepts only loopback connections. For another machine,
 forward the port through SSH, then point `--url` at the local end of the tunnel.
@@ -177,6 +179,6 @@ A Homebrew installation can run at login:
 brew services start cc-proxy
 ```
 
-Then open `cc-proxy monitor`. Service output lives in
+Then run `cc-proxy open`. Service output lives in
 `~/.local/state/cc-proxy/service.log` on macOS and Linux. Structured request logs
 are in `proxy.log` in the same folder.

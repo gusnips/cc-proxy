@@ -25,7 +25,7 @@ Read-only dashboard snapshot, available when monitor collection is enabled. The 
 
 The JSON envelope contains `version: 1` and a `snapshot` with the proxy start time, sessions, active requests and recent requests. It includes the monitor's display metadata, timing, token usage and computed throughput. It does not include credentials or request/response bodies. Process-local monotonic clocks remain in the service; snapshots contain elapsed durations instead.
 
-The `monitor` CLI polls this endpoint. There is no corresponding mutation or shutdown endpoint. Attaching or disconnecting a viewer does not change proxy lifetime or request accounting.
+`cc-proxy open` polls this endpoint. There is no corresponding mutation or shutdown endpoint. Attaching or disconnecting a viewer does not change proxy lifetime or request accounting.
 
 ## OpenCode Go account usage
 

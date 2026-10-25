@@ -66,7 +66,7 @@ cc-proxy status
 signed in to more than one provider, it asks which one Claude Code should
 use. If you aren't signed in to any, it asks which one to sign in to.
 
-Open `cc-proxy monitor` from any terminal. Accounts opens first: use the arrows
+Open `cc-proxy open` from any terminal. Accounts opens first: use the arrows
 and Enter to choose a provider or saved login. Press `2` for live activity.
 If the proxy is off, the monitor still opens: press `s` to start it. Closing the monitor leaves the proxy running. `cc-proxy restart` restarts it;
 `cc-proxy reload` asks it to read config changes.
