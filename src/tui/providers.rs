@@ -22,6 +22,10 @@ use crate::{config, rotation::Cooldowns, ui};
 
 const REFRESH_AFTER: Duration = Duration::from_secs(60);
 
+/// The menu line that asks before it deletes. Choosing it opens a second menu
+/// with one line, so removing a login is two deliberate presses of Enter.
+const REMOVE_ACCOUNT: &str = "Remove saved account...";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Mode {
     Local,
@@ -326,8 +330,33 @@ impl ProvidersPanel {
             .find(|account| &account.id == id)
     }
 
+    /// Replaces the actions with one line that does the deleting, and says what
+    /// it deletes. Escape keeps the account.
+    fn confirm_removal(&mut self, provider: String, id: String) {
+        let Some(name) = self.selected_account().map(|account| account.name.clone()) else {
+            return;
+        };
+        self.notice = Some((
+            format!(
+                "Delete {} account `{name}`? Its saved login is removed from this computer, and you will need to sign in again to add it back. Press Enter to delete it, or Esc to keep it.",
+                ui::provider_name(&provider)
+            ),
+            true,
+        ));
+        self.menu = Some(vec![(
+            format!("Delete `{name}` and its saved login"),
+            Action::RemoveAccount { provider, id },
+        )]);
+        self.menu_state.select(Some(0));
+    }
+
     pub fn close_menu(&mut self) -> bool {
-        self.menu.take().is_some()
+        // A question that was never answered must not stay on screen.
+        let was_open = self.menu.take().is_some();
+        if was_open {
+            self.notice = None;
+        }
+        was_open
     }
 
     pub fn menu_open(&self) -> bool {
@@ -354,9 +383,16 @@ impl ProvidersPanel {
             KeyCode::Char('r') => self.retry(),
             KeyCode::Enter => {
                 if let Some(menu) = &self.menu {
-                    return menu
-                        .get(self.menu_state.selected().unwrap_or(0))
-                        .map(|(_, action)| action.clone());
+                    let chosen = menu.get(self.menu_state.selected().unwrap_or(0)).cloned();
+                    return match chosen {
+                        Some((label, Action::RemoveAccount { provider, id }))
+                            if label == REMOVE_ACCOUNT =>
+                        {
+                            self.confirm_removal(provider, id);
+                            None
+                        }
+                        chosen => chosen.map(|(_, action)| action),
+                    };
                 }
                 self.menu = Some(self.actions());
                 self.menu_state.select(Some(0));
@@ -456,7 +492,7 @@ impl ProvidersPanel {
         ));
         if let Some(account) = account {
             actions.push((
-                "Remove saved account...".into(),
+                REMOVE_ACCOUNT.into(),
                 Action::RemoveAccount {
                     provider: row.id.clone(),
                     id: account.id.clone(),
@@ -499,6 +535,22 @@ impl ProvidersPanel {
         }
     }
 
+    /// Takes a removed account off the list at once, without waiting for the
+    /// next read, and hands its place as the saved choice to the first one left.
+    pub fn forget_account(&mut self, provider: &str, id: &str) {
+        if let Some(row) = self.rows.iter_mut().find(|row| row.id == provider) {
+            let was_current = row
+                .accounts
+                .iter()
+                .any(|account| account.id == id && account.current);
+            row.accounts.retain(|account| account.id != id);
+            if was_current && let Some(first) = row.accounts.first_mut() {
+                first.current = true;
+            }
+        }
+        self.selected = Entry::Provider(provider.to_string());
+    }
+
     pub fn preview_action(&mut self, action: &Action) {
         match action {
             Action::StartProxy => {}
@@ -518,19 +570,7 @@ impl ProvidersPanel {
                     }
                 }
             }
-            Action::RemoveAccount { provider, id } => {
-                if let Some(row) = self.rows.iter_mut().find(|row| &row.id == provider) {
-                    let was_current = row
-                        .accounts
-                        .iter()
-                        .any(|account| &account.id == id && account.current);
-                    row.accounts.retain(|account| &account.id != id);
-                    if was_current && let Some(first) = row.accounts.first_mut() {
-                        first.current = true;
-                    }
-                }
-                self.selected = Entry::Provider(provider.clone());
-            }
+            Action::RemoveAccount { provider, id } => self.forget_account(provider, id),
             Action::Fallback(ids) => self.route.fallback = ids.clone(),
             Action::SignIn { .. } => {
                 self.notice = Some((
@@ -559,15 +599,27 @@ impl ProvidersPanel {
             Entry::Provider(id) => {
                 let row = self.rows.iter().find(|row| &row.id == id).unwrap();
                 let role = if self.route.target() == Some(id.as_str()) {
-                    " [primary]".into()
+                    Span::styled(
+                        " [primary]",
+                        Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+                    )
                 } else if let Some(at) = self.route.fallback.iter().position(|name| name == id) {
-                    format!(" [fallback {}]", at + 1)
+                    Span::styled(
+                        format!(" [fallback {}]", at + 1),
+                        Style::default().fg(DIM_WHITE),
+                    )
                 } else if row.state == AuthState::Missing {
-                    "  not set up".into()
+                    Span::styled("  not set up", Style::default().fg(DIM_WHITE))
                 } else {
-                    String::new()
+                    Span::raw("")
                 };
-                format!("{}{role}", ui::provider_name(id))
+                return ListItem::new(Line::from(vec![
+                    Span::styled(
+                        ui::provider_name(id).to_string(),
+                        Style::default().fg(name_color),
+                    ),
+                    role,
+                ]));
             }
             Entry::Account(provider, id) => {
                 let row = self.rows.iter().find(|row| &row.id == provider).unwrap();
@@ -577,28 +629,22 @@ impl ProvidersPanel {
                     .find(|account| &account.id == id)
                     .unwrap();
                 let now = crate::rotation::now_ms();
-                let current = if account.current { " [current]" } else { "" };
-                let first = if self.auto_rotate
+                // The account serving requests now: the saved choice of the routed provider.
+                let serving = account.current && self.route.target() == Some(provider.as_str());
+                let first_reset = self.auto_rotate
                     && row.pinned.is_none()
                     && row
                         .first_reset(now)
-                        .is_some_and(|(first, _)| first.id == account.id)
-                {
-                    " [first reset]"
-                } else {
-                    ""
-                };
+                        .is_some_and(|(first, _)| first.id == account.id);
                 let summary = account.usage_summary(now);
-                let stale = if account.usage_error.is_some() {
-                    " [refresh failed]"
-                } else {
-                    ""
-                };
-                let status = format!("{current}{first}{stale}");
+                let tags = account_tags(account, serving, first_reset);
+                let tags_width: usize = tags.iter().map(Span::width).sum();
+                let marker = account_marker(account, serving);
+                let name_style = account_name_style(account, serving, entry == &self.selected);
                 let name_width =
-                    usize::from(width).saturating_sub(4 + summary.width() + status.len());
+                    usize::from(width).saturating_sub(4 + summary.width() + tags_width);
                 if name_width < 8 {
-                    let name_width = usize::from(width).saturating_sub(2 + status.len());
+                    let name_width = usize::from(width).saturating_sub(2 + tags_width);
                     let summaries = match &account.usage {
                         Some(MonitorUsage::Reported(windows))
                             if summary.width() + 4 > usize::from(width) =>
@@ -613,10 +659,12 @@ impl ProvidersPanel {
                         }
                         _ => vec![summary],
                     };
-                    let mut lines = vec![Line::styled(
-                        format!("  {}{status}", super::ellipsize(&account.name, name_width)),
-                        Style::default().fg(name_color),
-                    )];
+                    let mut title = vec![
+                        marker,
+                        Span::styled(super::ellipsize(&account.name, name_width), name_style),
+                    ];
+                    title.extend(tags);
+                    let mut lines = vec![Line::from(title)];
                     lines.extend(summaries.into_iter().map(|summary| {
                         Line::from(
                             std::iter::once(Span::raw("    "))
@@ -627,14 +675,12 @@ impl ProvidersPanel {
                     return ListItem::new(lines);
                 }
                 let mut spans = vec![
-                    Span::styled(
-                        format!("  {}", super::ellipsize(&account.name, name_width)),
-                        Style::default().fg(name_color),
-                    ),
+                    marker,
+                    Span::styled(super::ellipsize(&account.name, name_width), name_style),
                     Span::raw("  "),
                 ];
                 spans.extend(summary.spans);
-                spans.push(Span::styled(status, Style::default().fg(DIM_WHITE)));
+                spans.extend(tags);
                 return ListItem::new(Line::from(spans));
             }
         };
@@ -947,6 +993,53 @@ impl ProvidersPanel {
             frame.render_widget(paragraph.scroll((self.detail_scroll, 0)), inner);
         }
     }
+}
+
+/// Two columns before an account's name. The saved choice gets a bullet, so it
+/// shows from across the list, and the routed provider's one is in teal.
+fn account_marker(account: &AccountRow, serving: bool) -> Span<'static> {
+    if !account.current {
+        return Span::raw("  ");
+    }
+    let color = if serving { TEAL } else { WHITE };
+    Span::styled(
+        "● ",
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
+}
+
+fn account_name_style(account: &AccountRow, serving: bool, selected: bool) -> Style {
+    let style = Style::default().fg(if selected || serving { TEAL } else { WHITE });
+    if account.current {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+/// The words behind the markers, so color never carries the meaning alone.
+fn account_tags(account: &AccountRow, serving: bool, first_reset: bool) -> Vec<Span<'static>> {
+    let mut tags = Vec::new();
+    if account.current {
+        let color = if serving { TEAL } else { WHITE };
+        tags.push(Span::styled(
+            " [current]",
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if first_reset {
+        tags.push(Span::styled(
+            " [first reset]",
+            Style::default().fg(DIM_WHITE),
+        ));
+    }
+    if account.usage_error.is_some() {
+        tags.push(Span::styled(
+            " [refresh failed]",
+            Style::default().fg(YELLOW),
+        ));
+    }
+    tags
 }
 
 fn retain_previous_usage(
@@ -1506,14 +1599,116 @@ mod tests {
                 matches!(action, Action::RemoveAccount { .. }).then_some((at, action.clone()))
             })
             .unwrap();
-        assert!(action.needs_terminal());
+        // The question stays inside the monitor: no screen change for a delete.
+        assert!(!action.needs_terminal());
         panel.menu_state.select(Some(at));
+        // The first Enter asks. Nothing is returned to run, and nothing is gone yet.
+        assert_eq!(panel.press(KeyCode::Enter), None);
+        assert_eq!(panel.rows[0].accounts.len(), 2);
+        // Wide enough that the question does not wrap inside the panel.
+        let asking = render(&mut panel, 400, 30);
+        for expected in [
+            "Delete Codex account `work`",
+            "sign in again to add it back",
+            "Esc to keep it",
+            "Delete `work` and its saved login",
+        ] {
+            assert!(asking.contains(expected), "{expected}: {asking}");
+        }
+        // Escape keeps the account and leaves no stale question behind.
+        assert!(panel.close_menu());
+        assert!(!render(&mut panel, 400, 30).contains("Delete Codex account"));
+        panel.press(KeyCode::Enter);
+        panel.menu_state.select(Some(at));
+        panel.press(KeyCode::Enter);
+        // The second Enter is the answer.
         assert_eq!(panel.press(KeyCode::Enter), Some(action.clone()));
         panel.preview_action(&action);
         assert_eq!(panel.rows[0].accounts.len(), 1);
         assert!(panel.rows[0].accounts[0].current);
         assert_eq!(panel.selected, Entry::Provider("codex".into()));
         assert!(render(&mut panel, 110, 25).contains("Nothing on this computer changed"));
+    }
+
+    #[test]
+    fn the_account_serving_requests_stands_out_from_across_the_list() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+        terminal
+            .draw(|frame| panel.render(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let find = |needle: &str| {
+            (0..30)
+                .find_map(|y| {
+                    let row = (0..160)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>();
+                    row.find(needle)
+                        .map(|x| (row[..x].chars().count() as u16, y))
+                })
+                .unwrap_or_else(|| panic!("no {needle}"))
+        };
+        // Codex is the routed provider and `work` is its saved choice: bullet,
+        // bold teal name and a bold teal tag.
+        let (x, y) = find("● work");
+        assert_eq!(buffer[(x, y)].fg, TEAL);
+        assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(x + 2, y)].fg, TEAL);
+        let (tag_x, tag_y) = find("[current]");
+        assert_eq!(tag_y, y);
+        assert_eq!(buffer[(tag_x, tag_y)].fg, TEAL);
+        assert!(buffer[(tag_x, tag_y)].modifier.contains(Modifier::BOLD));
+        // Another provider's saved choice is still marked, in white. An account
+        // that is not the saved choice has no bullet.
+        let (kimi_x, kimi_y) = find("● personal");
+        assert_eq!(buffer[(kimi_x, kimi_y)].fg, WHITE);
+        let (home_x, home_y) = find("home");
+        assert_eq!(buffer[(home_x - 2, home_y)].symbol(), " ");
+        assert!(!buffer[(home_x, home_y)].modifier.contains(Modifier::BOLD));
+        // The primary tag is bold teal; a fallback tag stays quiet.
+        let (primary_x, primary_y) = find("[primary]");
+        assert_eq!(buffer[(primary_x, primary_y)].fg, TEAL);
+        let (fallback_x, fallback_y) = find("[fallback 1]");
+        assert_eq!(buffer[(fallback_x, fallback_y)].fg, DIM_WHITE);
+        // Narrow terminals keep the bullet and the tag on the name's line.
+        for (width, height) in [(80, 24), (40, 24)] {
+            let text = render(&mut panel, width, height);
+            assert!(text.contains("● work"), "{width}: {text}");
+            assert!(text.contains("[current]"), "{width}: {text}");
+        }
+        // A failed refresh says so in a status color and in words.
+        panel.rows[0].accounts[1].usage_error = Some("Press r to retry.".into());
+        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+        terminal
+            .draw(|frame| panel.render(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = (0..160)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>();
+        let at = row.find("[refresh failed]").unwrap();
+        assert_eq!(buffer[(row[..at].chars().count() as u16, y)].fg, YELLOW);
+    }
+
+    #[test]
+    fn only_actions_that_may_ask_a_question_leave_the_monitor() {
+        let account = |action: fn(String, String) -> Action| action("codex".into(), "id".into());
+        assert!(!account(|provider, id| Action::UseAccount { provider, id }).needs_terminal());
+        assert!(!account(|provider, id| Action::RemoveAccount { provider, id }).needs_terminal());
+        assert!(!Action::Fallback(vec!["kimi".into()]).needs_terminal());
+        // Going back to Claude Code's own login never asks anything.
+        assert!(!Action::UseProvider("direct".into()).needs_terminal());
+        // Signing in always does: a browser, a code, a key.
+        assert!(
+            Action::SignIn {
+                provider: "codex".into(),
+                account: None,
+                add: false
+            }
+            .needs_terminal()
+        );
+        assert!(Action::StartProxy.needs_terminal());
     }
 
     #[test]

@@ -561,6 +561,26 @@ pub(crate) fn resume_terminal(
     Ok(())
 }
 
+/// Hands the screen to a question (a sign-in, a model choice) without leaving
+/// the alternate screen. Leaving it would show the shell's scrollback for a
+/// moment between the monitor and the question, and again on the way back.
+fn pause_for_questions() -> anyhow::Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        io::stdout(),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0),
+        crossterm::cursor::Show
+    )?;
+    Ok(())
+}
+
+fn resume_after_questions(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
+    enable_raw_mode()?;
+    terminal.clear()?;
+    Ok(())
+}
+
 fn run_settings_key(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut MonitorApp,
@@ -619,13 +639,17 @@ fn run_account_action(
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         );
     })?;
-    if action.needs_terminal() {
-        suspend_terminal()?;
+    let asks = action.needs_terminal();
+    if asks {
+        pause_for_questions()?;
     }
     let result = action.run(&app.listen_url);
-    if action.needs_terminal() {
+    if asks {
         // Always restore the monitor, including a cancelled sign-in.
-        resume_terminal(terminal)?;
+        resume_after_questions(terminal)?;
+    }
+    if let (Ok(_), controls::Action::RemoveAccount { provider, id }) = (&result, &action) {
+        app.providers.forget_account(provider, id);
     }
     if starting {
         app.providers.finish_start(result);

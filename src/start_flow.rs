@@ -35,16 +35,32 @@ pub fn pick(asked: Option<&str>) -> Result<Pick> {
     Ok(pick)
 }
 
+/// The Claude names with no model, or only a guess, for `provider`.
+fn open_tiers(registry: &Registry, provider: &str) -> Vec<tiers::Mapping> {
+    tiers::mapping(registry, &config::route(), provider)
+        .into_iter()
+        .filter(|mapping| mapping.basis == Basis::Guess)
+        .collect()
+}
+
+/// Whether `cc-proxy use <provider>` has a question to ask: to sign in, or
+/// which model a Claude name should use. The monitor hands the screen to the
+/// questions only when this is true, so a plain switch never leaves it.
+pub fn will_ask(provider: &str) -> bool {
+    if provider == DIRECT {
+        return false;
+    }
+    let registry = Registry::new();
+    !is_signed_in(&registry, provider) || !open_tiers(&registry, provider).is_empty()
+}
+
 /// Asks which model a Claude name should use, but only for the names with no
 /// model or only a guess, and only once: the answers are kept. A name with no
 /// model (a provider that resells other vendors' models has none until you
 /// choose) is asked with search, and Enter skips it. With no answer to read,
 /// guesses stay in use this time and nothing is kept.
 fn settle_tiers(registry: &Registry, provider: &str) -> Result<()> {
-    let open: Vec<_> = tiers::mapping(registry, &config::route(), provider)
-        .into_iter()
-        .filter(|mapping| mapping.basis == Basis::Guess)
-        .collect();
+    let open = open_tiers(registry, provider);
     if open.is_empty() {
         return Ok(());
     }
