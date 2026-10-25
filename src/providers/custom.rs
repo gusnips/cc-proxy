@@ -177,6 +177,18 @@ impl CustomProvider {
         None
     }
 
+    fn prepare_messages(
+        &self,
+        body: &MessagesRequest,
+        model: &str,
+    ) -> Result<Value, serde_json::Error> {
+        let mut translated = messages::prepare_request(body, model)?;
+        if self.builtin_anthropic {
+            crate::anthropic::request::prepare_api_key_request(&mut translated);
+        }
+        Ok(translated)
+    }
+
     fn check_anthropic_auth(&self, account: Option<&str>) -> Result<(), ProviderError> {
         if self.builtin_anthropic && anthropic_key_for(account).is_none() {
             return Err(ProviderError::new(
@@ -286,7 +298,7 @@ impl CustomProvider {
                 }
             }
             EndpointKind::Messages => {
-                let translated = match messages::prepare_request(&body, &resolved) {
+                let translated = match self.prepare_messages(&body, &resolved) {
                     Ok(translated) => translated,
                     Err(error) => {
                         return json_error(
@@ -550,7 +562,7 @@ impl Provider for CustomProvider {
                 )
             }
             EndpointKind::Messages => {
-                let translated = messages::prepare_request(&body, &resolved).map_err(|e| {
+                let translated = self.prepare_messages(&body, &resolved).map_err(|e| {
                     ProviderError::new(
                         StatusCode::BAD_REQUEST,
                         ProviderErrorKind::InvalidRequest,
@@ -952,4 +964,40 @@ pub fn run_provider_list(registry: &crate::registry::Registry) -> Result<()> {
          `cc-proxy models choose <provider>`."
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_direct_anthropic_api_calls_drop_native_client_identity() {
+        let body: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude-sonnet-5-5",
+            "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+            "metadata": {"user_id": "native-account"},
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let direct = CustomProvider::new_anthropic()
+            .prepare_messages(&body, "claude-sonnet-5-5")
+            .unwrap();
+        assert!(direct.get("system").is_none());
+        assert!(direct.get("metadata").is_none());
+        let custom = CustomProvider::from_config(
+            "local-test",
+            CustomProviderConfig {
+                base_url: "http://127.0.0.1:1".into(),
+                format: CustomFormat::Anthropic,
+                api_key: None,
+                api_key_env: None,
+                models: vec![],
+            },
+        )
+        .prepare_messages(&body, "claude-sonnet-5-5")
+        .unwrap();
+        assert_eq!(custom["metadata"]["user_id"], "native-account");
+        assert_eq!(custom["system"], body.extra["system"]);
+    }
 }
