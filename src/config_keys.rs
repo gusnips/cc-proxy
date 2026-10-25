@@ -9,6 +9,8 @@
 mod editor;
 mod interactive;
 
+pub use interactive::{SettingsOutcome, SettingsPanel};
+
 use anyhow::{Context, Result};
 
 use crate::ui::{self, Mood};
@@ -62,20 +64,6 @@ impl ConfigKey {
 
 static CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
-        path: "port",
-        kind: ConfigKind::Port,
-        env: &["PORT"],
-        default: Some("18765"),
-        blurb: "listener port",
-    },
-    ConfigKey {
-        path: "bindAddress",
-        kind: ConfigKind::Str,
-        env: &["CCP_BIND_ADDRESS"],
-        default: Some("127.0.0.1"),
-        blurb: "listener address",
-    },
-    ConfigKey {
         path: "auth.autoRotate",
         kind: ConfigKind::Bool,
         env: &[],
@@ -88,6 +76,20 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         env: &["CCP_HOURLY_PING"],
         default: Some("false"),
         blurb: "ping signed-in providers at the start of every hour to start 5h windows early",
+    },
+    ConfigKey {
+        path: "port",
+        kind: ConfigKind::Port,
+        env: &["PORT"],
+        default: Some("18765"),
+        blurb: "listener port",
+    },
+    ConfigKey {
+        path: "bindAddress",
+        kind: ConfigKind::Str,
+        env: &["CCP_BIND_ADDRESS"],
+        default: Some("127.0.0.1"),
+        blurb: "listener address",
     },
     ConfigKey {
         path: "autoReviewModel",
@@ -381,24 +383,28 @@ fn env_override(key: &ConfigKey) -> Option<(&'static str, String)> {
 }
 
 fn display_value(key: &ConfigKey, file: Option<String>) -> String {
+    if let Some((name, value)) = env_override(key) {
+        return if key.kind == ConfigKind::Secret {
+            format!("set (from ${name})")
+        } else {
+            format!("{value} (from ${name}; overrides config.json)")
+        };
+    }
+    if key.path == "opencode.apiKey" && config::opencode_api_key_source() == Some("claude-settings")
+    {
+        return "set (from claude-settings)".to_string();
+    }
+    file_display_value(key, file)
+}
+
+/// The stored value and its default, without reading the environment or credentials.
+fn file_display_value(key: &ConfigKey, file: Option<String>) -> String {
     if key.kind == ConfigKind::Secret {
-        if let Some((name, _)) = env_override(key) {
-            return format!("set (from ${name})");
-        }
-        if key.path == "opencode.apiKey"
-            && let Some(source) = config::opencode_api_key_source()
-            && source == "claude-settings"
-        {
-            return "set (from claude-settings)".to_string();
-        }
         return if file.is_some() {
             "set (config.json)".to_string()
         } else {
             "unset".to_string()
         };
-    }
-    if let Some((name, value)) = env_override(key) {
-        return format!("{value} (from ${name}; overrides config.json)");
     }
     if let Some(value) = file {
         return value;
