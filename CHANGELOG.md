@@ -3,6 +3,27 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.0 (2026-10-25)
+
+- New provider: your Claude subscription. Sign in with
+  `cc-proxy auth login claude`, or let cc-proxy copy the login Claude Code
+  already has (it never changes or deletes that login). Save more than one
+  account, check the 5-hour and weekly usage with `cc-proxy usage claude`, and
+  move to the next account when a window is spent.
+- `cc-proxy use claude` now sends Claude Code through that provider. To send
+  Claude Code back to its own login without the proxy, run `cc-proxy use direct`
+  or choose "Disable proxy routing" in the monitor. The proxy keeps running.
+- Anthropic API key requests no longer carry Claude Code's login identity in
+  their headers or bodies.
+- Antigravity shows its Gemini and Claude windows in `cc-proxy usage antigravity`
+  and in the monitor. When a request gets a 429, cc-proxy now checks the model's
+  group and moves to the next account if a 5-hour or weekly window is spent.
+- `cc-proxy monitor` opens when the proxy is off. Press `s` to start it.
+- The monitor keeps the last quota numbers on screen while it refreshes, and
+  marks them stale when a refresh fails. Its first rows are now Disable proxy
+  routing and Claude subscription, with Auto-rotate last.
+- Commands that print a card now end with one random tip, in a terminal only.
+
 ## v0.3.3 (2026-10-25)
 
 - Live usage lookups now clear stale account wait timers when a provider resets
