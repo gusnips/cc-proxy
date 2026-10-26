@@ -3,6 +3,10 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.5 (2026-10-26)
+
+- Fix `400 Invalid signature in thinking block` after a fallback from Codex to your Claude subscription. Codex, Kimi and OpenCode sign their thinking blocks in a way Anthropic can't check, and the chat history carried those blocks into the Claude request. cc-proxy now leaves them out of requests to Claude and to Anthropic API keys. Signatures that Anthropic made stay. Retry the same chat after updating.
+
 ## v0.4.4 (2026-10-26)
 
 - Fix chats stuck after `/compact` with `400 messages.1: system content must contain at least one block`. The proxy now keeps message settings such as `output_config` (the effort setting) and `clear_at` (when an instruction stops applying). It previously dropped these fields, leaving an empty system message that Anthropic rejected. Retry the existing chat after updating; no new chat is needed for this error.
