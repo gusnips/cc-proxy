@@ -87,6 +87,7 @@ pub fn prepare(
             wire.as_object_mut().unwrap().remove("metadata");
         }
     }
+    crate::anthropic::request::prepare_thinking(&mut wire);
     Ok(wire)
 }
 
@@ -183,6 +184,30 @@ mod tests {
         );
         let wire = prepare(&server_choice, "claude-sonnet-5-5", None).unwrap();
         assert_eq!(wire["tool_choice"]["name"], "web_search");
+    }
+
+    #[test]
+    fn thinking_survives_a_plan_api_round_trip_with_mismatch_controls_on_both_paths() {
+        let mut request: MessagesRequest = serde_json::from_value(json!({
+            "thinking": {"type": "adaptive"},
+            "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "prior", "signature": "native"},
+                {"type": "tool_use", "id": "t", "name": "Read", "input": {}}
+            ]}]
+        })).unwrap();
+        let plan = prepare(&request, "claude-sonnet-5-5", None).unwrap();
+        let mut api = messages::prepare_request(&request, "claude-sonnet-5-5").unwrap();
+        crate::anthropic::request::prepare_api_key_request(&mut api);
+        for wire in [&plan, &api] {
+            assert_eq!(wire["thinking"]["block_binding"]["prefix_mismatch_behavior"], "drop_block");
+            assert_eq!(wire["messages"][0]["content"][0]["signature"], "native");
+        }
+        assert_eq!(plan["tools"][0]["name"], "custom_Read");
+        assert_eq!(api["tools"][0]["name"], "Read");
+        request.messages.push(serde_json::from_value(json!({"role": "user", "content": "continue"})).unwrap());
+        let later = prepare(&request, "claude-sonnet-5-5", None).unwrap();
+        assert_eq!(later["messages"][0], plan["messages"][0]);
     }
 
     #[test]

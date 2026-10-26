@@ -1238,6 +1238,28 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_api_throttles_do_not_become_saved_usage_resets() {
+        for delay in ["1", "10", "60"] {
+            let response = crate::providers::upstream_error::from_http(
+                429,
+                r#"{"error":{"type":"rate_limit_error","message":"This request would exceed your organization's rate limit. Try again later."}}"#,
+                Some(delay),
+                "Anthropic",
+            )
+            .response();
+            assert_eq!(retry_deadline(&response, now_ms()), None);
+            assert_eq!(response.headers()[http::header::RETRY_AFTER], delay);
+            assert!(
+                !response
+                    .headers()
+                    .contains_key("anthropic-ratelimit-unified-reset")
+            );
+        }
+        // A spent API balance still rotates, rather than retrying an empty key.
+        assert!(retry_deadline(&spent_balance(), now_ms()).unwrap().spent);
+    }
+
+    #[test]
     fn provider_hints_do_not_change_the_client_retry_headers() {
         let mut response = Response::new(axum::body::Body::empty());
         *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;

@@ -67,7 +67,13 @@ pub fn from_http(
         _ => format!("{provider} upstream returned HTTP {status}"),
     });
     let mut failure = provider_error(kind, Some(status), message, retry_after);
-    if status == 429 && provider == "Antigravity" {
+    // Retry-After on the API is a short request/token throttle, not a
+    // subscription reset. Rotating it would turn a temporary wait into a
+    // synthetic "You've hit your limit" response and discard the chat's cache.
+    if status == 429
+        && (provider == "Antigravity"
+            || (provider == "Anthropic" && kind == FailureKind::RateLimit))
+    {
         failure.rotation_hint = Some(crate::rotation::RotationHint::Stay);
     }
     if status == 429
@@ -603,12 +609,27 @@ mod tests {
             );
             assert_eq!(failure.should_retry, Some(false), "{body}");
         }
-        // A short throttle, a bad key and a prompt that is too long are not a spent balance.
+        // A short API throttle keeps its account. A bad key and an oversized
+        // prompt must not turn into a spent balance either.
+        let throttle = from_http(
+            429,
+            r#"{"error":{"message":"Rate limit reached, slow down"}}"#,
+            Some("10"),
+            "Anthropic",
+        );
+        assert!(matches!(
+            throttle.rotation_hint,
+            Some(crate::rotation::RotationHint::Stay)
+        ));
+        let response = throttle.response();
+        assert_eq!(response.headers()[http::header::RETRY_AFTER], "10");
+        assert!(
+            !response
+                .headers()
+                .contains_key("anthropic-ratelimit-unified-reset")
+        );
+        assert!(!response.headers().contains_key("x-should-retry"));
         for (status, body) in [
-            (
-                429,
-                r#"{"error":{"message":"Rate limit reached, slow down"}}"#,
-            ),
             (401, r#"{"error":{"message":"invalid x-api-key"}}"#),
             (
                 400,
