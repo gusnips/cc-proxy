@@ -142,8 +142,11 @@ impl ProviderRow {
         }
         for account in &mut self.accounts {
             if let Some(old) = previous.accounts.iter().find(|old| old.id == account.id) {
+                // A failure that already kept the last saved numbers stays.
+                let saved_failure = account.usage_error.take();
                 account.usage_error =
-                    retain_previous_usage(&mut account.usage, &old.usage, &old.usage_error);
+                    retain_previous_usage(&mut account.usage, &old.usage, &old.usage_error)
+                        .or(saved_failure);
             }
         }
     }
@@ -748,8 +751,8 @@ impl ProvidersPanel {
                         text.push(
                             format!(
                                 "{}{}",
-                                account.name,
-                                if account.current { " [current]" } else { "" }
+                                if account.current { "● " } else { "" },
+                                account.name
                             )
                             .into(),
                         );
@@ -854,9 +857,9 @@ impl ProvidersPanel {
                             .is_some_and(|account| account.current)
                     {
                         text.push(if self.auto_rotate {
-                            "[current] is the saved choice. Auto-rotate skips it while it is waiting."
+                            "The ● marks the saved choice. Auto-rotate skips it while it is waiting."
                         } else {
-                            "[current] is the saved choice. Auto-rotate is off; choose another account to switch."
+                            "The ● marks the saved choice. Auto-rotate is off; choose another account to switch."
                         }.into());
                     }
                 }
@@ -1164,7 +1167,25 @@ fn load(send: &mpsc::Sender<Vec<ProviderRow>>) {
         }
     }
     apply_account_usage(&mut rows, &crate::usage::account_usage());
+    keep_last_good(&mut rows, &crate::usage::last_good_usage());
     let _ = send.send(rows);
+}
+
+/// An account whose lookup failed keeps the numbers from its last good one,
+/// even after the monitor was closed and opened again. Details says why it
+/// failed.
+fn keep_last_good(rows: &mut [ProviderRow], saved: &HashMap<(String, String), Vec<UsageWindow>>) {
+    for row in rows {
+        for account in &mut row.accounts {
+            if let Some(MonitorUsage::Unavailable(reason)) = &account.usage
+                && let Some(windows) = saved.get(&(row.id.clone(), account.id.clone()))
+                && !windows.is_empty()
+            {
+                account.usage_error = Some(reason.clone());
+                account.usage = Some(MonitorUsage::Reported(windows.clone()));
+            }
+        }
+    }
 }
 
 fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String), MonitorUsage>) {
@@ -1419,6 +1440,40 @@ mod tests {
         assert_eq!(panel.rows[0].accounts[1].usage, previous);
         let text = render(&mut panel, 160, 30);
         for expected in ["refreshing", "* Refresh failed", "58%", "Press r to retry"] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+    }
+
+    #[test]
+    fn a_failed_lookup_keeps_the_last_saved_numbers_and_warns_at_the_end() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        let mut rows = metadata(demo_rows());
+        // Nothing answered, as in a monitor opened during an outage.
+        apply_account_usage(&mut rows, &HashMap::new());
+        let saved = HashMap::from([(
+            ("codex".to_string(), "demo-work".to_string()),
+            vec![UsageWindow {
+                label: "5h",
+                remaining_percent: 41.0,
+                resets_at_ms: None,
+            }],
+        )]);
+        keep_last_good(&mut rows, &saved);
+        // An account with nothing saved keeps the plain message and no warning.
+        assert!(rows[0].accounts[0].usage_error.is_none());
+        assert!(matches!(
+            rows[0].accounts[0].usage,
+            Some(MonitorUsage::Unavailable(_))
+        ));
+        // The rows replace a monitor that already showed other numbers.
+        panel.take_rows(rows);
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        let text = render(&mut panel, 160, 30);
+        for expected in [
+            "5h 41%",
+            "* Refresh failed. Last values may be out of date.",
+            "Press r to retry",
+        ] {
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
     }

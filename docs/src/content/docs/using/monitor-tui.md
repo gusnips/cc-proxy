@@ -108,7 +108,9 @@ Usage loads in the background and refreshes while Accounts is open. Press `r` to
 refresh now. A failed lookup says usage is unavailable, not zero. If a refresh
 fails after a good one, the row keeps the last numbers and ends with a
 yellow `*`. Details starts with `* Refresh failed`, says the numbers may be out
-of date and gives the reason. Page Up and Page Down scroll long details.
+of date and gives the reason in one line. The last good numbers are saved, so
+they are still there if you close the monitor and open it again. Page Up and Page
+Down scroll long details.
 
 If an environment variable supplies the login, the details name it and explain
 why saved account choices do not apply. Unset it in the proxy service to use a
