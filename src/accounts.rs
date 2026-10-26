@@ -40,6 +40,12 @@ pub trait AccountSupport: Send + Sync {
     fn note(&self, _login: &Value) -> Option<String> {
         None
     }
+    /// Why this login can't serve requests at all, when its plan says so (a
+    /// free Claude plan). Rotation skips it and choosing it is refused. Written
+    /// as a clause: "cc-proxy won't use `work`: {reason}."
+    fn unusable(&self, _login: &Value) -> Option<&'static str> {
+        None
+    }
     /// Where the provider kept its one login before accounts existed.
     fn single_login(&self) -> Box<dyn AuthStorage<Value>>;
     /// Copy an existing local login without taking ownership of its source.
@@ -336,6 +342,16 @@ impl Accounts {
     /// The saved login, as the provider wrote it.
     pub fn login(&self, name: &str) -> Result<Option<Value>> {
         self.file_store(&self.require(name)?.id).load()
+    }
+
+    /// Why `account` can't serve requests, when its saved plan says so.
+    pub fn unusable(
+        &self,
+        support: &dyn AccountSupport,
+        account: &Account,
+    ) -> Option<&'static str> {
+        let login: Value = self.file_store(&account.id).load().ok()??;
+        support.unusable(&login)
     }
 
     /// Saves only if the slot still matches the command's starting state.

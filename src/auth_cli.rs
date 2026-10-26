@@ -190,7 +190,7 @@ impl<'a> AccountCli<'a> {
             &self.accounts,
             &crate::rotation::Cooldowns::new(),
             &chosen,
-            crate::rotation::Switch::Chosen,
+            crate::rotation::Switch::Chosen(self.support),
         )?;
         println!("{label} now uses `{name}`. A running proxy switches on its next request.");
         Ok(())

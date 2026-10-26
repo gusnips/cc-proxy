@@ -57,6 +57,15 @@ when Claude confirms an exhausted usage window and its reset time. The proxy
 never switches accounts after it starts returning an answer. A short request
 throttle does not become a subscription wait timer.
 
+## Free accounts
+
+Claude Code can't use a free Claude account. cc-proxy reads each account's plan
+from Claude when you sign in, when the login renews and when it looks up usage.
+A free account stays saved, and the monitor says it is on the free plan. It takes
+no part in rotation or the hourly ping, and `cc-proxy auth use claude` refuses it.
+If every saved account is free, cc-proxy leaves them all in, so Claude's own error
+reaches you. When an account moves to a paid plan, the next renewal picks that up.
+
 ## Disable proxy routing
 
 ```sh

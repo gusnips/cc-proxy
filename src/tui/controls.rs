@@ -103,7 +103,7 @@ impl Action {
                     &accounts,
                     &crate::rotation::Cooldowns::new(),
                     &account,
-                    crate::rotation::Switch::Chosen,
+                    crate::rotation::Switch::Chosen(support),
                 )?;
                 Ok(format!(
                     "Saved. New {} requests use {}. Requests already running keep their account.",

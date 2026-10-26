@@ -721,7 +721,9 @@ async fn fetch_account(
         UsageProvider::Antigravity => antigravity(client, id).await?,
         UsageProvider::OpenCode => return Err(Failure::Unreadable),
     };
-    if usage.five_hour.is_none() && usage.weekly.is_none() && usage.groups.is_empty() {
+    // A free plan has no windows to count, and that is not a broken reply.
+    let free = usage.plan.as_deref() == Some("free");
+    if !free && usage.five_hour.is_none() && usage.weekly.is_none() && usage.groups.is_empty() {
         return Err(Failure::Unreadable);
     }
     Ok(usage)
@@ -732,10 +734,21 @@ async fn claude(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure
     let store = Accounts::new("claude")
         .for_request::<StoredAuth>(Some(id))
         .map_err(|_| Failure::SignInUnusable)?;
-    let auth = AuthManager::new(store)
+    let manager = AuthManager::new(store);
+    let auth = manager
         .get_auth()
         .await
         .map_err(|_| Failure::SignInUnusable)?;
+    // A login saved before cc-proxy asked for the plan learns it here.
+    let auth = manager.learn_plan(auth).await;
+    // Claude's usage endpoint turns a free account away, which would read as a
+    // broken sign-in. There is nothing to count: Claude Code can't use it.
+    if auth.plan.as_deref() == Some("free") {
+        return Ok(PlanUsage {
+            plan: auth.plan,
+            ..PlanUsage::default()
+        });
+    }
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,

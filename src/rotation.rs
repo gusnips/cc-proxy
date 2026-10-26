@@ -9,12 +9,12 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::response::Response;
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use crate::accounts::{Account, Accounts};
+use crate::accounts::{Account, AccountSupport, Accounts};
 use crate::anthropic::{MessagesRequest, json_error};
 use crate::provider::{Provider, RequestContext};
 use crate::registry::Registry;
@@ -672,13 +672,15 @@ async fn ping_routed_providers(
         let Some(model) = ping_model_for(registry, route, &name) else {
             continue;
         };
-        let targets: Vec<Option<String>> = match provider
+        let saved = provider
             .cli()
             .accounts()
             .filter(|support| support.pinned_credentials().is_none())
-            .and_then(|support| Accounts::open(&name, support).ok())
-            .and_then(|accounts| accounts.list().ok())
-        {
+            .and_then(|support| {
+                let accounts = Accounts::open(&name, support).ok()?;
+                Some(servable(Some(support), &accounts, accounts.list().ok()?))
+            });
+        let targets: Vec<Option<String>> = match saved {
             Some(list) if !list.is_empty() => {
                 let snapshot = cooldowns.read().unwrap_or_default();
                 ping_targets(&list, &snapshot, &name, &model, now_ms())
@@ -750,10 +752,28 @@ fn storage_error(error: anyhow::Error) -> Response {
     )
 }
 
+/// Accounts whose plan can't serve requests at all (a free Claude plan) take
+/// no part in rotation. If that would leave none, every account stays, so the
+/// provider's own error reaches the person instead of a made-up one.
+fn servable(
+    support: Option<&dyn AccountSupport>,
+    accounts: &Accounts,
+    list: Vec<Account>,
+) -> Vec<Account> {
+    let Some(support) = support else { return list };
+    let usable: Vec<Account> = list
+        .iter()
+        .filter(|account| accounts.unusable(support, account).is_none())
+        .cloned()
+        .collect();
+    if usable.is_empty() { list } else { usable }
+}
+
 /// Who moves the saved account.
 pub(crate) enum Switch<'a> {
-    /// A person: `auth use` or the monitor. Their choice wins.
-    Chosen,
+    /// A person: `auth use` or the monitor. Their choice wins, unless the
+    /// account's plan can't serve requests at all.
+    Chosen(&'a dyn AccountSupport),
     /// A request found the account it saw as current spent or limited. It
     /// yields to any newer choice.
     Rotated { from: &'a str, req_id: &'a str },
@@ -770,7 +790,13 @@ pub(crate) fn switch_account(
     switch: Switch<'_>,
 ) -> Result<()> {
     let (by, req_id) = match switch {
-        Switch::Chosen => {
+        Switch::Chosen(support) => {
+            if let Some(reason) = accounts.unusable(support, to) {
+                bail!(
+                    "cc-proxy won't use `{}`: {reason}. Choose another account.",
+                    to.name
+                );
+            }
             // Clear the sit-out first. Saved the other way round, a request
             // between the two steps sees the chosen account cooling and moves
             // off it again.
@@ -811,7 +837,7 @@ async fn execute_with(
     let model = body.model.as_deref().unwrap_or_default();
     loop {
         let selection = (|| -> Result<_> {
-            let list = accounts.list()?;
+            let list = servable(provider.cli().accounts(), accounts, accounts.list()?);
             let Some(current) = accounts.current()? else {
                 return Ok(None);
             };
@@ -1088,6 +1114,63 @@ mod tests {
         assert_eq!(fake.calls.lock().unwrap().len(), 3);
     }
 
+    /// Logins whose `access` is listed are on a plan that can't serve requests.
+    struct Plans(&'static [&'static str]);
+    impl AccountSupport for Plans {
+        fn sign_in(&self, _: bool) -> Result<serde_json::Value> {
+            unreachable!()
+        }
+        fn identity(&self, _: &serde_json::Value) -> Option<String> {
+            None
+        }
+        fn state(&self, _: &serde_json::Value) -> AuthState {
+            AuthState::Missing
+        }
+        fn single_login(&self) -> Box<dyn crate::auth::AuthStorage<serde_json::Value>> {
+            Box::new(crate::accounts::NoLogin)
+        }
+        fn unusable(&self, login: &serde_json::Value) -> Option<&'static str> {
+            self.0
+                .contains(&login["access"].as_str()?)
+                .then_some("it is on a free plan")
+        }
+    }
+
+    #[test]
+    fn a_plan_that_cannot_serve_takes_no_part_in_rotation_and_cannot_be_chosen() {
+        let (_dir, accounts, cooldowns, list) = fixture();
+        let free_a = Plans(&["a"]);
+
+        // Rotation and the hourly ping see only `b`.
+        let ids = |list: &[Account]| list.iter().map(|a| a.name.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            ids(&servable(Some(&free_a), &accounts, list.clone())),
+            ["b"]
+        );
+        // With no support to ask, or when every account is unusable, nothing is hidden.
+        assert_eq!(ids(&servable(None, &accounts, list.clone())), ["a", "b"]);
+        let all_free = Plans(&["a", "b"]);
+        assert_eq!(
+            ids(&servable(Some(&all_free), &accounts, list.clone())),
+            ["a", "b"]
+        );
+
+        // A person can't choose it, and nothing changes.
+        accounts.set_current("b").unwrap();
+        let error = switch_account(
+            "codex",
+            &accounts,
+            &cooldowns,
+            &list[0],
+            Switch::Chosen(&free_a),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("won't use `a`"), "{error}");
+        assert!(error.contains("free plan"), "{error}");
+        assert_eq!(accounts.current().unwrap().unwrap().name, "b");
+    }
+
     #[test]
     fn a_chosen_account_is_ready_at_once_and_a_late_rotation_cannot_undo_it() {
         let (_dir, accounts, cooldowns, list) = fixture();
@@ -1099,7 +1182,14 @@ mod tests {
             .mark("codex", &list[1].id, None, now_ms() + 3_600_000)
             .unwrap();
 
-        switch_account("codex", &accounts, &cooldowns, &list[1], Switch::Chosen).unwrap();
+        switch_account(
+            "codex",
+            &accounts,
+            &cooldowns,
+            &list[1],
+            Switch::Chosen(&Plans(&[])),
+        )
+        .unwrap();
         assert_eq!(accounts.current().unwrap().unwrap().id, list[1].id);
         assert!(cooldowns.read().unwrap().is_empty());
 
