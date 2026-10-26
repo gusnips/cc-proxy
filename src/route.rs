@@ -16,7 +16,7 @@ use anyhow::Result;
 
 use crate::registry::Registry;
 use crate::ui::{self, Mood};
-use crate::{claude_settings, config, config_keys, daemon, tiers};
+use crate::{claude_settings, config, config_keys, daemon, pool, tiers};
 
 /// The built-in providers `start` and `use` can send Claude Code to.
 pub const PROVIDERS: [&str; 12] = [
@@ -60,17 +60,18 @@ pub fn preflight() -> Result<()> {
     })
 }
 
-/// What happens to the fallback chain when a provider takes the lead.
+/// What happens to the rest of the pool when a provider takes the lead.
 pub enum Chain {
-    /// The provider moves to the front of the pool and the rest keep their
-    /// order, so the old primary becomes the first fallback.
+    /// The provider's rows move to the top and the rest keep their order and
+    /// what is turned on, so the old first provider follows it.
     Keep,
-    /// Exactly these providers, in this order. An empty list clears the chain.
+    /// Exactly these providers, in this order. The rest of the pool turns off.
+    /// An empty list leaves only the provider itself.
     Set(Vec<String>),
 }
 
-/// The fallbacks that follow `provider` once it takes the lead: the old
-/// primary first, then the old fallbacks in their order.
+/// The providers that follow `provider` once it takes the lead: the old
+/// first provider, then the others in their order.
 pub fn promoted(route: &config::Route, provider: &str) -> Vec<String> {
     let mut fallback: Vec<String> = Vec::new();
     for name in route.provider.iter().chain(&route.fallback) {
@@ -83,21 +84,20 @@ pub fn promoted(route: &config::Route, provider: &str) -> Vec<String> {
 
 /// Send Claude Code through the proxy at `base_url`, to `provider`.
 pub fn activate(provider: &str, base_url: &str, chain: Chain) -> Result<()> {
-    // The settings file is the step that can refuse (a file we can't read as
-    // JSON), so it goes first and nothing else changes when it does.
-    claude_settings::claim(base_url)?;
-    let fallback = match chain {
-        Chain::Keep => promoted(&config::route(), provider),
+    // Worked out first, so a provider with no sign-in changes nothing.
+    let rows = match chain {
+        Chain::Keep => pool::promoted_rows(provider, false)?,
+        Chain::Set(chain) if chain.is_empty() => pool::promoted_rows(provider, true)?,
         Chain::Set(mut chain) => {
             chain.retain(|name| name != provider);
-            chain
+            chain.insert(0, provider.to_string());
+            pool::selected_rows(&chain)?
         }
     };
-    config_keys::write_values([
-        ("route.on", serde_json::Value::Bool(true)),
-        ("route.provider", provider.into()),
-        ("route.fallback", serde_json::json!(fallback)),
-    ])?;
+    // The settings file is the step that can refuse (a file we can't read as
+    // JSON), so it goes before the pool is saved and nothing else changes when it does.
+    claude_settings::claim(base_url)?;
+    pool::save_and_turn_on(&rows)?;
     refresh_model_labels();
     Ok(())
 }
@@ -277,12 +277,17 @@ pub fn status_lines() -> Vec<String> {
     lines
 }
 
-/// Save the providers to try, in order, when the routed provider is spent.
-/// An empty list turns the chain off.
+/// Set the providers that follow the first one, in this order, and turn every
+/// other provider off. An empty list leaves only the first provider.
 pub fn set_fallback(providers: &[String]) -> Result<()> {
     let names = clean_chain(providers)?;
-    config_keys::write_values([("route.fallback", serde_json::json!(names))])?;
-    Ok(())
+    let route = config::route();
+    let Some(first) = route.provider.as_deref() else {
+        anyhow::bail!("No provider is turned on in the pool. Run `cc-proxy use <provider>` first.");
+    };
+    let mut order = vec![first.to_string()];
+    order.extend(names.into_iter().filter(|name| name != first));
+    pool::select_providers(&order)
 }
 
 /// A fallback list that is safe to save: known providers only, lowercase, no repeats.

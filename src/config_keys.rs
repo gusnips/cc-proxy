@@ -417,12 +417,16 @@ fn file_display_value(key: &ConfigKey, file: Option<String>) -> String {
 
 fn read_file() -> Result<serde_json::Value> {
     let dir = paths::config_dir();
+    read_file_in(&dir)
+}
+
+fn read_file_in(dir: &std::path::Path) -> Result<serde_json::Value> {
     let current = dir.join("config.json");
     if current
         .try_exists()
         .with_context(|| format!("can't check for {}", current.display()))?
     {
-        return config::read_config_json_at(&dir);
+        return config::read_config_json_at(dir);
     }
     // No current file yet: honor a pre-fork config so reads see the same
     // settings the typed accessors resolve.
@@ -492,11 +496,31 @@ pub(crate) fn remove_values<'a>(paths_to_remove: impl IntoIterator<Item = &'a st
 pub(crate) fn write_values<'a>(
     values: impl IntoIterator<Item = (&'a str, serde_json::Value)>,
 ) -> Result<std::path::PathBuf> {
-    let mut root = read_file()?;
+    update_values(values, [])
+}
+
+/// Set some dotted keys and remove others in one write.
+pub(crate) fn update_values<'a>(
+    values: impl IntoIterator<Item = (&'a str, serde_json::Value)>,
+    removed: impl IntoIterator<Item = &'a str>,
+) -> Result<std::path::PathBuf> {
+    update_values_in(&paths::config_dir(), values, removed)
+}
+
+/// `update_values` for the config folder `dir`.
+pub(crate) fn update_values_in<'a>(
+    dir: &std::path::Path,
+    values: impl IntoIterator<Item = (&'a str, serde_json::Value)>,
+    removed: impl IntoIterator<Item = &'a str>,
+) -> Result<std::path::PathBuf> {
+    let mut root = read_file_in(dir)?;
     for (path, value) in values {
         set_dotted(&mut root, path, value)?;
     }
-    config::write_config_json_at(&paths::config_dir(), &root)
+    for path in removed {
+        remove_dotted(&mut root, path);
+    }
+    config::write_config_json_at(dir, &root)
 }
 
 /// What a save did, for `config set` and the settings screen to word their own way.

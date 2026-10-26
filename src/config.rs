@@ -176,9 +176,12 @@ struct AnthropicConfig {
 #[derive(Deserialize, Clone)]
 struct RouteConfig {
     pub on: Option<bool>,
+    /// Before the request pool: the provider first picked. Read until the first pool save removes it.
     pub provider: Option<String>,
-    /// Providers to try, in order, when the routed provider is spent.
+    /// Before the request pool: providers to try when the first is spent.
     pub fallback: Option<Vec<String>>,
+    /// The flat request pool. Read row by row, so one bad row never hides the rest of the config.
+    pub pool: Option<Vec<serde_json::Value>>,
     /// The user's own choices, provider then tier then model id.
     pub tiers: Option<BTreeMap<String, BTreeMap<String, Option<String>>>>,
 }
@@ -1427,6 +1430,24 @@ pub fn codex_model() -> Option<String> {
     None
 }
 
+/// One row of the request pool: a provider, or one saved account of it.
+/// Requests try the enabled rows from the top.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolEntry {
+    pub provider: String,
+    /// The saved account. Absent for a provider that holds one credential: an
+    /// environment key, or a provider with a single login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+}
+
+fn enabled_by_default() -> bool {
+    true
+}
+
 /// Where Claude Code's own model names go, read from config.json each time so
 /// `cc-proxy use` takes effect on the next request without a restart. Off
 /// unless `cc-proxy start` or `use` turned it on: a missing or unreadable
@@ -1434,12 +1455,16 @@ pub fn codex_model() -> Option<String> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Route {
     pub on: bool,
-    /// The last provider picked. Kept when routing goes off, so `start` can offer it again.
+    /// The first enabled provider of the pool. Kept when routing goes off, so `start` can offer it again.
     pub provider: Option<String>,
-    /// Providers to try, in order, when the routed provider is spent.
+    /// The other enabled providers of the pool, in order.
     pub fallback: Vec<String>,
     /// The models the user chose for a Claude name: provider, then tier.
     pub tiers: BTreeMap<String, BTreeMap<String, String>>,
+    /// The saved request pool. `None` until the first save: `provider` and
+    /// `fallback` then come from the older settings. Use `crate::pool::entries`
+    /// for the live rows.
+    pub pool: Option<Vec<PoolEntry>>,
 }
 
 impl Route {
@@ -1448,7 +1473,7 @@ impl Route {
         self.provider.as_deref().filter(|_| self.on)
     }
 
-    /// The fallback providers, in the order the user listed them.
+    /// The other providers of the pool, in the order the user set.
     pub fn fallback(&self) -> &[String] {
         &self.fallback
     }
@@ -1460,12 +1485,18 @@ impl Route {
 }
 
 pub fn route() -> Route {
+    route_from(&paths::config_dir())
+}
+
+/// `route` for the config folder `dir`.
+pub(crate) fn route_from(dir: &Path) -> Route {
     let Some(RouteConfig {
         on,
         provider,
         fallback,
+        pool,
         tiers,
-    }) = read_file_config(&paths::config_dir()).and_then(|file| file.route)
+    }) = read_file_config(dir).and_then(|file| file.route)
     else {
         return Route::default();
     };
@@ -1480,10 +1511,25 @@ pub fn route() -> Route {
             (provider, chosen)
         })
         .collect();
-    let provider = provider.filter(|name| !name.is_empty());
+    let pool = pool.map(|rows| {
+        rows.into_iter()
+            .filter_map(|row| serde_json::from_value::<PoolEntry>(row).ok())
+            .map(|row| PoolEntry {
+                provider: row.provider.trim().to_ascii_lowercase(),
+                ..row
+            })
+            .filter(|row| !row.provider.is_empty())
+            .collect::<Vec<_>>()
+    });
+    let (provider, fallback) = match &pool {
+        Some(rows) => providers_of(rows),
+        None => (
+            provider.filter(|name| !name.is_empty()),
+            fallback.unwrap_or_default(),
+        ),
+    };
     let mut seen = std::collections::HashSet::new();
     let fallback: Vec<String> = fallback
-        .unwrap_or_default()
         .into_iter()
         .map(|name| name.trim().to_ascii_lowercase())
         .filter(|name| !name.is_empty() && Some(name.as_str()) != provider.as_deref())
@@ -1494,7 +1540,23 @@ pub fn route() -> Route {
         provider,
         fallback,
         tiers,
+        pool,
     }
+}
+
+/// The first enabled provider of a pool, then the other enabled providers in order.
+fn providers_of(rows: &[PoolEntry]) -> (Option<String>, Vec<String>) {
+    let mut names: Vec<String> = Vec::new();
+    for row in rows.iter().filter(|row| row.enabled) {
+        if !names.contains(&row.provider) {
+            names.push(row.provider.clone());
+        }
+    }
+    if names.is_empty() {
+        return (None, Vec::new());
+    }
+    let first = names.remove(0);
+    (Some(first), names)
 }
 
 pub fn auto_review_model() -> Option<String> {
