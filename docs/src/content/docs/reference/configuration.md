@@ -112,8 +112,8 @@ balance is too low", or a spent quota with no clock), cc-proxy moves the request
 to the next saved account and sits the spent one out. It tries that account
 again 30 minutes later, because a top-up is not visible to cc-proxy. That try is
 a recheck, never a claimed reset. After you add credit, run
-`cc-proxy auth use <provider> <account>` (or choose Use account for new requests
-in the monitor) to try it at once. A failed recheck costs one quick error that
+`cc-proxy auth use <provider> <account>` (or choose Use now on it in the monitor)
+to try it at once. A failed recheck costs one quick error that
 the next account absorbs in the same request. A timeout, a bad key or a short
 rate limit without a reset time never sits an account out.
 
@@ -168,8 +168,15 @@ different providers mix freely. A row with `"enabled": false` stays in the list
 and is never picked. Change the list with `cc-proxy pool`, `cc-proxy use` or
 the monitor, not by hand: the ids belong to your saved logins.
 
-```sh
-cc-proxy use codex antigravity gemini
+```json
+"route": {
+  "on": true,
+  "pool": [
+    { "provider": "codex", "accountId": "6f1c0a52-7d2e-4a47-9a35-0c1f3f0b9d11", "enabled": true },
+    { "provider": "claude", "accountId": "b3a8f6d4-1c77-4f0e-8d6a-5e2b9a7c4410", "enabled": true },
+    { "provider": "gemini", "enabled": false }
+  ]
+}
 ```
 
 turns those three providers on, in that order, and turns the others off. A
