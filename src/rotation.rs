@@ -750,6 +750,53 @@ fn storage_error(error: anyhow::Error) -> Response {
     )
 }
 
+/// Who moves the saved account.
+pub(crate) enum Switch<'a> {
+    /// A person: `auth use` or the monitor. Their choice wins.
+    Chosen,
+    /// A request found the account it saw as current spent or limited. It
+    /// yields to any newer choice.
+    Rotated { from: &'a str, req_id: &'a str },
+}
+
+/// The one way the saved account changes, for a person and for rotation alike.
+/// Requests already running keep the account they started on. The next one
+/// reads the new choice.
+pub(crate) fn switch_account(
+    provider: &str,
+    accounts: &Accounts,
+    cooldowns: &Cooldowns,
+    to: &Account,
+    switch: Switch<'_>,
+) -> Result<()> {
+    let (by, req_id) = match switch {
+        Switch::Chosen => {
+            // Clear the sit-out first. Saved the other way round, a request
+            // between the two steps sees the chosen account cooling and moves
+            // off it again.
+            let _ = cooldowns.clear_account(provider, &to.id);
+            accounts.set_current(&to.name)?;
+            ("user", None)
+        }
+        Switch::Rotated { from, req_id } => {
+            if !accounts.switch_if_current(from, &to.id)? {
+                return Ok(());
+            }
+            ("rotation", Some(req_id))
+        }
+    };
+    let mut fields = serde_json::Map::from_iter([
+        ("provider".into(), serde_json::json!(provider)),
+        ("account".into(), serde_json::json!(&to.name)),
+        ("by".into(), serde_json::json!(by)),
+    ]);
+    if let Some(req_id) = req_id {
+        fields.insert("reqId".into(), serde_json::json!(req_id));
+    }
+    crate::logging::create_logger("auth").info("account_switched", Some(fields));
+    Ok(())
+}
+
 async fn execute_with(
     provider: &dyn Provider,
     body: MessagesRequest,
@@ -845,17 +892,14 @@ async fn execute_with(
                 });
         };
         if next.id != current.id {
-            if let Err(error) = accounts.switch_if_current(&current.id, &next.id) {
+            let switch = Switch::Rotated {
+                from: &current.id,
+                req_id: &context.req_id,
+            };
+            if let Err(error) = switch_account(provider.name(), accounts, cooldowns, &next, switch)
+            {
                 return storage_error(error);
             }
-            crate::logging::create_logger("auth").info(
-                "account_switched",
-                Some(serde_json::Map::from_iter([
-                    ("provider".into(), serde_json::json!(provider.name())),
-                    ("account".into(), serde_json::json!(&next.name)),
-                    ("reqId".into(), serde_json::json!(&context.req_id)),
-                ])),
-            );
         }
         tried.insert(next.id.clone());
         let mut attempt = context.clone();
@@ -1042,6 +1086,30 @@ mod tests {
         // Both accounts 429 once, the request waits ~2s for the first
         // release, then continues on the freed account.
         assert_eq!(fake.calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_chosen_account_is_ready_at_once_and_a_late_rotation_cannot_undo_it() {
+        let (_dir, accounts, cooldowns, list) = fixture();
+        accounts
+            .install("c", None, &json!({"access":"c"}), None)
+            .unwrap();
+        let third = accounts.require("c").unwrap();
+        cooldowns
+            .mark("codex", &list[1].id, None, now_ms() + 3_600_000)
+            .unwrap();
+
+        switch_account("codex", &accounts, &cooldowns, &list[1], Switch::Chosen).unwrap();
+        assert_eq!(accounts.current().unwrap().unwrap().id, list[1].id);
+        assert!(cooldowns.read().unwrap().is_empty());
+
+        // A request that saw `a` as current finishes after the choice.
+        let late = Switch::Rotated {
+            from: &list[0].id,
+            req_id: "late",
+        };
+        switch_account("codex", &accounts, &cooldowns, &third, late).unwrap();
+        assert_eq!(accounts.current().unwrap().unwrap().id, list[1].id);
     }
 
     #[tokio::test]

@@ -98,8 +98,13 @@ impl Action {
                 }
                 let accounts = Accounts::open(provider, support)?;
                 let account = saved_account(&accounts, id)?;
-                accounts.set_current(&account.name)?;
-                let _ = crate::rotation::Cooldowns::new().clear_account(provider, &account.id);
+                crate::rotation::switch_account(
+                    provider,
+                    &accounts,
+                    &crate::rotation::Cooldowns::new(),
+                    &account,
+                    crate::rotation::Switch::Chosen,
+                )?;
                 Ok(format!(
                     "Saved. New {} requests use {}. Requests already running keep their account.",
                     ui::provider_name(provider),

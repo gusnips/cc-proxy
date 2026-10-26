@@ -397,8 +397,9 @@ impl Accounts {
     }
 
     /// A late request must not overwrite a switch made by a newer request or
-    /// by `auth use` while it was waiting for the provider.
-    pub(crate) fn switch_if_current(&self, expected_id: &str, next_id: &str) -> Result<()> {
+    /// by `auth use` while it was waiting for the provider. Returns whether it
+    /// switched.
+    pub(crate) fn switch_if_current(&self, expected_id: &str, next_id: &str) -> Result<bool> {
         self.locked(|| {
             let mut index = self.read_index()?;
             let current = index
@@ -410,8 +411,9 @@ impl Accounts {
             {
                 index.current = Some(next.name.clone());
                 self.write_index(&index)?;
+                return Ok(true);
             }
-            Ok(())
+            Ok(false)
         })
     }
 
