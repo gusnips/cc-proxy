@@ -15,6 +15,7 @@ pub fn prepare(
 ) -> Result<Value, serde_json::Error> {
     let mut wire = messages::prepare_request(body, model)?;
     crate::anthropic::request::strip_client_system(&mut wire);
+    crate::anthropic::request::strip_proxy_thinking(&mut wire);
     let system = match wire.get("system") {
         Some(Value::Array(blocks)) => blocks.clone(),
         Some(Value::String(text)) => vec![json!({"type": "text", "text": text})],

@@ -26,6 +26,32 @@ pub fn prepare_api_key_request(body: &mut Value) {
         body.remove("metadata");
     }
     strip_client_system(body);
+    strip_proxy_thinking(body);
+}
+
+/// Drops thinking blocks that this proxy signed (`ccp:<provider>:...`). They
+/// come from a Codex, Kimi or OpenCode turn that ran before a fallback, and
+/// Anthropic answers 400 "Invalid `signature` in `thinking` block" to them.
+/// A message left with no blocks goes too. A message that was empty to begin
+/// with stays, because Claude Code sends effort changes as empty system messages.
+pub(crate) fn strip_proxy_thinking(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    messages.retain_mut(|message| {
+        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            return true;
+        };
+        let before = blocks.len();
+        blocks.retain(|block| {
+            !(block.get("type").and_then(Value::as_str) == Some("thinking")
+                && block
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .is_some_and(|signature| signature.starts_with("ccp:")))
+        });
+        before == 0 || !blocks.is_empty()
+    });
 }
 
 pub(crate) fn strip_client_system(body: &mut Value) {
@@ -108,6 +134,36 @@ mod tests {
         );
         assert_eq!(body["tools"][0]["name"], "Read");
         assert_eq!(body["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn proxy_signed_thinking_is_dropped_and_anthropic_signed_thinking_stays() {
+        let mut body = json!({"messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "", "signature": "ccp:codex:v2:abc"},
+                {"type": "thinking", "thinking": "kept", "signature": "EqQBCkYI"},
+                {"type": "text", "text": "Hello"}
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "", "signature": "ccp:kimi:v1:m:0"}
+            ]},
+            {"role": "system", "content": [], "output_config": {"effort": "xhigh"}},
+            {"role": "user", "content": [{"type": "text", "text": "go"}]}
+        ]});
+        strip_proxy_thinking(&mut body);
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "kept", "signature": "EqQBCkYI"},
+                    {"type": "text", "text": "Hello"}
+                ]},
+                {"role": "system", "content": [], "output_config": {"effort": "xhigh"}},
+                {"role": "user", "content": [{"type": "text", "text": "go"}]}
+            ])
+        );
     }
 
     #[test]
