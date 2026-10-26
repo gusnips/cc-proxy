@@ -174,8 +174,10 @@ cc-proxy config set auth.autoRotate true
 ```
 
 A 429 with a provider-stated retry or reset time makes that account wait.
-The proxy tries another saved account from the same provider and keeps using
-it. Antigravity switches for spent quota, not temporary capacity throttles.
+A spent balance (a payment error, "credit balance is too low") has no reset
+time: the account sits out and is tried again 30 minutes later, or at once when
+you choose it after adding credit. The proxy tries another saved account from
+the same provider and keeps using it. Antigravity switches for spent quota, not temporary capacity throttles.
 A model-specific limit does not block other models.
 
 Rotation only applies to Messages requests before output starts, not images,

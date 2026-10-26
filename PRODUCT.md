@@ -19,7 +19,7 @@ Daily: run `claude` through the proxy. Rare: sign in, switch provider, choose mo
 ## What it can and can't do
 
 - Real: sign in with a browser, device code or API key, route by model name, translate streaming and tool calls, show usage for each saved Codex or Kimi account, choose providers and accounts in the monitor, manage rotation and provider fallback, update itself.
-- Limits: rotation and provider fallback apply to Messages requests before output starts and only after a provider confirms a reset time. Encrypted Codex history stays with its account. Each provider controls its own plans, model access and terms; unofficial clients can carry account risk (the README says so). Explicit monitor `--url` connections are read-only.
+- Limits: rotation and provider fallback apply to Messages requests before output starts and only after a provider confirms a reset time or says the credit is spent. Encrypted Codex history stays with its account. Each provider controls its own plans, model access and terms; unofficial clients can carry account risk (the README says so). Explicit monitor `--url` connections are read-only.
 - Open: account-aware refresh and rotation for Copilot and Cursor.
 
 ## Voice and brand
