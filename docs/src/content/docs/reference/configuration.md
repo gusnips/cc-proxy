@@ -151,8 +151,11 @@ the provider Claude Code routes to and its fallbacks. Only plans with a rolling
 window get it: Claude, Codex, Kimi, Antigravity, OpenCode Go and GLM. A key that
 pays per token (Anthropic, Gemini, OpenCode Zen, a custom provider) would be
 charged for every ping, and a monthly plan (Cursor, Copilot) has no window to
-start, so those are left alone. An account that is waiting on a limit or is out
-of credit is skipped. With routing off there is nothing to ping.
+start, so those are left alone. A saved wait never stops a ping: a window that
+ends at the top of the hour is still counted as waiting for a moment, so the
+provider decides. An account that is still limited answers `429`, and cc-proxy
+saves that wait again. Free Claude accounts are skipped. With routing off there
+is nothing to ping.
 
 ## Provider fallback
 

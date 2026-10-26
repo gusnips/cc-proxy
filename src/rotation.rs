@@ -641,9 +641,14 @@ fn pinged_providers(route: &crate::config::Route) -> Vec<&str> {
 
 /// Sends a one-token Messages request at the start of every hour (`XX:00`) to
 /// every saved account, not only the current one, of each routed provider
-/// whose plan has a rolling window (see `WINDOWED_PLANS`), skipping accounts
-/// that are waiting on a limit. The windows start counting down early while
-/// `cc-proxy` is running. Controlled by `auth.hourlyPing` (read on each tick).
+/// whose plan has a rolling window (see `WINDOWED_PLANS`). The windows start
+/// counting down early while `cc-proxy` is running. Controlled by
+/// `auth.hourlyPing` (read on each tick).
+///
+/// A saved wait never stops a ping. A window that ends at the top of the hour
+/// is still "waiting" for a moment when the tick fires, and skipping it would
+/// leave the next window unstarted for a whole hour. The provider answers: a
+/// limited account says 429, which also refreshes its wait.
 pub(crate) fn spawn_hourly_ping(registry: Arc<Registry>) {
     tokio::spawn(async move {
         loop {
@@ -656,26 +661,10 @@ pub(crate) fn spawn_hourly_ping(registry: Arc<Registry>) {
     });
 }
 
-/// Every saved account that is not waiting on a limit, not only the current
-/// one: a window only starts on the account that is asked.
-fn ping_targets(
-    list: &[Account],
-    cooldowns: &[Cooldown],
-    provider: &str,
-    model: &str,
-    now: u64,
-) -> Vec<Option<String>> {
-    list.iter()
-        .filter(|account| {
-            !cooldowns.iter().any(|c| {
-                c.provider == provider
-                    && c.account == account.id
-                    && c.model.as_deref().is_none_or(|m| m == model)
-                    && c.until_ms > now
-            })
-        })
-        .map(|account| Some(account.id.clone()))
-        .collect()
+/// Every saved account, not only the current one: a window only starts on the
+/// account that is asked. Saved waits are not an input on purpose.
+fn ping_targets(list: Vec<Account>) -> Vec<Option<String>> {
+    list.into_iter().map(|account| Some(account.id)).collect()
 }
 
 async fn ping_routed_providers(
@@ -703,10 +692,7 @@ async fn ping_routed_providers(
                 Some(servable(Some(support), &accounts, accounts.list().ok()?))
             });
         let targets: Vec<Option<String>> = match saved {
-            Some(list) if !list.is_empty() => {
-                let snapshot = cooldowns.read().unwrap_or_default();
-                ping_targets(&list, &snapshot, &name, &model, now_ms())
-            }
+            Some(list) if !list.is_empty() => ping_targets(list),
             _ => vec![None],
         };
         for account in targets {
@@ -2147,38 +2133,19 @@ mod tests {
     }
 
     #[test]
-    fn the_hourly_ping_asks_every_account_that_is_not_waiting_not_only_the_current_one() {
+    fn the_hourly_ping_asks_every_account_even_one_a_saved_wait_calls_limited() {
         let (_dir, accounts, cooldowns, list) = fixture();
         accounts.set_current("b").unwrap();
-        let now = now_ms();
-        let ids = |targets: Vec<Option<String>>| targets.into_iter().flatten().collect::<Vec<_>>();
-        let snapshot = cooldowns.read().unwrap();
-        assert_eq!(
-            ids(ping_targets(&list, &snapshot, "codex", "test", now)),
-            [list[0].id.clone(), list[1].id.clone()]
-        );
-        // An account that is waiting is skipped, and so is one out of credit.
+        // A wait that ends a moment after the tick must not hide the account:
+        // the window it belongs to is over, and the next one has to start.
         cooldowns
-            .mark_with("codex", &list[0].id, None, now + 60_000, true)
+            .mark_with("codex", &list[0].id, None, now_ms() + 500, false)
             .unwrap();
-        let snapshot = cooldowns.read().unwrap();
-        assert_eq!(
-            ids(ping_targets(&list, &snapshot, "codex", "test", now)),
-            [list[1].id.clone()]
-        );
-        // A wait on another model or another provider does not stop the ping.
         cooldowns
-            .mark("codex", &list[1].id, Some("other-model"), now + 60_000)
+            .mark_with("codex", &list[1].id, None, now_ms() + 60_000, true)
             .unwrap();
-        let snapshot = cooldowns.read().unwrap();
-        assert_eq!(
-            ids(ping_targets(&list, &snapshot, "codex", "test", now)),
-            [list[1].id.clone()]
-        );
-        assert_eq!(
-            ids(ping_targets(&list, &snapshot, "kimi", "test", now)).len(),
-            2
-        );
+        let ids: Vec<_> = ping_targets(list.clone()).into_iter().flatten().collect();
+        assert_eq!(ids, [list[0].id.clone(), list[1].id.clone()]);
     }
 
     #[tokio::test]
