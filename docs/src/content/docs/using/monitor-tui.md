@@ -93,6 +93,14 @@ Providers that do not report usage still show confirmed wait timers. Remaining p
 green above 30%, yellow above 10% and red at 10% or less. These colors also apply
 to the bars and numbers in `cc-proxy usage`.
 
+An Antigravity account shows its plan beside its address, such as `(free plan)`.
+A free plan has a weekly allowance and no 5-hour window. That allowance is not
+a list of the models the plan can use: Google can refuse a model with "Resource
+has been exhausted" while the account still shows 100%. Details says so for a
+free account. cc-proxy logs the reasons Google gives for each Antigravity 429
+(`upstream_429` in `proxy.log`: the reasons, domains, model and quota ids, never
+the message), so a refusal can be told apart from a spent quota.
+
 Usage loads in the background and refreshes while Accounts is open. Press `r` to
 refresh now. A failed lookup says usage is unavailable, not zero. If a refresh
 fails after a good one, the row keeps the last numbers and shows

@@ -82,12 +82,53 @@ fn reset_at(error: &Value, now: u64) -> Option<u64> {
         .max()
 }
 
+/// What Google said was wrong, without its prose: the status word, the
+/// reasons, the domains, the model and the violated quotas. An Antigravity 429
+/// is often only "Resource has been exhausted", and the response that reaches
+/// the client keeps nothing else, so this is logged to tell a spent quota from
+/// a plan that cannot use a model from plain capacity.
+fn summary(error: &Value) -> serde_json::Map<String, Value> {
+    let strings = |values: Vec<&str>| -> Value { values.into_iter().map(Value::from).collect() };
+    let infos: Vec<&Value> = details(error)
+        .filter(|detail| is(detail, "ErrorInfo"))
+        .collect();
+    let quota_ids: Vec<&str> = details(error)
+        .filter(|detail| is(detail, "QuotaFailure"))
+        .filter_map(|detail| detail["violations"].as_array())
+        .flatten()
+        .filter_map(|violation| violation["quotaId"].as_str())
+        .collect();
+    serde_json::Map::from_iter([
+        ("googleStatus".to_string(), error["status"].clone()),
+        (
+            "reasons".to_string(),
+            strings(infos.iter().filter_map(|d| d["reason"].as_str()).collect()),
+        ),
+        (
+            "domains".to_string(),
+            strings(infos.iter().filter_map(|d| d["domain"].as_str()).collect()),
+        ),
+        (
+            "models".to_string(),
+            strings(
+                infos
+                    .iter()
+                    .filter_map(|d| d.pointer("/metadata/model")?.as_str())
+                    .collect(),
+            ),
+        ),
+        ("quotaIds".to_string(), strings(quota_ids)),
+        ("detailCount".to_string(), details(error).count().into()),
+    ])
+}
+
 pub(super) fn normalize(failure: &mut ProviderError, error: &Value, provider: &str, now: u64) {
     if failure.status != http::StatusCode::TOO_MANY_REQUESTS {
         return;
     }
     if provider == "Antigravity" {
         failure.rotation_hint = Some(RotationHint::Stay);
+        crate::logging::create_logger("antigravity").info("upstream_429", Some(summary(error)));
     }
     if error["status"].as_str() != Some("RESOURCE_EXHAUSTED") && details(error).next().is_none() {
         return;
@@ -130,6 +171,41 @@ pub(super) fn normalize(failure: &mut ProviderError, error: &Value, provider: &s
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_logged_summary_keeps_the_reasons_and_never_the_prose() {
+        let error = json!({
+            "code": 429, "status": "RESOURCE_EXHAUSTED",
+            "message": "Resource has been exhausted (e.g. check quota).",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED",
+                 "domain": "cloudcode-pa.googleapis.com", "metadata": {"model": "gemini-4-argon"}},
+                {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                 "violations": [{"quotaId": "GenerateRequestsPerWeekPerProject"}]}
+            ]
+        });
+        let summary = summary(&error);
+        assert_eq!(summary["googleStatus"], "RESOURCE_EXHAUSTED");
+        assert_eq!(summary["reasons"], json!(["QUOTA_EXHAUSTED"]));
+        assert_eq!(summary["domains"], json!(["cloudcode-pa.googleapis.com"]));
+        assert_eq!(summary["models"], json!(["gemini-4-argon"]));
+        assert_eq!(
+            summary["quotaIds"],
+            json!(["GenerateRequestsPerWeekPerProject"])
+        );
+        assert_eq!(summary["detailCount"], 2);
+        assert!(
+            !json!(summary)
+                .to_string()
+                .contains("Resource has been exhausted")
+        );
+
+        // A bare refusal says exactly that: no reasons, no details.
+        let bare = super::summary(&json!({"code": 429, "message": "Resource has been exhausted"}));
+        assert_eq!(bare["reasons"], json!([]));
+        assert_eq!(bare["detailCount"], 0);
+        assert!(bare["googleStatus"].is_null());
+    }
 
     #[test]
     fn reads_fractional_and_compound_delays_without_guessing() {

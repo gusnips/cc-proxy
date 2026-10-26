@@ -44,6 +44,8 @@ struct AccountRow {
     waits: Vec<(Option<String>, u64)>,
     /// The account-wide wait is a spent balance: its time is a recheck, not a reset.
     spent: bool,
+    /// What the account's plan can't do, in words (see `AccountSupport::note`).
+    note: Option<String>,
 }
 
 impl AccountRow {
@@ -753,6 +755,9 @@ impl ProvidersPanel {
                             }
                         }
                         text.push(account.state.clone().into());
+                        if let Some(note) = &account.note {
+                            text.push(Line::styled(note.clone(), Style::default().fg(YELLOW)));
+                        }
                         text.push("".into());
                         text.push(
                             "New requests for this provider use the account you choose.".into(),
@@ -1081,7 +1086,8 @@ fn account_rows(
         };
         let spent = waits.iter().any(|wait| wait.model.is_none() && wait.spent);
         let waits = waits.into_iter().map(|wait| (wait.model, wait.until_ms)).collect();
-        Ok(AccountRow { current: current.as_ref() == Some(&account.id), waits, spent, id: account.id, name: account.name, state, usage: None, usage_error: None })
+        let note = accounts.login(&account.name).ok().flatten().and_then(|login| support.note(&login));
+        Ok(AccountRow { current: current.as_ref() == Some(&account.id), waits, spent, id: account.id, name: account.name, state, usage: None, usage_error: None, note })
     }).collect()
 }
 
@@ -1197,6 +1203,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                     usage_error: None,
                     waits: vec![(None, crate::rotation::now_ms() + 3_600_000)],
                     spent: false,
+                    note: None,
                 },
                 AccountRow {
                     id: "demo-work".into(),
@@ -1220,6 +1227,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                     usage_error: None,
                     waits: Vec::new(),
                     spent: false,
+                    note: None,
                 },
             ],
         },
@@ -1248,6 +1256,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                 usage_error: None,
                 waits: Vec::new(),
                 spent: false,
+                note: None,
             }],
         },
         ProviderRow {
@@ -2095,6 +2104,16 @@ mod tests {
         // The usage lookup clears a reset wait it no longer finds, not a spent balance.
         assert!(rows[0].accounts[0].waits.is_empty());
         assert_eq!(rows[0].accounts[1].waits, vec![(None, now + 1_800_000)]);
+    }
+
+    #[test]
+    fn a_plan_note_shows_in_the_details_of_that_account_only() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.rows[0].accounts[0].note = Some("Free plan. A full bar is not model access.".into());
+        panel.selected = Entry::Account("codex".into(), "demo-home".into());
+        assert!(render(&mut panel, 400, 30).contains("Free plan. A full bar is not model access."));
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        assert!(!render(&mut panel, 400, 30).contains("Free plan."));
     }
 
     #[test]

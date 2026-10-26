@@ -35,6 +35,11 @@ pub trait AccountSupport: Send + Sync {
     }
     /// What a saved login holds.
     fn state(&self, login: &Value) -> AuthState;
+    /// Something the monitor should say about this account that its quota
+    /// numbers do not: what its plan can't do.
+    fn note(&self, _login: &Value) -> Option<String> {
+        None
+    }
     /// Where the provider kept its one login before accounts existed.
     fn single_login(&self) -> Box<dyn AuthStorage<Value>>;
     /// Copy an existing local login without taking ownership of its source.

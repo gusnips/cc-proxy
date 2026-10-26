@@ -3,6 +3,18 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.2 (2026-10-25)
+
+- Run `cc-proxy open` to open accounts, settings and activity. `cc-proxy monitor` still works as another name for the command.
+- Pasted API keys now show `*` characters as you type. The key itself never appears. Backspace edits it, Ctrl-U clears it, and Escape or Ctrl-C cancels without saving.
+- With auto-rotate on, a provider-confirmed spent balance moves the request to the next saved key, then to your fallback providers. Empty keys sit out for 30 minutes before a new request tries them again. After adding credit, choose the account to try it at once. When every key is empty, the answer says how to fix it instead of claiming a reset time.
+- A spent balance with no reset now reaches Claude Code as HTTP 402 `billing_error`, not a 429 that says the server is temporarily limiting requests.
+- Hourly pings reach every saved account of the primary and fallback providers whose plans have rolling quota windows. They no longer ping unrelated providers or pay-per-token APIs. Accounts already waiting are skipped.
+- The current account is easier to spot: a bullet, a bold name and a bold `[current]` tag. The primary provider's saved choice is teal; other providers' saved choices are white.
+- Sign-in and model questions stay on the monitor's alternate screen instead of flashing the shell behind it. Provider switches that need no question stay in the list. Removing an account asks for confirmation inside the monitor.
+- Antigravity details show the plan recorded at sign-in. Free accounts explain that a full quota bar does not prove access to every model. Google refusal reasons are logged to help diagnose accounts that show 100% but reject requests.
+- Unit tests no longer write fake request traffic into the live proxy log.
+
 ## v0.4.1 (2026-10-25)
 
 - The monitor has a Settings tab (press `3`). It is the same list as
