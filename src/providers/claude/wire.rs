@@ -195,17 +195,23 @@ mod tests {
                 {"type": "thinking", "thinking": "prior", "signature": "native"},
                 {"type": "tool_use", "id": "t", "name": "Read", "input": {}}
             ]}]
-        })).unwrap();
+        }))
+        .unwrap();
         let plan = prepare(&request, "claude-sonnet-5-5", None).unwrap();
         let mut api = messages::prepare_request(&request, "claude-sonnet-5-5").unwrap();
         crate::anthropic::request::prepare_api_key_request(&mut api);
         for wire in [&plan, &api] {
-            assert_eq!(wire["thinking"]["block_binding"]["prefix_mismatch_behavior"], "drop_block");
+            assert_eq!(
+                wire["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+                "drop_block"
+            );
             assert_eq!(wire["messages"][0]["content"][0]["signature"], "native");
         }
         assert_eq!(plan["tools"][0]["name"], "custom_Read");
         assert_eq!(api["tools"][0]["name"], "Read");
-        request.messages.push(serde_json::from_value(json!({"role": "user", "content": "continue"})).unwrap());
+        request
+            .messages
+            .push(serde_json::from_value(json!({"role": "user", "content": "continue"})).unwrap());
         let later = prepare(&request, "claude-sonnet-5-5", None).unwrap();
         assert_eq!(later["messages"][0], plan["messages"][0]);
     }
