@@ -721,6 +721,7 @@ pub(crate) fn capture_buffered_upstream(ctx: &RequestContext, bytes: &[u8], exte
 
 pub(crate) fn update_buffered_usage(ctx: &RequestContext, value: &serde_json::Value) {
     if let Some(monitor) = ctx.monitor.as_ref() {
+        monitor.observe_anthropic_message(&ctx.req_id, value);
         monitor.usage_updated(
             &ctx.req_id,
             value

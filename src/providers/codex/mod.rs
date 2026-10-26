@@ -654,6 +654,7 @@ impl CodexProvider {
             };
             if let Some(monitor) = ctx.monitor.as_ref() {
                 let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
+                monitor.observe_anthropic_sse(&ctx.req_id, &sse_bytes);
                 monitor.stream_progress(
                     &ctx.req_id,
                     sse_bytes.len() as u64,
@@ -688,6 +689,7 @@ impl CodexProvider {
             ) {
                 Ok(json) => {
                     if let Some(monitor) = ctx.monitor.as_ref() {
+                        monitor.observe_anthropic_message(&ctx.req_id, &json);
                         monitor.usage_updated(
                             &ctx.req_id,
                             json.pointer("/usage/input_tokens").and_then(|v| v.as_u64()),
@@ -1535,6 +1537,7 @@ fn record_live_stream_downstream_capture(ctx: &RequestContext, chunk: &[u8]) {
 fn record_live_stream_progress(ctx: &RequestContext, chunk: &[u8]) {
     if let Some(monitor) = ctx.monitor.as_ref() {
         let (input_tokens, output_tokens) = usage_from_anthropic_sse(chunk);
+        monitor.observe_anthropic_sse(&ctx.req_id, chunk);
         monitor.stream_progress(
             &ctx.req_id,
             chunk.len() as u64,

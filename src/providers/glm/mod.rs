@@ -132,6 +132,7 @@ impl Provider for GlmProvider {
                 }
             };
             if let Some(monitor) = ctx.monitor.as_ref() {
+                monitor.observe_anthropic_message(&ctx.req_id, &json);
                 monitor.usage_updated(
                     &ctx.req_id,
                     json.pointer("/usage/input_tokens").and_then(|v| v.as_u64()),

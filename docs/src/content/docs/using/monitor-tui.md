@@ -135,6 +135,20 @@ Up and Down cross between sessions and recent requests at the ends of their
 lists. `j` and `k` stay within the current list. Enter opens details; Escape
 returns. Columns adapt to the terminal width.
 
+### Tokens and cost
+
+Session and request details show the tokens used and a cost. Totals count from
+the moment the proxy started and reset when it restarts.
+
+- The cost is an estimate at the provider's public API prices. It is not what a
+  subscription charges you, and it leaves out tool and search fees.
+- A model with no price in cc-proxy shows its tokens and `no price for this model`,
+  never `$0.00`. A total that leaves out such requests ends with `(partial)`.
+- `Input` counts everything sent, including tokens read from cache and written to
+  cache. Counting tokens (`count_tokens`) is not use, so it is left out.
+- When a request moves to a fallback provider, its tokens and cost go to the
+  provider that answered.
+
 ## Keys
 
 | Key                    | Action                                                       |

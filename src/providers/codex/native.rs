@@ -11,6 +11,7 @@ use http::{HeaderMap, HeaderName, StatusCode};
 use serde_json::{Map, Value, json};
 
 use crate::anthropic::sse::parse_sse_events;
+use crate::monitor::UsageObservation;
 use crate::provider::RequestContext;
 use crate::registry::normalize_incoming_model;
 use crate::traffic::{
@@ -537,6 +538,9 @@ impl NativeResponseObserver {
             .pointer("/response/usage")
             .or_else(|| value.get("usage"));
         if let Some(usage) = usage {
+            if let Some(monitor) = self.ctx.monitor.as_ref() {
+                monitor.usage_observed(&self.ctx.req_id, UsageObservation::openai(usage));
+            }
             self.input_tokens = usage
                 .get("input_tokens")
                 .and_then(Value::as_u64)
