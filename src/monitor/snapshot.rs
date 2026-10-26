@@ -114,6 +114,8 @@ pub struct ActiveSnapshot {
     pub project: Option<String>,
     pub provider: Option<String>,
     #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
     pub account: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -152,6 +154,7 @@ impl From<ActiveRequest> for ActiveSnapshot {
             session_seq: value.session_seq,
             project: value.project,
             provider: value.provider,
+            account_id: value.account_id,
             account: value.account,
             model: value.model,
             effort: value.effort,
@@ -179,6 +182,8 @@ pub struct CompletedSnapshot {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
     #[serde(default)]
     pub account: Option<String>,
     pub model: Option<String>,
@@ -216,6 +221,7 @@ impl From<CompletedRequest> for CompletedSnapshot {
             session_seq: value.session_seq,
             project: value.project,
             provider: value.provider,
+            account_id: value.account_id,
             account: value.account,
             model: value.model,
             effort: value.effort,
@@ -311,12 +317,12 @@ mod tests {
             Some(1),
             EndpointKind::Messages,
         );
-        monitor.account_selected("first", "home");
+        monitor.account_selected("first", "home-id", "home");
         assert_eq!(
             monitor.snapshot().active[0].account.as_deref(),
             Some("home")
         );
-        monitor.account_selected("first", "work");
+        monitor.account_selected("first", "work-id", "work");
         monitor.request_completed("first", 200, None, None);
         monitor.request_started(
             "second",
@@ -324,14 +330,34 @@ mod tests {
             Some(2),
             EndpointKind::Messages,
         );
-        monitor.account_selected("second", "home");
+        monitor.account_selected("second", "home-id", "home");
         let snapshot: MonitorSnapshot = monitor.snapshot().into();
         assert_eq!(snapshot.recent[0].account.as_deref(), Some("work"));
+        assert_eq!(snapshot.recent[0].account_id.as_deref(), Some("work-id"));
         assert_eq!(snapshot.active[0].account.as_deref(), Some("home"));
+        assert_eq!(snapshot.active[0].account_id.as_deref(), Some("home-id"));
         let encoded = serde_json::to_string(&snapshot).unwrap();
         let decoded: MonitorSnapshot = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, snapshot);
         assert_eq!(decoded.sessions[0].account.as_deref(), Some("home"));
+    }
+
+    #[test]
+    fn a_fallback_provider_replaces_the_first_one_and_its_account() {
+        let monitor = MonitorHandle::default();
+        monitor.request_started("r", None, None, EndpointKind::Messages);
+        monitor.provider_selected("r", "codex", "gpt-6.1-sol", None);
+        monitor.account_selected("r", "codex-id", "account-5");
+        monitor.provider_switched("r", "claude", "claude-opus-5-5");
+        let switched = monitor.snapshot();
+        assert_eq!(switched.active[0].provider.as_deref(), Some("claude"));
+        assert_eq!(switched.active[0].model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(switched.active[0].account, None);
+        monitor.account_selected("r", "claude-id", "contato@openwings.com.br");
+        monitor.request_completed("r", 200, None, None);
+        let done: MonitorSnapshot = monitor.snapshot().into();
+        assert_eq!(done.recent[0].provider.as_deref(), Some("claude"));
+        assert_eq!(done.recent[0].account_id.as_deref(), Some("claude-id"));
     }
 
     #[test]

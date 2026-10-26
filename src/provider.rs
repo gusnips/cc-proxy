@@ -343,7 +343,7 @@ impl RequestContext {
     pub(crate) fn select_account(&mut self, account: &crate::accounts::Account) {
         self.account = Some(account.id.clone());
         if let Some(monitor) = &self.monitor {
-            monitor.account_selected(&self.req_id, &account.name);
+            monitor.account_selected(&self.req_id, &account.id, &account.name);
         }
         crate::logging::create_logger("auth").info(
             "account_selected",

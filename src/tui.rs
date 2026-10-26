@@ -3180,7 +3180,7 @@ mod tests {
             EndpointKind::Messages,
         );
         monitor.provider_selected("account-request", "codex", "gpt-5.6-sol", None);
-        monitor.account_selected("account-request", "work");
+        monitor.account_selected("account-request", "work-id", "work");
         let active: MonitorSnapshot = monitor.snapshot().into();
         let screen = draw(140, 10, |frame| {
             render_active(frame, frame.area(), &active.active, 0)

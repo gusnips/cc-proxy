@@ -51,6 +51,15 @@ pub(crate) struct ExhaustedAt {
     pub spent: bool,
 }
 
+/// Set on a response that a fallback provider answered. The server reads it so
+/// the log and the monitor name the provider that really served the request,
+/// not the one that gave up.
+#[derive(Debug, Clone)]
+pub(crate) struct ServedBy {
+    pub provider: String,
+    pub model: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Cooldown {
     provider: String,
@@ -530,6 +539,13 @@ pub(crate) async fn execute_routed(
                 ("reqId".into(), serde_json::json!(&context.req_id)),
             ])),
         );
+        let by = ServedBy {
+            provider: fallback.to_string(),
+            model: model.clone(),
+        };
+        if let Some(monitor) = &context.monitor {
+            monitor.provider_switched(&context.req_id, &by.provider, &by.model);
+        }
         body.model = Some(model);
         context.provider = fallback.to_string();
         response = execute(
@@ -539,6 +555,7 @@ pub(crate) async fn execute_routed(
             identity.clone(),
         )
         .await;
+        response.extensions_mut().insert(by);
         if let Some((at, name)) = exhausted_by(&response, fallback) {
             spent_providers += 1;
             if earliest.is_none_or(|(first, _)| at.until_ms < first.until_ms) {
@@ -548,7 +565,8 @@ pub(crate) async fn execute_routed(
     }
     // One spent provider already answered with its own message, which names
     // the account to fix. The chain's message only helps when several are spent.
-    match (
+    let served = response.extensions().get::<ServedBy>().cloned();
+    let mut answer = match (
         response.extensions().get::<ExhaustedAt>().copied(),
         earliest,
     ) {
@@ -577,7 +595,11 @@ pub(crate) async fn execute_routed(
             }
         }
         _ => response,
+    };
+    if let Some(by) = served {
+        answer.extensions_mut().insert(by);
     }
+    answer
 }
 
 fn exhausted_by<'a>(response: &Response, provider: &'a str) -> Option<(ExhaustedAt, &'a str)> {
@@ -1869,6 +1891,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], b"antigravity");
+    }
+
+    #[tokio::test]
+    async fn the_provider_that_answered_is_named_not_the_one_that_gave_up() {
+        let monitor = crate::monitor::MonitorHandle::default();
+        monitor.request_started("who", None, None, crate::monitor::EndpointKind::Messages);
+        monitor.provider_selected("who", "codex", "claude-opus-4-8", None);
+        let spent = |name, spent_until| ChainFake {
+            name,
+            spent_until,
+            out_of_credit: false,
+        };
+        let registry = Registry::from_providers([
+            Arc::new(spent("codex", Some(now_ms() + 60 * 60 * 1_000))) as Arc<dyn Provider>,
+            Arc::new(spent("antigravity", None)),
+        ]);
+        let route = chain_route(&["antigravity"]);
+        let context = |monitor: Option<crate::monitor::MonitorHandle>| RequestContext {
+            req_id: "who".into(),
+            session_id: None,
+            session_seq: None,
+            provider: "codex".into(),
+            account: None,
+            traffic: None,
+            monitor,
+        };
+        let body = || -> MessagesRequest {
+            serde_json::from_value(json!({"messages":[],"model":"claude-opus-4-8"})).unwrap()
+        };
+
+        let response = execute_routed(
+            &registry,
+            &route,
+            "claude-opus-4-8",
+            registry.provider("codex").unwrap(),
+            body(),
+            context(Some(monitor.clone())),
+            None,
+        )
+        .await;
+        let by = response.extensions().get::<ServedBy>().unwrap();
+        assert_eq!(
+            (by.provider.as_str(), by.model.as_str()),
+            ("antigravity", "antigravity/test-1")
+        );
+        let live = monitor.snapshot();
+        assert_eq!(live.active[0].provider.as_deref(), Some("antigravity"));
+        assert_eq!(live.active[0].model.as_deref(), Some("antigravity/test-1"));
+
+        // Nothing to name when the first provider answers itself.
+        let answered = execute_routed(
+            &registry,
+            &chain_route(&[]),
+            "claude-opus-4-8",
+            registry.provider("antigravity").unwrap(),
+            body(),
+            context(None),
+            None,
+        )
+        .await;
+        assert!(answered.extensions().get::<ServedBy>().is_none());
     }
 
     #[tokio::test]

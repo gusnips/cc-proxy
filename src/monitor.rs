@@ -91,7 +91,14 @@ pub enum MonitorEvent {
     },
     AccountSelected {
         request_id: String,
+        account_id: String,
         account: String,
+    },
+    /// A fallback provider took over a request the first provider could not serve.
+    ProviderSwitched {
+        request_id: String,
+        provider: String,
+        model: String,
     },
     ModelResolved {
         request_id: String,
@@ -146,6 +153,7 @@ pub struct ActiveRequest {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    pub account_id: Option<String>,
     pub account: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -189,6 +197,7 @@ pub struct CompletedRequest {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    pub account_id: Option<String>,
     pub account: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -411,10 +420,29 @@ impl MonitorHandle {
         });
     }
 
-    pub fn account_selected(&self, request_id: impl Into<String>, account: impl Into<String>) {
+    pub fn account_selected(
+        &self,
+        request_id: impl Into<String>,
+        account_id: impl Into<String>,
+        account: impl Into<String>,
+    ) {
         self.publish(MonitorEvent::AccountSelected {
             request_id: request_id.into(),
+            account_id: account_id.into(),
             account: account.into(),
+        });
+    }
+
+    pub fn provider_switched(
+        &self,
+        request_id: impl Into<String>,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) {
+        self.publish(MonitorEvent::ProviderSwitched {
+            request_id: request_id.into(),
+            provider: provider.into(),
+            model: model.into(),
         });
     }
 
@@ -533,6 +561,7 @@ impl MonitorStore {
                         session_seq,
                         project: None,
                         provider: None,
+                        account_id: None,
                         account: None,
                         model: None,
                         effort: None,
@@ -585,10 +614,26 @@ impl MonitorStore {
             }
             MonitorEvent::AccountSelected {
                 request_id,
+                account_id,
                 account,
             } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
+                    active.account_id = Some(account_id);
                     active.account = Some(account);
+                }
+            }
+            MonitorEvent::ProviderSwitched {
+                request_id,
+                provider,
+                model,
+            } => {
+                if let Some(active) = self.active.get_mut(&request_id) {
+                    active.provider = Some(provider);
+                    active.model = Some(model);
+                    // The account belonged to the provider that gave up. The
+                    // new provider names its own when it picks one.
+                    active.account_id = None;
+                    active.account = None;
                 }
             }
             MonitorEvent::ModelResolved { request_id, model } => {
@@ -814,6 +859,7 @@ impl MonitorStore {
                 session_seq: None,
                 project: None,
                 provider: None,
+                account_id: None,
                 account: None,
                 model: None,
                 effort: None,
@@ -848,6 +894,7 @@ impl MonitorStore {
             session_seq: active.session_seq,
             project: active.project,
             provider: active.provider,
+            account_id: active.account_id,
             account: active.account,
             model: active.model,
             effort: active.effort,
@@ -1409,6 +1456,7 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
             session_seq: None,
             project: None,
             provider: Some("codex".to_string()),
+            account_id: None,
             account: None,
             model: Some("gpt-5.6-sol".to_string()),
             effort: None,
