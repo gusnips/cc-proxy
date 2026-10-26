@@ -31,14 +31,14 @@ pub(super) enum Action {
 }
 
 impl Action {
+    /// Whether the action may ask a question or open a browser. Only these hand
+    /// the screen over; the rest run behind the monitor and answer on its footer.
     pub fn needs_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::StartProxy
-                | Self::UseProvider(_)
-                | Self::SignIn { .. }
-                | Self::RemoveAccount { .. }
-        )
+        match self {
+            Self::StartProxy | Self::SignIn { .. } => true,
+            Self::UseProvider(provider) => start_flow::will_ask(provider),
+            Self::UseAccount { .. } | Self::RemoveAccount { .. } | Self::Fallback(_) => false,
+        }
     }
 
     pub fn run(&self, base_url: &str) -> Result<String> {
@@ -115,16 +115,9 @@ impl Action {
                     .cli()
                     .accounts()
                     .context("This provider does not support saved accounts.")?;
+                // The monitor already asked: removing is a second, explicit choice.
                 let accounts = Accounts::open(provider, support)?;
                 let account = saved_account(&accounts, id)?;
-                let question = format!(
-                    "Remove {} account `{}` from this computer? Its saved login will be deleted. You'll need to sign in again to add it back.",
-                    ui::provider_name(provider),
-                    account.name
-                );
-                if !crate::prompt::confirm(&question, false)? {
-                    return Ok("Nothing changed. The account is still saved.".into());
-                }
                 let next = accounts.remove(&account)?;
                 let _ = crate::rotation::Cooldowns::new().clear_account(provider, id);
                 let next = next.map_or_else(String::new, |next| {

@@ -25,7 +25,10 @@ Accounts opens first. It shows where Claude Code goes, your fallback order and
 saved logins grouped by provider, in that order: the primary provider, then each
 fallback, then your other connected providers, then providers you have not set up.
 Claude subscription follows the same order. `[primary]` marks the provider Claude Code uses.
-`[current]` marks the saved account choice, not an active request. If that account
+`[current]` marks the saved account choice, not an active request. It also gets a
+bullet (`●`) and a bold name, so you can find it at a glance. The one that serves
+new requests now, the choice of the primary provider, is in teal; the choice of
+any other provider is in white. If that account
 has a confirmed wait, it shows `[current, waiting]`. With auto-rotate on, a new
 request skips accounts still waiting. When every account has a confirmed wait,
 `[first reset]` marks the earliest reset. The saved choice changes when a request
@@ -36,19 +39,23 @@ with the arrows and press Enter to run it. Escape goes back without making a
 change. Wide terminals show the list and details side by side. Narrow terminals
 put details below the list.
 
-- Use provider sends Claude Code to that provider. If needed, the monitor
-  opens the existing sign-in and model-choice prompts, then returns to your row.
-  Windows already open follow within a few seconds.
+- Use provider sends Claude Code to that provider. If the provider isn't signed
+  in, or a Claude name has no model yet, the monitor asks right there with the
+  same prompts the commands use, then returns to your row. Otherwise it just
+  saves and says so. Windows already open follow within a few seconds.
 - Use account changes new requests for that provider. It does not change
   where Claude Code goes. Requests already running keep their account.
 - Sign in saves a login. You can add another account or sign in to a saved
-  account again. Adding a login does not change the provider or current account.
+  account again. It asks for a browser, a code or a key on the monitor's own
+  screen, and the monitor comes back when you are done. Adding a login does not
+  change the provider or current account.
 - Fallback adds a signed-in provider to the end of the fallback order, removes
   it or moves it earlier. When you choose a fallback provider as primary, it is
   removed from its own fallback list.
-- Remove saved account deletes one saved login from this computer. The monitor
-  asks first and names the account. If it was the current account, the first
-  one left takes over. To use it again, sign in again.
+- Remove saved account deletes one saved login from this computer. Choosing it
+  opens one more line that names the account and says what is deleted. Enter on
+  that line deletes it, and Escape keeps it. If it was the current account, the
+  first one left takes over. To use it again, sign in again.
 - Disable proxy routing is the last row. It sends Claude Code back to its
   original settings and login. The proxy keeps running, so you can switch back
   here. It does not pick a saved account.
