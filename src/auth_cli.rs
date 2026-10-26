@@ -175,7 +175,10 @@ impl<'a> AccountCli<'a> {
             &chosen,
             crate::rotation::Switch::Chosen(self.support),
         )?;
-        println!("{label} now uses `{name}`. A running proxy switches on its next request.");
+        crate::pool::use_now(self.provider, &chosen.id)?;
+        println!(
+            "{label} now uses `{name}`. It is first in the request order, so new chats start there. Chats already running keep their account."
+        );
         Ok(())
     }
 

@@ -230,8 +230,10 @@ the account is called `main` or `account-2` (a number, not a name) and its
 sign-in has an email, the field starts with that email. Press Esc to keep the
 old name. Outside a terminal, give the new name on the command line.
 
-`auth use` without an account opens a picker in a terminal. The switch applies
-to the next request, without restarting the proxy. `auth status` lists all
+`auth use` without an account opens a picker in a terminal. It turns the
+account's row on and puts it first in the [pool](#pool), as Use now does in the
+monitor. New chats start there from the next request, without restarting the
+proxy. Chats already running keep their account. `auth status` lists all
 accounts, the current one and any limit wait. Codex shows the signed-in email
 when the saved token carries one. `logout` without a name signs
 out when there is one account; with several, it asks which one. Scripts must

@@ -127,9 +127,7 @@ impl Action {
                     &account,
                     crate::rotation::Switch::Chosen(support),
                 )?;
-                // On first, then to the top: a request in between sees it on, never first and off.
-                pool::set_enabled(provider, Some(id), true)?;
-                pool::move_by(provider, Some(id), isize::MIN)?;
+                pool::use_now(provider, id)?;
                 Ok(format!(
                     "Saved. {} / {} is first in the list now. New chats use it. Chats already running keep their account.",
                     ui::provider_name(provider),

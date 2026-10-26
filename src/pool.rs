@@ -247,6 +247,14 @@ pub fn move_by(provider: &str, account_id: Option<&str>, offset: isize) -> Resul
     edit(|rows| shift(rows, provider, account_id, offset))
 }
 
+/// Put one account first and turn it on, as the monitor's Use now does. On
+/// first, then to the top: a request in between sees it on, never first and off.
+pub fn use_now(provider: &str, account_id: &str) -> Result<()> {
+    set_enabled(provider, Some(account_id), true)?;
+    move_by(provider, Some(account_id), isize::MIN)?;
+    Ok(())
+}
+
 /// Make `provider` the first of the pool: its rows move to the top, in their
 /// order. They turn on when none of them is on. With `only`, every other row
 /// turns off. The rest keep their order.
