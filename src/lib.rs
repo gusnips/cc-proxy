@@ -15,6 +15,7 @@ pub mod monitor;
 pub mod openai_compat;
 pub mod paths;
 pub mod pool;
+pub mod pool_cli;
 pub mod project;
 pub mod prompt;
 pub mod provider;

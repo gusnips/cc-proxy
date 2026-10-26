@@ -53,26 +53,40 @@ If `settings.json` isn't valid JSON, `start` stops before it does anything and n
 
 ```sh
 cc-proxy use <provider>... | direct
-cc-proxy use <provider> --no-fallback
+cc-proxy use <provider> --only
 ```
 
 Changes where Claude Code goes, with the proxy kept running. `claude` uses a saved Claude subscription through the proxy, like any other provider. `cc-proxy provider list` shows all provider names.
 
-`cc-proxy use direct` bypasses the proxy and restores Claude Code's original settings and login. It needs no provider sign-in, never selects a saved cc-proxy account and does not start or stop the proxy. Use `direct` on its own, not in a fallback chain.
+`cc-proxy use direct` bypasses the proxy and restores Claude Code's original settings and login. It needs no provider sign-in, never selects a saved cc-proxy account and does not start or stop the proxy. Use `direct` on its own, not in a list of providers.
 
-One provider keeps your fallbacks. It moves to the front, and the provider you had before becomes the first fallback. If Codex is first and Kimi follows, `cc-proxy use kimi` makes Kimi first and Codex its fallback.
+One provider moves to the top of the [pool](#pool) and the rest keep their order. If Codex is first and Kimi follows, `cc-proxy use kimi` makes Kimi first and Codex second. Rows you turned off stay off, unless every row of that provider was off. Then they come back on.
 
-More than one provider sets the chain, tried in the order you list them:
+More than one provider sets the order requests try them, and turns the rest of the pool off:
 
 ```sh
 cc-proxy use codex antigravity
 ```
 
-When every saved Codex account is spent, the next request goes to Antigravity. The first request after Codex frees up goes back to Codex. This needs `auth.autoRotate` on for providers with more than one saved account. `cc-proxy use codex --no-fallback` clears the chain.
+Requests start with Codex. When every Codex account is waiting on a limit, a request goes to Antigravity. A chat that already started stays on the account it started on, so the provider's cache keeps working. Only new chats go back to Codex once it frees up. Moving on from a limit needs `auth.autoRotate` on. `cc-proxy use codex --only` turns every other provider off.
 
 With no argument, `use` asks the same question as `start`. If the provider isn't signed in, it asks `Sign in now? [y/N]` and runs that provider's sign-in. The default is no, so a script never opens a browser. For GLM and OpenCode Go, sign-in reads an API key.
 
 The switch applies on the next request in every open window. Nothing restarts.
+
+## `pool`
+
+```sh
+cc-proxy pool
+cc-proxy pool on|off <provider> [account]
+cc-proxy pool move <provider> [account] up|down
+```
+
+The pool is one list of providers and saved accounts, in the order requests try them. A Claude account, a Codex account and a second Claude account can sit in any order. Each row is on or off. A request takes the first row that is on and ready: it is not waiting on a limit, and it has a model for the name Claude Code sent. A chat that already started stays on its row while that row can still serve it, so the provider's prompt cache keeps working. The chat moves down the list when its row hits a limit, is turned off or is removed. A row above that frees up only takes new chats.
+
+`pool` shows the rows. `pool on` and `pool off` turn all of a provider's rows, or one account, on or off. `pool move` moves one row one place. A provider you signed in to after the pool was saved appears turned off, so nothing changes where Claude Code goes until you choose it. A new account of a provider that is already on joins it, turned on.
+
+A model name that belongs to one provider, such as `kimi-k2.6`, uses that provider's rows that are on. With none on, the provider answers as before.
 
 ## `status`, `stop`, `restart`, `reload`
 

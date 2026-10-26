@@ -1811,4 +1811,41 @@ mod tests {
         assert_eq!(calls(&kimi_calls), 0);
         assert_eq!(calls(&anthropic_calls), 0);
     }
+
+    #[tokio::test]
+    async fn the_hourly_ping_skips_a_row_that_is_turned_off() {
+        let count = |name| {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Arc::new(Counting {
+                    name,
+                    calls: calls.clone(),
+                }) as Arc<dyn Provider>,
+                calls,
+            )
+        };
+        let (codex, codex_calls) = count("codex");
+        let (kimi, kimi_calls) = count("kimi");
+        let registry = Registry::from_providers([codex, kimi]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            json!({"route": {"on": true, "pool": [
+                {"provider": "codex", "enabled": true},
+                {"provider": "kimi", "enabled": false}
+            ]}})
+            .to_string(),
+        )
+        .unwrap();
+        let route = crate::config::route_from(dir.path());
+        let cooldowns = Cooldowns {
+            path: dir.path().join("rotation.json"),
+        };
+        ping_routed_providers(&registry, &route, &cooldowns).await;
+        let calls = |counter: &Arc<std::sync::atomic::AtomicUsize>| {
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        assert_eq!(calls(&codex_calls), 1);
+        assert_eq!(calls(&kimi_calls), 0);
+    }
 }

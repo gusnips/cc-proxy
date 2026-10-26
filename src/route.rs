@@ -264,7 +264,7 @@ pub fn status_lines() -> Vec<String> {
         && !route.fallback.is_empty()
     {
         lines.push(format!(
-            "When {} is spent, Claude Code moves to {}.",
+            "Requests try {}, then {}. `cc-proxy pool` shows every account in order.",
             ui::provider_name(provider),
             route
                 .fallback

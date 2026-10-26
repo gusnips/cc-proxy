@@ -54,7 +54,8 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
     for description in [
         "Print version information",
         "Start the proxy as a background service and send Claude Code through it",
-        "Switch provider, set a fallback order, or use `direct` to bypass the proxy",
+        "Put a provider first, set the order of several, or use `direct` to bypass the proxy",
+        "See the order requests try providers and accounts, turn them on or off, and move them",
         "Switch routing off and stop the background proxy service",
         "Show whether the proxy is running and where Claude Code goes",
         "Restart the background proxy service",
@@ -466,6 +467,86 @@ fn auth_rename_changes_only_the_name() -> Result<(), Box<dyn std::error::Error>>
     run(&["auth", "use", "codex", "ana@example.com"])
         .success()
         .stdout(contains("now uses `ana@example.com`"));
+    Ok(())
+}
+
+#[test]
+fn pool_lists_turns_rows_on_and_off_and_moves_them() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let config = temp.path().join("config");
+    let ids = [
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    ];
+    std::fs::create_dir_all(config.join("codex/accounts"))?;
+    std::fs::write(
+        config.join("codex/accounts.json"),
+        serde_json::json!({"current":"home", "accounts":[
+            {"id":ids[0],"name":"home","identity":"acct-home"},
+            {"id":ids[1],"name":"work","identity":"acct-work"}
+        ]})
+        .to_string(),
+    )?;
+    for (id, identity) in ids.iter().zip(["acct-home", "acct-work"]) {
+        std::fs::write(
+            config.join("codex/accounts").join(format!("{id}.json")),
+            serde_json::json!({
+                "access":"x","refresh":"x","expires":4102444800000_u64,"accountId":identity
+            })
+            .to_string(),
+        )?;
+    }
+    std::fs::write(
+        config.join("config.json"),
+        r#"{"port": 4321, "route": {"on": true, "provider": "codex"}}"#,
+    )?;
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.env("XDG_STATE_HOME", temp.path().join("state"));
+        cmd.args(args).assert()
+    };
+    let out = |assert: assert_cmd::assert::Assert| {
+        String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+    };
+
+    // The older settings read as rows, and listing writes nothing.
+    let listed = out(run(&["pool"]).success());
+    assert!(listed.find("home").unwrap() < listed.find("work").unwrap());
+    assert!(!std::fs::read_to_string(config.join("config.json"))?.contains("pool"));
+
+    run(&["pool", "off", "codex", "work"])
+        .success()
+        .stdout(contains("Codex `work` is off"));
+    run(&["pool", "move", "codex", "work", "up"])
+        .success()
+        .stdout(contains("now number 1"));
+    run(&["pool", "move", "codex", "up"])
+        .failure()
+        .stderr(contains("Say which one"));
+    run(&["pool", "move", "codex", "work", "sideways"])
+        .failure()
+        .stderr(contains("`up` or `down`"));
+    run(&["pool", "on", "kimi"])
+        .failure()
+        .stderr(contains("cc-proxy login kimi"));
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config.join("config.json"))?)?;
+    assert_eq!(saved["port"], 4321);
+    assert!(saved["route"].get("provider").is_none());
+    let rows: Vec<(&str, bool)> = saved["route"]["pool"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["accountId"].as_str().unwrap(),
+                row["enabled"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(rows, [(ids[1].as_str(), false), (ids[0].as_str(), true)]);
     Ok(())
 }
 

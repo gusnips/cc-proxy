@@ -115,6 +115,14 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                             for name in ["ytest", "ztest"]}},
     }))
     read = lambda: json.loads(file.read_text())
+
+    def pool_order():
+        # The providers that are on, in the order requests try them.
+        names = []
+        for row in read()["route"].get("pool", []):
+            if row["enabled"] and row["provider"] not in names:
+                names.append(row["provider"])
+        return names
     url = f"http://127.0.0.1:{port}"
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     def alive():
@@ -205,12 +213,12 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.text("Providers and accounts")
                 # The other connected provider follows the primary's accounts.
                 monitor.keys(b"\x1b[H" + b"\x1b[B" * 3 + b"\r\x1b[B\r")
-                monitor.wait(lambda: read()["route"]["fallback"] == ["ytest"], "Fallback did not save")
+                monitor.wait(lambda: pool_order() == ["ztest", "ytest"], "Fallback did not save")
                 # Choose that provider. The model choices and login already exist.
                 monitor.keys(b"\r\r")
-                monitor.wait(lambda: read()["route"]["provider"] == "ytest", "Provider did not switch")
+                monitor.wait(lambda: pool_order()[:1] == ["ytest"], "Provider did not switch")
                 monitor.text("Claude Code uses ytest")
-                assert read()["route"]["fallback"] == ["ztest"], "The old primary did not become the first fallback"
+                assert pool_order() == ["ytest", "ztest"], "The old first provider did not stay second"
                 settings = json.loads((root / "claude/settings.json").read_text())
                 assert settings["env"]["ANTHROPIC_BASE_URL"].rstrip("/") == url
                 # A cancelled action must not save anything or exit the monitor.
