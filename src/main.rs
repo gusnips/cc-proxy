@@ -87,7 +87,7 @@ enum Commands {
         json: bool,
     },
     /// Open accounts, settings and live activity. If the proxy is off, press s to start it
-    #[command(visible_alias = "monitor")]
+    #[command(visible_aliases = ["monitor", "show"])]
     Open {
         #[arg(long)]
         url: Option<reqwest::Url>,
@@ -1368,8 +1368,8 @@ mod tests {
     }
 
     #[test]
-    fn open_is_the_command_and_monitor_still_works_as_its_name() {
-        for name in ["open", "monitor"] {
+    fn open_is_the_command_and_monitor_and_show_work_as_its_names() {
+        for name in ["open", "monitor", "show"] {
             let cli = Cli::try_parse_from(["cc-proxy", name]).unwrap();
             assert!(
                 matches!(cli.command, Some(Commands::Open { url: None })),

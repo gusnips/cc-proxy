@@ -103,7 +103,7 @@ If routing is on but nothing answers on the port (the proxy crashed, or the mach
 cc-proxy open [--url <URL>]
 ```
 
-Open the monitor. `cc-proxy monitor` is another name for this command. If the proxy is stopped, the monitor still opens and `s` starts it with the provider you chose last. Accounts opens first, with provider and account choices, usage, rotation and fallback actions. Use arrows and Enter; press `2` for requests and errors in Activity. Changes save without a restart. `q` and `Ctrl-C` close the monitor without stopping the proxy.
+Open the monitor. `cc-proxy monitor` and `cc-proxy show` are other names for this command. If the proxy is stopped, the monitor still opens and `s` starts it with the provider you chose last. Accounts opens first, with provider and account choices, usage, rotation and fallback actions. Use arrows and Enter; press `2` for requests and errors in Activity. Changes save without a restart. `q` and `Ctrl-C` close the monitor without stopping the proxy.
 
 The default URL is `http://127.0.0.1:<configured-port>`. An explicit `--url` opens read-only Activity and never loads or changes local accounts. It fails if nothing answers there, because that is most likely a typo. No provider login is needed for that connection. The endpoint accepts only loopback peers; use an SSH port forward for another machine. After a connection failure, the monitor keeps its last snapshot, pauses changes and retries. See [Monitor](/using/monitor-tui/) for the actions and keys.
 

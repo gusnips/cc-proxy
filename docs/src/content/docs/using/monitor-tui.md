@@ -9,7 +9,7 @@ Open the monitor:
 cc-proxy open
 ```
 
-`cc-proxy monitor` still works. It is another name for the same command.
+`cc-proxy monitor` and `cc-proxy show` also work. They are other names for the same command.
 
 If the proxy is stopped, the monitor still opens. It says "Proxy off" and shows
 your saved accounts. Press `s` to start the proxy. It uses the provider you
