@@ -92,6 +92,23 @@ impl Sandbox {
             .unwrap_or(Value::Null)
     }
 
+    /// The request pool as (provider, on) rows in the order requests try them.
+    fn pool(&self) -> Vec<(String, bool)> {
+        self.route()["pool"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        (
+                            row["provider"].as_str().unwrap().to_string(),
+                            row["enabled"].as_bool().unwrap(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
@@ -266,7 +283,8 @@ fn start_routes_claude_code_through_settings_and_stop_switches_it_off() {
             .all(|row| row["label"].as_str().unwrap().starts_with("codex/"))
     );
     sandbox.assert_routed_to_proxy();
-    assert_eq!(sandbox.route(), json!({"on": true, "provider": "codex"}));
+    assert_eq!(sandbox.route()["on"], true);
+    assert_eq!(sandbox.pool(), [("codex".to_string(), true)]);
     sandbox
         .cmd()
         .arg("status")
@@ -316,9 +334,10 @@ fn use_switches_provider_and_direct_without_restarting_the_proxy() {
         .assert()
         .success()
         .stdout(contains("Claude Code goes to Kimi"));
+    assert_eq!(sandbox.route()["on"], true);
     assert_eq!(
-        sandbox.route(),
-        json!({"on": true, "provider": "kimi", "fallback": ["codex"]})
+        sandbox.pool(),
+        [("kimi".to_string(), true), ("codex".to_string(), true)]
     );
     sandbox.assert_routed_to_proxy();
 
@@ -331,9 +350,11 @@ fn use_switches_provider_and_direct_without_restarting_the_proxy() {
             "Claude Code uses its original settings and login, without the proxy",
         ));
     sandbox.assert_routed_to_anthropic();
+    // Routing is off, and the pool is kept for the next `use`.
+    assert_eq!(sandbox.route()["on"], false);
     assert_eq!(
-        sandbox.route(),
-        json!({"on": false, "provider": "kimi", "fallback": ["codex"]})
+        sandbox.pool(),
+        [("kimi".to_string(), true), ("codex".to_string(), true)]
     );
 
     // The proxy ran through all of it, and picks the last provider up again.
@@ -343,7 +364,7 @@ fn use_switches_provider_and_direct_without_restarting_the_proxy() {
 }
 
 #[test]
-fn use_keeps_the_pool_and_only_a_chain_or_no_fallback_replaces_it() {
+fn use_keeps_the_pool_and_only_a_list_or_only_turns_the_rest_off() {
     let sandbox = Sandbox::new();
     for provider in ["codex", "kimi", "grok"] {
         sandbox.sign_in(provider);
@@ -353,40 +374,50 @@ fn use_keeps_the_pool_and_only_a_chain_or_no_fallback_replaces_it() {
         .args(["use", "codex", "kimi", "grok"])
         .assert()
         .success();
+    let on = |names: [&str; 3], flags: [bool; 3]| {
+        names
+            .into_iter()
+            .zip(flags)
+            .map(|(name, flag)| (name.to_string(), flag))
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        sandbox.route(),
-        json!({"on": true, "provider": "codex", "fallback": ["kimi", "grok"]})
+        sandbox.pool(),
+        on(["codex", "kimi", "grok"], [true, true, true])
     );
+    // The older keys are gone: the pool holds the order now.
+    assert!(sandbox.route().get("provider").is_none());
+    assert!(sandbox.route().get("fallback").is_none());
 
-    // One provider takes the lead. The old primary becomes the first fallback
-    // and the others keep their order.
+    // One provider takes the lead. The old first provider follows it and the
+    // others keep their order.
     sandbox.cmd().args(["use", "grok"]).assert().success();
     assert_eq!(
-        sandbox.route(),
-        json!({"on": true, "provider": "grok", "fallback": ["codex", "kimi"]})
+        sandbox.pool(),
+        on(["grok", "codex", "kimi"], [true, true, true])
     );
 
-    // The flag clears the chain.
+    // The flag turns every other provider off. They stay in the list.
     sandbox
         .cmd()
-        .args(["use", "kimi", "--no-fallback"])
+        .args(["use", "kimi", "--only"])
         .assert()
         .success();
     assert_eq!(
-        sandbox.route(),
-        json!({"on": true, "provider": "kimi", "fallback": []})
+        sandbox.pool(),
+        on(["kimi", "grok", "codex"], [true, false, false])
     );
 
     // A list and the flag contradict each other, so nothing changes.
     sandbox
         .cmd()
-        .args(["use", "codex", "grok", "--no-fallback"])
+        .args(["use", "codex", "grok", "--only"])
         .assert()
         .failure()
-        .stderr(contains("--no-fallback"));
+        .stderr(contains("--only"));
     assert_eq!(
-        sandbox.route(),
-        json!({"on": true, "provider": "kimi", "fallback": []})
+        sandbox.pool(),
+        on(["kimi", "grok", "codex"], [true, false, false])
     );
 }
 
@@ -422,7 +453,7 @@ fn direct_and_stop_restore_the_original_settings_and_login() {
         }
         assert_eq!(restored["theme"], original["theme"]);
         assert_eq!(sandbox.route()["on"], false);
-        assert_eq!(sandbox.route()["provider"], "kimi");
+        assert_eq!(sandbox.pool(), [("kimi".to_string(), true)]);
         sandbox.wait_for_status(!stop);
         if !stop {
             assert_eq!(sandbox.pid(), pid);
@@ -445,7 +476,7 @@ fn direct_without_a_proxy_does_not_start_one_or_change_settings() {
 }
 
 #[test]
-fn direct_cannot_be_part_of_a_fallback_chain_and_changes_nothing() {
+fn direct_cannot_be_listed_with_providers_and_changes_nothing() {
     let sandbox = Sandbox::new();
     let original = "{\"theme\": \"dark\"}\n";
     sandbox.write_settings(original);
@@ -456,7 +487,7 @@ fn direct_cannot_be_part_of_a_fallback_chain_and_changes_nothing() {
             .args(targets)
             .assert()
             .failure()
-            .stderr(contains("can't be part of a fallback chain"));
+            .stderr(contains("can't be listed with providers"));
     }
     assert_eq!(
         std::fs::read_to_string(sandbox.settings_path()).unwrap(),
@@ -643,7 +674,7 @@ fn use_takes_an_api_key_for_a_provider_that_signs_in_with_one() {
         .stdout(contains("GLM isn't signed in. Sign in now?"))
         .stdout(contains("Claude Code goes to GLM"));
     sandbox.assert_routed_to_proxy();
-    assert_eq!(sandbox.route()["provider"], "glm");
+    assert_eq!(sandbox.pool(), [("glm".to_string(), true)]);
 }
 
 #[test]
