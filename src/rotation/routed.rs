@@ -5,16 +5,17 @@
 //! keeps its provider and account while they can still serve it, so the
 //! provider's cache is reused, even after a row above recovers. When that row
 //! hits a limit, is turned off or is removed, the chat moves down the pool.
-//! Running requests are pinned to the account they started on.
+//! Running requests are pinned to the account they started on. A chat's place is
+//! saved (see `chats`), so a restart or an update keeps it too.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::response::Response;
 use http::StatusCode;
-use once_cell::sync::Lazy;
 
+use super::chats::{Place, place_of, remember};
 use super::{
     Cooldown, Cooldowns, MAX_ROTATION_WAIT_MS, ServedBy, all_limited, execute, exhausted_response,
     now_ms, retry_deadline, spent_response, storage_error,
@@ -25,42 +26,6 @@ use crate::config::{PoolEntry, Route};
 use crate::provider::{AuthState, Provider, RequestContext};
 use crate::registry::{Registry, anthropic_model_family};
 use crate::request_identity::ConversationIdentity;
-
-/// A provider and one of its saved accounts, or the provider alone.
-type Place = (String, Option<String>);
-
-/// How long a chat keeps its place after its last request.
-const CHAT_MEMORY: Duration = Duration::from_secs(24 * 60 * 60);
-/// Most chats remembered at once. The oldest goes first.
-const CHAT_LIMIT: usize = 2_048;
-
-static CHATS: Lazy<Mutex<HashMap<String, (Place, Instant)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-fn place_of(chat: &str) -> Option<Place> {
-    let chats = CHATS.lock().ok()?;
-    let (place, at) = chats.get(chat)?;
-    (at.elapsed() < CHAT_MEMORY).then(|| place.clone())
-}
-
-fn remember(chat: &str, place: Place) {
-    let Ok(mut chats) = CHATS.lock() else {
-        return;
-    };
-    if chats.len() >= CHAT_LIMIT && !chats.contains_key(chat) {
-        chats.retain(|_, (_, at)| at.elapsed() < CHAT_MEMORY);
-        let oldest = chats
-            .iter()
-            .min_by_key(|(_, (_, at))| *at)
-            .map(|(chat, _)| chat.clone());
-        if chats.len() >= CHAT_LIMIT
-            && let Some(oldest) = oldest
-        {
-            chats.remove(&oldest);
-        }
-    }
-    chats.insert(chat.to_string(), (place, Instant::now()));
-}
 
 /// One row that can serve this request: who answers, and with which model.
 struct Plan {
@@ -502,6 +467,7 @@ mod tests {
     use crate::monitor::{EndpointKind, MonitorHandle};
     use crate::provider::CliHandlers;
     use async_trait::async_trait;
+    use std::sync::Mutex;
 
     type Calls = Arc<Mutex<Vec<Place>>>;
 
@@ -1001,6 +967,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_chat_is_still_on_its_account_after_a_restart_and_a_missing_row_falls_through() {
+        let world = world();
+        world.limit("claude", Some(CLAUDE_PRO));
+        let started = world.ask(&mixed(), Some("chat-restart")).await;
+        assert_eq!(text(started).await, format!("codex:{CODEX_ONE}"));
+        world.served();
+        world.recover("claude", CLAUDE_PRO);
+
+        // The proxy restarts: the places are read from the file again. The
+        // chat stays on Codex even though the first row is ready.
+        super::super::chats::forget_loaded();
+        let same = world.ask(&mixed(), Some("chat-restart")).await;
+        assert_eq!(text(same).await, format!("codex:{CODEX_ONE}"));
+        assert_eq!(world.served(), [place("codex", Some(CODEX_ONE))]);
+
+        // Its row was removed or turned off while the proxy was down: the
+        // first ready row answers, as for a new chat.
+        super::super::chats::forget_loaded();
+        let rows = vec![
+            row("claude", Some(CLAUDE_PRO)),
+            row("claude", Some(CLAUDE_MAX)),
+        ];
+        let moved = world.ask(&rows, Some("chat-restart")).await;
+        assert_eq!(text(moved).await, format!("claude:{CLAUDE_PRO}"));
+    }
+
+    #[tokio::test]
     async fn an_empty_pool_says_what_to_turn_on_instead_of_picking_a_provider() {
         let world = world();
         let response = world.ask(&[], None).await;
@@ -1034,14 +1027,5 @@ mod tests {
             plans.iter().map(Plan::place).collect::<Vec<_>>(),
             [place("claude", Some(CLAUDE_MAX))]
         );
-    }
-
-    #[test]
-    fn a_chat_is_remembered_and_its_place_can_change() {
-        remember("memory-test-a", place("claude", Some("x")));
-        assert_eq!(place_of("memory-test-a"), Some(place("claude", Some("x"))));
-        assert_eq!(place_of("memory-test-unknown"), None);
-        remember("memory-test-a", place("codex", None));
-        assert_eq!(place_of("memory-test-a"), Some(place("codex", None)));
     }
 }
