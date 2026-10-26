@@ -43,14 +43,15 @@ fn candidates(registry: &Registry, only: Option<&HashSet<String>>) -> Vec<Candid
             let cli = provider.cli();
             let saved = cli
                 .accounts()
-                .filter(|support| support.pinned_credentials().is_none());
+                .filter(|support| support.pinned_credentials().is_none())
+                .map(|support| saved_ids(id, support));
             let (ids, current) = match saved {
-                Some(support) => match saved_ids(id, support) {
-                    Ok((ids, current)) => (Some(ids), current),
-                    Err(_) => (None, None),
-                },
-                None if matches!(cli.auth_state(), AuthState::Missing) => (Some(Vec::new()), None),
-                None => (Some(vec![None]), None),
+                Some(Ok((ids, current))) if !ids.is_empty() => (Some(ids), current),
+                Some(Err(_)) => (None, None),
+                // No saved account: the provider's one credential, from the
+                // environment or its own file, is the row. Nothing, when it has none.
+                _ if matches!(cli.auth_state(), AuthState::Missing) => (Some(Vec::new()), None),
+                _ => (Some(vec![None]), None),
             };
             Some(Candidate {
                 provider: id.to_string(),
