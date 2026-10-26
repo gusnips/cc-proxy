@@ -11,7 +11,8 @@
 //! are kept. A chat is saved when it is new or moves, and again when its saved
 //! time is more than five minutes old, so a request does not write the file.
 //! A file that is missing, unreadable or corrupt starts the list empty. Saving
-//! never fails or slows a request: the first error is logged once.
+//! never fails a request: the first error is logged once. A busy file lock skips
+//! the save; a later request tries again.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -57,6 +58,8 @@ struct Chat {
 pub(super) struct ChatMemory {
     path: PathBuf,
     chats: HashMap<String, Chat>,
+    /// A changed place or stale time that has not been saved yet.
+    dirty: bool,
     warned: bool,
 }
 
@@ -70,6 +73,7 @@ impl ChatMemory {
         let mut memory = Self {
             path,
             chats: HashMap::new(),
+            dirty: false,
             warned: false,
         };
         let mut rows = match read(&memory.path, now_ms) {
@@ -105,15 +109,10 @@ impl ChatMemory {
     }
 
     fn remember_at(&mut self, chat: &str, place: Place, now_ms: u64) {
-        let (save, saved_ms) = match self.chats.get(chat) {
-            Some(known)
-                if known.place == place
-                    && now_ms.saturating_sub(known.saved_ms) <= SAVE_AGAIN_MS =>
-            {
-                (false, known.saved_ms)
-            }
-            _ => (true, now_ms),
-        };
+        let saved_ms = self.chats.get(chat).map_or(0, |known| known.saved_ms);
+        self.dirty |= self.chats.get(chat).is_none_or(|known| {
+            known.place != place || now_ms.saturating_sub(known.saved_ms) > SAVE_AGAIN_MS
+        });
         if !self.chats.contains_key(chat) && self.chats.len() >= CHAT_LIMIT {
             self.chats
                 .retain(|_, known| known.seen.elapsed() < CHAT_MEMORY);
@@ -136,20 +135,35 @@ impl ChatMemory {
                 saved_ms,
             },
         );
-        if save && let Err(error) = self.write(now_ms) {
-            self.warn("chats_not_saved", &error);
+        if self.dirty {
+            match self.write(now_ms) {
+                Ok(true) => {
+                    self.dirty = false;
+                    for known in self.chats.values_mut() {
+                        known.saved_ms =
+                            now_ms.saturating_sub(known.seen.elapsed().as_millis() as u64);
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => self.warn("chats_not_saved", &error),
+            }
         }
     }
 
     /// Saves every fresh chat. Chats another proxy saved meanwhile stay.
-    fn write(&self, now_ms: u64) -> io::Result<()> {
+    /// Returns false when another process has the lock; never waits for it.
+    fn write(&self, now_ms: u64) -> io::Result<bool> {
         let dir = self
             .path
             .parent()
             .ok_or_else(|| io::Error::other("the chats file has no folder"))?;
         fs::create_dir_all(dir)?;
         let lock = File::create(self.path.with_extension("lock"))?;
-        lock.lock()?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Ok(false),
+            Err(fs::TryLockError::Error(error)) => return Err(error),
+        }
         let mut rows: HashMap<String, SavedChat> = read(&self.path, now_ms)
             .unwrap_or_default()
             .into_iter()
@@ -172,7 +186,8 @@ impl ChatMemory {
         let mut rows: Vec<SavedChat> = rows.into_values().collect();
         rows.sort_by_key(|row| std::cmp::Reverse(row.last_seen_ms));
         rows.truncate(CHAT_LIMIT);
-        crate::fsutil::write_atomic(&self.path, &serde_json::to_vec(&rows)?)
+        crate::fsutil::write_atomic(&self.path, &serde_json::to_vec(&rows)?)?;
+        Ok(true)
     }
 
     fn warn(&mut self, message: &str, error: &dyn std::fmt::Display) {
@@ -381,6 +396,52 @@ mod tests {
         // The place still works inside this process.
         assert_eq!(memory.place_of("chat-a"), Some(place("claude", None)));
         assert!(memory.warned);
+        assert!(memory.dirty);
+
+        // Fix the folder: the next request retries without waiting five minutes.
+        fs::remove_file(&blocker).unwrap();
+        memory.remember("chat-a", place("claude", None));
+        assert!(!memory.dirty);
+        assert_eq!(
+            ChatMemory::load(blocker.join("chats.json")).place_of("chat-a"),
+            Some(place("claude", None))
+        );
+    }
+
+    #[test]
+    fn a_busy_lock_skips_saving_and_the_next_request_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chats.json");
+        let mut memory = ChatMemory::load(path.clone());
+        memory.remember("chat-a", place("claude", Some("a")));
+
+        let lock = File::create(path.with_extension("lock")).unwrap();
+        lock.lock().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            memory.remember("chat-a", place("codex", Some("b")));
+            send.send(memory).unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_secs(3));
+        // Always release it before joining: a blocking-lock regression must
+        // fail the test rather than leave a thread stuck holding up the suite.
+        drop(lock);
+        worker.join().unwrap();
+        let mut memory = result.expect("remember waited for the file lock");
+        assert!(memory.dirty);
+        assert!(!memory.warned);
+        assert_eq!(memory.place_of("chat-a"), Some(place("codex", Some("b"))));
+        assert_eq!(
+            ChatMemory::load(path.clone()).place_of("chat-a"),
+            Some(place("claude", Some("a")))
+        );
+
+        memory.remember("chat-a", place("codex", Some("b")));
+        assert!(!memory.dirty);
+        assert_eq!(
+            ChatMemory::load(path).place_of("chat-a"),
+            Some(place("codex", Some("b")))
+        );
     }
 
     #[test]
