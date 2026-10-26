@@ -19,6 +19,25 @@ pub struct UsageTotals {
 }
 
 impl UsageTotals {
+    /// A request's input and output as shown: what the monitor measured when it
+    /// observed any (input then includes the cached share), else the count the
+    /// provider reported before that.
+    pub fn input_or(&self, reported: Option<u64>) -> Option<u64> {
+        if self.observed_requests > 0 {
+            Some(self.input_tokens)
+        } else {
+            reported
+        }
+    }
+
+    pub fn output_or(&self, reported: Option<u64>) -> Option<u64> {
+        if self.observed_requests > 0 {
+            Some(self.output_tokens)
+        } else {
+            reported
+        }
+    }
+
     /// `12.4k in / 830 out`, then the cost when there is one.
     pub fn compact(&self) -> String {
         match self.cost_label() {
@@ -640,6 +659,10 @@ mod tests {
         let state = monitor.snapshot();
         assert_eq!(state.sessions[0].usage.input_tokens, 100);
         assert_eq!(state.sessions[0].usage.observed_requests, 1);
+        let shown = crate::monitor::snapshot::MonitorSnapshot::from(state.clone());
+        // The rows show the full input, the cached share included.
+        assert_eq!(shown.recent[0].input_tokens, Some(100));
+        assert_eq!(shown.recent[0].output_tokens, Some(10));
         assert_eq!(state.account_usage.len(), 1);
         assert_eq!(state.account_usage[0].account_id.as_deref(), Some("acct-1"));
         assert_eq!(state.account_usage[0].usage.cache_read_tokens, 70);
