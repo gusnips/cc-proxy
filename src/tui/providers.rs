@@ -15,6 +15,7 @@ use ratatui::{
 use super::controls::Action;
 use super::{BG, DIM_WHITE, GREEN, SELECTED_BG, TEAL, WHITE, YELLOW, panel};
 use crate::accounts::Accounts;
+use crate::monitor::{EndpointKind, RequestStatus, snapshot::MonitorSnapshot};
 use crate::provider::AuthState;
 use crate::registry::Registry;
 use crate::usage::{MonitorUsage, UsageWindow};
@@ -179,11 +180,21 @@ enum Entry {
     Account(String, String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Serving {
+    provider: String,
+    account_id: Option<String>,
+    account: Option<String>,
+    active: bool,
+}
+
 pub(super) struct ProvidersPanel {
     mode: Mode,
     rows: Vec<ProviderRow>,
     route: config::Route,
     auto_rotate: bool,
+    /// Last request that reached generation, not the route's first choice.
+    serving: Option<Serving>,
     loaded_at: Option<Instant>,
     pending: Option<mpsc::Receiver<Vec<ProviderRow>>>,
     selected: Entry,
@@ -201,6 +212,7 @@ impl ProvidersPanel {
             rows: Vec::new(),
             route: config::Route::default(),
             auto_rotate: false,
+            serving: None,
             loaded_at: None,
             pending: None,
             selected: Entry::Direct,
@@ -286,13 +298,69 @@ impl ProvidersPanel {
         }
     }
 
+    /// Follow requests that reached generation. A provider being tried is not
+    /// proof it served anything, and a token-count request is not a generation.
+    pub fn observe(&mut self, snapshot: &MonitorSnapshot) {
+        let before = self.primary_entry();
+        self.serving = snapshot
+            .active
+            .iter()
+            .filter(|request| request.endpoint != EndpointKind::CountTokens)
+            .filter_map(|request| {
+                Some((
+                    request.generation_started_at?,
+                    Serving {
+                        provider: request.provider.clone()?,
+                        account_id: request.account_id.clone(),
+                        account: request.account.clone(),
+                        active: true,
+                    },
+                ))
+            })
+            .chain(snapshot.recent.iter().filter_map(|request| {
+                if request.endpoint == EndpointKind::CountTokens
+                    || request.status != RequestStatus::Completed
+                {
+                    return None;
+                }
+                Some((
+                    request.generation_started_at.unwrap_or(request.finished_at),
+                    Serving {
+                        provider: request.provider.clone()?,
+                        account_id: request.account_id.clone(),
+                        account: request.account.clone(),
+                        active: false,
+                    },
+                ))
+            }))
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, serving)| serving);
+        if self.menu.is_none()
+            && before.as_ref() == Some(&self.selected)
+            && let Some(now) = self.primary_entry()
+        {
+            self.selected = now;
+        }
+    }
+
     pub fn retry(&mut self) {
         self.loaded_at = None;
         self.refresh();
     }
 
-    /// The account requests use now on the primary provider, or the provider itself.
+    /// Prefer the account that served a request over the route's first choice.
     fn primary_entry(&self) -> Option<Entry> {
+        if let Some(serving) = &self.serving {
+            let row = self.rows.iter().find(|row| row.id == serving.provider)?;
+            let account = row
+                .accounts
+                .iter()
+                .find(|account| serving.account_id.as_deref() == Some(account.id.as_str()));
+            return Some(account.map_or_else(
+                || Entry::Provider(row.id.clone()),
+                |account| Entry::Account(row.id.clone(), account.id.clone()),
+            ));
+        }
         let row = self
             .rows
             .iter()
@@ -306,6 +374,53 @@ impl ProvidersPanel {
                     |account| Entry::Account(row.id.clone(), account.id.clone()),
                 ),
         )
+    }
+
+    /// Who answered the newest request, in words, so the teal in the list
+    /// is never the only sign.
+    fn serving_line(&self) -> Line<'static> {
+        let Some(serving) = &self.serving else {
+            return Line::styled(
+                " No request served yet in this run.",
+                Style::default().fg(DIM_WHITE),
+            );
+        };
+        let account = serving
+            .account
+            .as_ref()
+            .map(|name| format!(" / {name}"))
+            .unwrap_or_default();
+        Line::styled(
+            format!(
+                " {}: {}{account}",
+                if serving.active {
+                    "Serving"
+                } else {
+                    "Last used"
+                },
+                ui::provider_name(&serving.provider)
+            ),
+            Style::default().fg(TEAL),
+        )
+    }
+
+    /// Whether `provider` is the one answering requests. Before any request it
+    /// is the route's first choice, which is what the next request will use.
+    fn serves(&self, provider: &str) -> bool {
+        match &self.serving {
+            Some(serving) => serving.provider == provider,
+            None => self.route.target() == Some(provider),
+        }
+    }
+
+    fn serves_account(&self, provider: &str, account: &AccountRow) -> bool {
+        match &self.serving {
+            Some(serving) => {
+                serving.provider == provider
+                    && serving.account_id.as_deref() == Some(account.id.as_str())
+            }
+            None => account.current && self.route.target() == Some(provider),
+        }
     }
 
     fn entries(&self) -> Vec<Entry> {
@@ -631,16 +746,14 @@ impl ProvidersPanel {
             Entry::Provider(id) => {
                 let row = self.rows.iter().find(|row| &row.id == id).unwrap();
                 let routed = self.route.target() == Some(id.as_str());
-                let name_style = if routed {
+                let serving = self.serves(id);
+                let name_style = if serving {
                     Style::default().fg(TEAL).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(name_color)
                 };
                 let role = if routed {
-                    Span::styled(
-                        " [primary]",
-                        Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
-                    )
+                    Span::styled(" [primary]", Style::default().fg(DIM_WHITE))
                 } else if let Some(at) = self.route.fallback.iter().position(|name| name == id) {
                     Span::styled(
                         format!(" [fallback {}]", at + 1),
@@ -664,8 +777,7 @@ impl ProvidersPanel {
                     .find(|account| &account.id == id)
                     .unwrap();
                 let now = crate::rotation::now_ms();
-                // The account serving requests now: the saved choice of the routed provider.
-                let serving = account.current && self.route.target() == Some(provider.as_str());
+                let serving = self.serves_account(provider, account);
                 let first_reset = self.auto_rotate
                     && row.pinned.is_none()
                     && row
@@ -885,7 +997,7 @@ impl ProvidersPanel {
             return;
         }
         let [summary, body] =
-            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+            Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(area);
         let primary = self
             .route
             .target()
@@ -931,6 +1043,7 @@ impl ProvidersPanel {
                     ),
                     Style::default().fg(DIM_WHITE),
                 ),
+                self.serving_line(),
             ]),
             summary,
         );
@@ -1033,10 +1146,10 @@ impl ProvidersPanel {
     }
 }
 
-/// Two columns before an account's name. The saved choice gets a bullet, so it
-/// shows from across the list, and the routed provider's one is in teal.
+/// Saved choices remain white. A request's actual account gets the teal bullet,
+/// even if another request has since changed the saved choice.
 fn account_marker(account: &AccountRow, serving: bool) -> Span<'static> {
-    if !account.current {
+    if !account.current && !serving {
         return Span::raw("  ");
     }
     let color = if serving { TEAL } else { WHITE };
@@ -1048,7 +1161,7 @@ fn account_marker(account: &AccountRow, serving: bool) -> Span<'static> {
 
 fn account_name_style(account: &AccountRow, serving: bool, selected: bool) -> Style {
     let style = Style::default().fg(if selected || serving { TEAL } else { WHITE });
-    if account.current {
+    if account.current || serving {
         style.add_modifier(Modifier::BOLD)
     } else {
         style
@@ -1551,7 +1664,12 @@ mod tests {
                 .iter()
                 .all(|account| account.usage.is_none())
         );
-        assert_eq!(panel.selected, Entry::Provider("codex".into()));
+        // The cursor was on the saved account. A new login takes its place as
+        // the saved account, so the cursor goes along to it.
+        assert_eq!(
+            panel.selected,
+            Entry::Account("codex".into(), "replacement".into())
+        );
     }
 
     #[test]
@@ -1719,6 +1837,71 @@ mod tests {
         assert!(render(&mut panel, 110, 25).contains("Nothing on this computer changed"));
     }
 
+    /// A snapshot where a request reached generation on `provider` / `account`.
+    fn served(provider: &str, account_id: &str, endpoint: EndpointKind) -> MonitorSnapshot {
+        let monitor = crate::monitor::MonitorHandle::default();
+        monitor.request_started("r", Some("s".into()), Some(1), endpoint);
+        monitor.provider_selected("r", provider, "model", None);
+        monitor.account_selected("r", account_id, "name");
+        monitor.generation_started("r");
+        monitor.snapshot().into()
+    }
+
+    #[test]
+    fn the_provider_and_account_that_answered_are_highlighted_and_followed() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        // The cursor sits on the saved account of the primary provider.
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        // Codex gave up and Kimi answered: that is who is serving now.
+        panel.observe(&served("kimi", "demo-kimi", EndpointKind::Messages));
+        assert_eq!(
+            panel.selected,
+            Entry::Account("kimi".into(), "demo-kimi".into())
+        );
+        let text = render(&mut panel, 160, 30);
+        assert!(text.contains("Serving: Kimi / name"), "{text}");
+        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+        terminal
+            .draw(|frame| panel.render(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let at = |needle: &str| {
+            (0..30)
+                .find_map(|y| {
+                    let row = (0..160)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>();
+                    row.find(needle)
+                        .map(|x| (row[..x].chars().count() as u16, y))
+                })
+                .unwrap_or_else(|| panic!("no {needle}"))
+        };
+        // Codex is still the first in the route, but only Kimi is teal.
+        let (x, y) = at("Kimi [fallback 1]");
+        assert_eq!(buffer[(x, y)].fg, TEAL);
+        let (x, y) = at("Codex [primary]");
+        assert_ne!(buffer[(x, y)].fg, TEAL);
+        // Codex's saved account keeps its bullet, now in white.
+        let (x, y) = at("● work");
+        assert_eq!(buffer[(x, y)].fg, WHITE);
+    }
+
+    #[test]
+    fn a_cursor_the_person_moved_stays_and_token_counts_do_not_count_as_serving() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.selected = Entry::Account("codex".into(), "demo-home".into());
+        panel.observe(&served("kimi", "demo-kimi", EndpointKind::Messages));
+        assert_eq!(
+            panel.selected,
+            Entry::Account("codex".into(), "demo-home".into())
+        );
+        // A local token count is not a request any provider answered.
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.observe(&served("kimi", "demo-kimi", EndpointKind::CountTokens));
+        assert!(panel.serving.is_none());
+        assert!(render(&mut panel, 160, 30).contains("No request served yet in this run."));
+    }
+
     #[test]
     fn the_account_serving_requests_stands_out_from_across_the_list() {
         let mut panel = ProvidersPanel::new(Mode::Demo);
@@ -1758,9 +1941,9 @@ mod tests {
         let (home_x, home_y) = find("home");
         assert_eq!(buffer[(home_x - 2, home_y)].symbol(), " ");
         assert!(!buffer[(home_x, home_y)].modifier.contains(Modifier::BOLD));
-        // The primary tag is bold teal; a fallback tag stays quiet.
+        // The route's order tags stay quiet: teal belongs to who serves.
         let (primary_x, primary_y) = find("[primary]");
-        assert_eq!(buffer[(primary_x, primary_y)].fg, TEAL);
+        assert_eq!(buffer[(primary_x, primary_y)].fg, DIM_WHITE);
         let (fallback_x, fallback_y) = find("[fallback 1]");
         assert_eq!(buffer[(fallback_x, fallback_y)].fg, DIM_WHITE);
         // Narrow terminals keep the bullet on the name's line.

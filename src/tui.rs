@@ -205,6 +205,7 @@ fn run_monitor_events(
         app.clamp_selection(state.sessions.len(), state.recent.len());
         app.tick = app.tick.wrapping_add(1);
         if app.page == Page::Accounts {
+            app.providers.observe(state);
             app.providers.refresh();
         }
         terminal.draw(|frame| {

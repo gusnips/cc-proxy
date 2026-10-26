@@ -25,11 +25,13 @@ Accounts opens first. It shows where Claude Code goes, your fallback order and
 saved logins grouped by provider, in that order: the primary provider, then each
 fallback, then your other connected providers, then providers you have not set up.
 Claude subscription follows the same order. `[primary]` marks the provider Claude Code uses.
-A bullet (`●`) and a bold name mark the saved account choice, not an active
-request, so you can find it at a glance. The one that serves new requests now,
-the choice of the primary provider, is in teal; the choice of any other provider
-is in white. The primary provider's name is bold teal too. When auto-rotate
-moves the saved account, the cursor moves with it, unless you had moved it
+The line under the header says who answered the newest request, for example
+`Serving: Claude subscription / contato@example.com`. That provider and account are in
+teal, so you can see where requests really go when the primary is used up and
+a fallback answers. Before the first request, teal marks the first choice of the route.
+A bullet (`●`) and a bold name mark each provider's saved account choice, so you
+can find it at a glance. When auto-rotate moves the saved account, or a fallback
+answers, the cursor moves with the account that answers, unless you had moved it
 somewhere else. With auto-rotate on, a new
 request skips accounts still waiting. When every account has a confirmed wait,
 `[first reset]` marks the earliest reset. The saved choice changes when a request
