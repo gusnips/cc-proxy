@@ -183,4 +183,22 @@ mod tests {
         let wire = prepare(&server_choice, "claude-sonnet-5-5", None).unwrap();
         assert_eq!(wire["tool_choice"]["name"], "web_search");
     }
+
+    #[test]
+    fn system_messages_keep_effort_and_lifetime_controls() {
+        let messages = json!([
+            {"role":"user","content":"summary"},
+            {"role":"system","content":[],"output_config":{"effort":"xhigh"}},
+            {"role":"assistant","content":"Ready."},
+            {"role":"user","content":"Continue."},
+            {"role":"system","content":[{"type":"text","text":"Be brief."}],"clear_at":"next_user_message"}
+        ]);
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude/claude-sonnet-5-5",
+            "messages": messages
+        }))
+        .unwrap();
+        let wire = prepare(&request, "claude-sonnet-5-5", None).unwrap();
+        assert_eq!(wire["messages"], messages);
+    }
 }

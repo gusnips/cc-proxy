@@ -3,6 +3,10 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.4 (2026-10-26)
+
+- Fix chats stuck after `/compact` with `400 messages.1: system content must contain at least one block`. The proxy now keeps message settings such as `output_config` (the effort setting) and `clear_at` (when an instruction stops applying). It previously dropped these fields, leaving an empty system message that Anthropic rejected. Retry the existing chat after updating; no new chat is needed for this error.
+
 ## v0.4.3 (2026-10-26)
 
 - The monitor changes tab with Tab, Shift-Tab and `1` to `3`. Left and Right no longer change tab, so a stray arrow on Settings can't flip auto-rotate while you try to leave. Right opens the actions or details of the row and never runs anything. Left and Escape go back one step. Settings keeps Left and Right for changing a value.
