@@ -330,18 +330,36 @@ pub fn resolve(registry: &Registry, route: &Route, model: &str) -> Result<String
     if anthropic_model_family(model).is_none() {
         return Ok(model.to_string());
     }
-    let Some(provider) = route.target() else {
+    let Some(first) = route.target() else {
+        if route.on {
+            return Err(format!(
+                "Nothing in the pool is turned on, so cc-proxy can't serve \"{model}\". Run \
+                 `cc-proxy use <provider>` to turn a provider on, or `cc-proxy open` to choose \
+                 accounts."
+            ));
+        }
         return Err(format!(
             "cc-proxy routing is off, so it can't serve \"{model}\". This Claude Code window \
              still points at the proxy. Run `cc-proxy use direct` to restore Claude Code's \
              original settings and login, or `cc-proxy start` to route it through a provider."
         ));
     };
-    resolve_for(registry, route, provider, model)
+    // The first provider that has a model for the name. A pool that mixes
+    // providers does not fail because its first one lacks this tier.
+    let mut refused = None;
+    for provider in std::iter::once(first).chain(route.fallback().iter().map(String::as_str)) {
+        match resolve_for(registry, route, provider, model) {
+            Ok(resolved) => return Ok(resolved),
+            Err(message) => {
+                refused.get_or_insert(message);
+            }
+        }
+    }
+    Err(refused.unwrap_or_default())
 }
 
 /// `resolve` as if Claude Code pointed at `provider`: what a routed name
-/// means on another provider, for the fallback chain.
+/// means on another provider of the pool.
 pub fn resolve_for(
     registry: &Registry,
     route: &Route,

@@ -2047,12 +2047,6 @@ fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
                 until_ms,
                 per_model: false,
             });
-        response
-            .extensions_mut()
-            .insert(crate::rotation::ExhaustedAt {
-                until_ms,
-                spent: false,
-            });
     }
     response
 }

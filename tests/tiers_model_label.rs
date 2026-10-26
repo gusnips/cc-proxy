@@ -24,6 +24,7 @@ fn routed(provider: &str, model: &str) -> Route {
             tiers::TIERS.map(|tier| (tier.into(), model.into())).into(),
         )]
         .into(),
+        ..Route::default()
     }
 }
 

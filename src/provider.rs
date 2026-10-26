@@ -214,12 +214,6 @@ impl ProviderError {
                     Some(until_ms),
                     None,
                 ));
-            response
-                .extensions_mut()
-                .insert(crate::rotation::ExhaustedAt {
-                    until_ms,
-                    spent: false,
-                });
         }
         let headers = response.headers_mut();
         if let Some(retry_after) = self
