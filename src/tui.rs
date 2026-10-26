@@ -1141,12 +1141,15 @@ fn error_indicator(request: &CompletedSnapshot) -> &'static str {
 }
 
 fn compact_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}M", tokens as f64 / 1_000_000.0)
-    } else if tokens >= 1_000 {
-        format!("{:.1}k", tokens as f64 / 1_000.0)
+    crate::monitor::accounting::compact_tokens(tokens)
+}
+
+/// A priced total reads as a number, an unpriced one as a quiet note.
+fn cost_color(usage: &crate::monitor::UsageTotals) -> Color {
+    if usage.cost_label().is_some() {
+        WHITE
     } else {
-        tokens.to_string()
+        DIM_WHITE
     }
 }
 
@@ -1878,24 +1881,11 @@ fn render_session_detail(
             ),
             detail_line("model", session.model.as_deref().unwrap_or("-"), DIM_WHITE),
             detail_line("effort", session.effort.as_deref().unwrap_or("-"), YELLOW),
+            detail_line("tokens", session.usage.tokens_label(), DIM_WHITE),
             detail_line(
-                "input tokens",
-                compact_tokens(session.input_tokens),
-                DIM_WHITE,
-            ),
-            detail_line(
-                "output tokens",
-                compact_tokens(session.output_tokens),
-                DIM_WHITE,
-            ),
-            detail_line(
-                "total tokens",
-                format!(
-                    "{}/{}",
-                    compact_tokens(session.input_tokens),
-                    compact_tokens(session.output_tokens)
-                ),
-                DIM_WHITE,
+                "cost",
+                session.usage.cost_detail(),
+                cost_color(&session.usage),
             ),
             detail_line("rate", session.rate().label(), TEAL),
             detail_line(
@@ -1975,6 +1965,11 @@ fn render_request_detail(
                 "output tokens",
                 token_value(request.output_tokens),
                 DIM_WHITE,
+            ),
+            detail_line(
+                "cost",
+                request.usage.cost_detail(),
+                cost_color(&request.usage),
             ),
             detail_line(
                 "stream bytes",
@@ -3168,6 +3163,39 @@ mod tests {
             detail_text.contains("upstream unavailable"),
             "{detail_text}"
         );
+    }
+
+    #[test]
+    fn session_and_request_details_show_an_estimated_cost_or_why_there_is_none() {
+        let monitor = MonitorHandle::new(10);
+        for (id, session, model) in [
+            ("priced", "s-priced", "gpt-5.4"),
+            ("unpriced", "s-unpriced", "gpt-6.1-sol"),
+        ] {
+            monitor.request_started(id, Some(session.into()), Some(1), EndpointKind::Messages);
+            monitor.provider_selected(id, "codex", model, None);
+            monitor.model_resolved(id, model);
+            monitor.usage_updated(id, Some(10_000), Some(500));
+            monitor.request_completed(id, 200, None, None);
+        }
+        let state: MonitorSnapshot = monitor.snapshot().into();
+        let text = |selected: usize| {
+            buffer_text(&draw(120, 30, |frame| {
+                render_session_detail(frame, frame.area(), &state, selected)
+            }))
+        };
+        let sessions: Vec<_> = state.sessions.iter().map(SessionSnapshot::label).collect();
+        let priced = text(sessions.iter().position(|s| s == "s-priced").unwrap());
+        assert!(priced.contains("10.0k in / 500 out"), "{priced}");
+        assert!(priced.contains("$0.03 est., at API prices"), "{priced}");
+        let unpriced = text(sessions.iter().position(|s| s == "s-unpriced").unwrap());
+        assert!(unpriced.contains("no price for this model"), "{unpriced}");
+        assert!(!unpriced.contains("$0.00"), "{unpriced}");
+
+        let request = buffer_text(&draw(120, 30, |frame| {
+            render_request_detail(frame, frame.area(), &state, 1)
+        }));
+        assert!(request.contains("cost"), "{request}");
     }
 
     #[test]
