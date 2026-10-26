@@ -25,11 +25,12 @@ Accounts opens first. It shows where Claude Code goes, your fallback order and
 saved logins grouped by provider, in that order: the primary provider, then each
 fallback, then your other connected providers, then providers you have not set up.
 Claude subscription follows the same order. `[primary]` marks the provider Claude Code uses.
-`[current]` marks the saved account choice, not an active request. It also gets a
-bullet (`●`) and a bold name, so you can find it at a glance. The one that serves
-new requests now, the choice of the primary provider, is in teal; the choice of
-any other provider is in white. If that account
-has a confirmed wait, it shows `[current, waiting]`. With auto-rotate on, a new
+A bullet (`●`) and a bold name mark the saved account choice, not an active
+request, so you can find it at a glance. The one that serves new requests now,
+the choice of the primary provider, is in teal; the choice of any other provider
+is in white. The primary provider's name is bold teal too. When auto-rotate
+moves the saved account, the cursor moves with it, unless you had moved it
+somewhere else. With auto-rotate on, a new
 request skips accounts still waiting. When every account has a confirmed wait,
 `[first reset]` marks the earliest reset. The saved choice changes when a request
 actually switches accounts, not while the proxy is idle.
@@ -70,7 +71,8 @@ until it reconnects.
 
 Press `3` for settings. It is the same list as `cc-proxy config`, with
 auto-rotate first. Use Up and Down to move, Left and Right to change a yes or
-no, and Enter to type a value. Changes save at once and apply to new requests,
+no, and Enter to type a value. Left and Right never change tab, so use Tab,
+Shift-Tab or `1` to `3` to leave. Changes save at once and apply to new requests,
 except the port and address, which need `cc-proxy restart`. Type to search the
 list. Escape clears the search first, then goes back to Accounts.
 
@@ -103,9 +105,9 @@ the message), so a refusal can be told apart from a spent quota.
 
 Usage loads in the background and refreshes while Accounts is open. Press `r` to
 refresh now. A failed lookup says usage is unavailable, not zero. If a refresh
-fails after a good one, the row keeps the last numbers and shows
-`[refresh failed]`. Details gives the reason. Page Up and Page
-Down scroll long details.
+fails after a good one, the row keeps the last numbers and ends with a
+yellow `*`. Details starts with `* Refresh failed`, says the numbers may be out
+of date and gives the reason. Page Up and Page Down scroll long details.
 
 If an environment variable supplies the login, the details name it and explain
 why saved account choices do not apply. Unset it in the proxy service to use a
@@ -136,7 +138,8 @@ returns. Columns adapt to the terminal width.
 | `2`                    | Open Activity                                                |
 | `3`                    | Open Settings                                                |
 | `Tab`, `Shift-Tab`     | Change tab                                                   |
-| `←`, `→`               | Change tab, or change a choice in Settings                   |
+| `→`                    | Open actions or details, or change a choice in Settings      |
+| `←`                    | Go back one step, or change a choice in Settings             |
 | `↑`, `↓`, `j`, `k`     | Move through rows or actions                                 |
 | `Home`, `End`          | First or last Accounts row                                   |
 | `Enter`                | Open actions, run the chosen action or open activity details |

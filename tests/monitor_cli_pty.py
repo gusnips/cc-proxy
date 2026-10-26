@@ -161,6 +161,23 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.keys(b"\x1b[H" + b"\x1b[B" * 2 + b"\r\r")
                 monitor.wait(lambda: json.loads(index.read_text())["current"] == "work", "Account did not switch")
                 assert read()["route"]["provider"] == "ztest"
+                # Right opens the actions and Left comes back to the same row. Neither runs one.
+                before = file.read_bytes(), index.read_bytes()
+                monitor.keys(b"\x1b[C")
+                monitor.text("Choose an action")
+                monitor.keys(b"\x1b[C")
+                monitor.keys(b"\x1b[D")
+                # The menu is closed if Right opens it again (the screen only redraws what changed).
+                monitor.keys(b"\x1b[C")
+                monitor.text("Choose an action")
+                monitor.keys(b"\x1b[D")
+                assert (file.read_bytes(), index.read_bytes()) == before
+                # Tab, Shift-Tab and 1-3 change tabs. Right on Activity opens details, not Settings.
+                monitor.keys(b"\t")
+                monitor.text("Recent requests")
+                monitor.keys(b"\x1b[C")
+                monitor.keys(b"\x1b[Z")
+                monitor.text("Providers and accounts")
                 # The other connected provider follows the primary's accounts.
                 monitor.keys(b"\x1b[H" + b"\x1b[B" * 3 + b"\r\x1b[B\r")
                 monitor.wait(lambda: read()["route"]["fallback"] == ["ytest"], "Fallback did not save")

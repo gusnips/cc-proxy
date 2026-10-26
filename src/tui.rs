@@ -289,11 +289,6 @@ fn run_monitor_events(
                     KeyCode::Char('3') => app.open_page(Page::Settings),
                     KeyCode::Tab => app.open_page(app.page.next()),
                     KeyCode::BackTab => app.open_page(app.page.previous()),
-                    KeyCode::Left | KeyCode::Right if app.page == Page::Settings => {
-                        run_settings_key(terminal, app, key)?;
-                    }
-                    KeyCode::Left => app.open_page(app.page.previous()),
-                    KeyCode::Right => app.open_page(app.page.next()),
                     _ if app.page == Page::Settings => {
                         run_settings_key(terminal, app, key)?;
                     }
@@ -310,7 +305,8 @@ fn run_monitor_events(
                     KeyCode::Char('k') => {
                         app.move_up(state.sessions.len(), state.recent.len(), false)
                     }
-                    KeyCode::Enter => {
+                    KeyCode::Left => app.detail = None,
+                    KeyCode::Enter | KeyCode::Right => {
                         app.detail = match app.focus {
                             FocusPane::Sessions if !state.sessions.is_empty() => {
                                 Some(DetailView::Session)
@@ -2033,7 +2029,7 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
             if settings.captures_input() || area.width < 90 {
                 keys.to_string()
             } else {
-                format!("{keys} · Tab tabs · ? help · q close")
+                format!("{keys} · Tab or 1–3 tabs · ? help · q close")
             }
         });
     let hint = if let Some(hint) = settings_hint {
@@ -2043,10 +2039,10 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
     } else if area.width < 80 {
         " q close · ↑↓ move · Enter · u/d · ?".to_string()
     } else if app.page == Page::Accounts {
-        " ←/→ or Tab tabs · ↑/↓ move · Enter actions · u/d details · r refresh · ? help · q close"
+        " Tab or 1–3 tabs · ↑/↓ move · →/Enter actions · u/d details · r refresh · ? help · q close"
             .to_string()
     } else {
-        " ←/→ or Tab tabs · ↑/↓ move between panes · j/k move in pane · Enter details · Esc back · ? help · q close"
+        " Tab or 1–3 tabs · ↑/↓ move between panes · j/k move in pane · →/Enter details · ←/Esc back · ? help · q close"
             .to_string()
     };
     let hint = if app.is_attached() {
@@ -2140,7 +2136,7 @@ fn render_shutdown_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, tick: usi
 
 fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: bool) {
     let width = 64.min(area.width);
-    let height = 18.min(area.height);
+    let height = 20.min(area.height);
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -2181,10 +2177,13 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ("Tab / Shift-Tab", "next / previous tab"),
         ("↑ / ↓", "move between rows and activity panes"),
         ("j / k", "move down / up within a pane"),
-        ("Enter", "choose an action or open details"),
+        ("Enter / →", "choose an action or open details"),
+        ("←", "back one step; on Settings it changes a value"),
         ("u / d", "scroll account details"),
         ("r", "refresh accounts and usage"),
         ("s", "start the proxy when it is off"),
+        ("●", "the account in use now"),
+        ("*", "last refresh failed; values may be old"),
         (
             "Esc",
             if attached {
