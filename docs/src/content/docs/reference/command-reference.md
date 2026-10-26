@@ -182,6 +182,7 @@ Codex, Kimi, Grok and Antigravity support these commands:
 ```sh
 cc-proxy auth add codex --name work
 cc-proxy auth use codex work
+cc-proxy auth rename codex main ana@example.com
 cc-proxy auth status codex
 cc-proxy login codex --replace --account work
 cc-proxy logout codex work
@@ -206,6 +207,14 @@ refuses to guess: use `auth add` or `login --replace`. `--account` names which
 account to replace; without it, the current account is replaced. A failed or
 cancelled sign-in keeps the saved login. Signing in as an identity already
 saved offers to replace that account instead of adding a duplicate.
+
+`auth rename <provider> <account> <new-name>` gives a saved account or API key
+a new name. The sign-in, the wait timers and the usage stay with the account,
+and so does the saved choice if it was the current one. The new name follows
+the same rules as `--name`. Without a new name, a terminal opens a field. When
+the account is called `main` or `account-2` (a number, not a name) and its
+sign-in has an email, the field starts with that email. Press Esc to keep the
+old name. Outside a terminal, give the new name on the command line.
 
 `auth use` without an account opens a picker in a terminal. The switch applies
 to the next request, without restarting the proxy. `auth status` lists all

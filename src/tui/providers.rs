@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
@@ -20,12 +20,17 @@ use crate::monitor::{
     accounting::{AccountUsage, UsageTotals},
     snapshot::MonitorSnapshot,
 };
+use crate::prompt::{InputLine, InputResult};
 use crate::provider::AuthState;
 use crate::registry::Registry;
 use crate::usage::{MonitorUsage, UsageWindow};
 use crate::{config, rotation::Cooldowns, route, ui};
 
 const REFRESH_AFTER: Duration = Duration::from_secs(60);
+
+/// The menu line that opens the name field. Like removing, it is a step, not an
+/// action that runs by itself: Enter on it opens the field.
+const RENAME_ACCOUNT: &str = "Rename account...";
 
 /// The menu line that asks before it deletes. Choosing it opens a second menu
 /// with one line, so removing a login is two deliberate presses of Enter.
@@ -51,6 +56,8 @@ struct AccountRow {
     spent: bool,
     /// What the account's plan can't do, in words (see `AccountSupport::note`).
     note: Option<String>,
+    /// A better name than `main` or `account-2`, when the sign-in says an email.
+    suggested_name: Option<String>,
 }
 
 impl AccountRow {
@@ -192,6 +199,19 @@ struct Serving {
     active: bool,
 }
 
+/// A new name being typed for one saved account. It lives in the details area
+/// like the action list, and the account row stays selected under it.
+struct RenameDraft {
+    provider: String,
+    id: String,
+    old_name: String,
+    input: InputLine,
+    /// The field started with the email the sign-in uses, not the old name.
+    suggested: bool,
+    /// Why the last save failed. The typed name stays, so it can be fixed.
+    error: Option<String>,
+}
+
 pub(super) struct ProvidersPanel {
     mode: Mode,
     rows: Vec<ProviderRow>,
@@ -210,6 +230,7 @@ pub(super) struct ProvidersPanel {
     menu_state: ListState,
     notice: Option<(String, bool)>,
     detail_scroll: u16,
+    rename: Option<RenameDraft>,
 }
 
 impl ProvidersPanel {
@@ -229,6 +250,7 @@ impl ProvidersPanel {
             menu_state: ListState::default(),
             notice: None,
             detail_scroll: 0,
+            rename: None,
         };
         if mode == Mode::Demo {
             panel.rows = demo_rows();
@@ -532,15 +554,105 @@ impl ProvidersPanel {
 
     pub fn close_menu(&mut self) -> bool {
         // A question that was never answered must not stay on screen.
-        let was_open = self.menu.take().is_some();
+        let menu = self.menu.take().is_some();
+        let rename = self.rename.take().is_some();
+        let was_open = menu || rename;
         if was_open {
             self.notice = None;
         }
         was_open
     }
 
+    /// An action list or a name field is open over the account list.
     pub fn menu_open(&self) -> bool {
-        self.menu.is_some()
+        self.menu.is_some() || self.rename.is_some()
+    }
+
+    /// A name is being typed: every key, even `q`, goes to the field.
+    pub fn renaming(&self) -> bool {
+        self.rename.is_some()
+    }
+
+    /// Typing in the name field. Enter hands the new name back to be saved;
+    /// Escape drops it and keeps the old name.
+    pub fn press_rename(&mut self, key: KeyEvent) -> Option<Action> {
+        let draft = self.rename.as_mut()?;
+        match draft.input.press(key) {
+            InputResult::Editing => None,
+            InputResult::Cancelled => {
+                self.close_menu();
+                None
+            }
+            InputResult::Submitted => {
+                let name = draft.input.value();
+                let typed = name.trim().to_ascii_lowercase();
+                if typed.is_empty() {
+                    draft.error = Some(format!(
+                        "Type a name, or press Esc to keep `{}`.",
+                        draft.old_name
+                    ));
+                    return None;
+                }
+                if typed == draft.old_name {
+                    self.close_menu();
+                    self.notice =
+                        Some(("Nothing changed. That is the current name.".into(), false));
+                    return None;
+                }
+                draft.error = None;
+                Some(Action::RenameAccount {
+                    provider: draft.provider.clone(),
+                    id: draft.id.clone(),
+                    name,
+                })
+            }
+        }
+    }
+
+    /// Opens the name field on the selected account, started with the email
+    /// its sign-in uses when its name is only a number.
+    fn open_rename(&mut self, provider: String, id: String) {
+        let Some(account) = self.selected_account().filter(|account| account.id == id) else {
+            return;
+        };
+        let started_with = account
+            .suggested_name
+            .clone()
+            .unwrap_or_else(|| account.name.clone());
+        self.rename = Some(RenameDraft {
+            provider,
+            id,
+            old_name: account.name.clone(),
+            input: InputLine::new(&started_with),
+            suggested: account.suggested_name.is_some(),
+            error: None,
+        });
+        self.menu = None;
+        self.notice = None;
+        self.detail_scroll = 0;
+    }
+
+    /// Keeps the name field open with what was typed, and says why it was refused.
+    fn refuse_name(&mut self, reason: String) {
+        if let Some(draft) = &mut self.rename {
+            draft.error = Some(reason);
+        }
+    }
+
+    /// Shows a new name at once, without waiting for the next read. Returns
+    /// why the name can't be used, so the field can say so.
+    pub fn rename_account(&mut self, provider: &str, id: &str, name: &str) -> Result<(), String> {
+        let name = crate::accounts::clean_name(name).map_err(|error| error.to_string())?;
+        if let Some(account) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.id == provider)
+            .and_then(|row| row.accounts.iter_mut().find(|account| account.id == id))
+        {
+            account.name = name;
+            account.suggested_name = None;
+        }
+        Ok(())
     }
 
     pub fn press(&mut self, key: KeyCode) -> Option<Action> {
@@ -574,6 +686,12 @@ impl ProvidersPanel {
                             if label == REMOVE_ACCOUNT =>
                         {
                             self.confirm_removal(provider, id);
+                            None
+                        }
+                        Some((label, Action::RenameAccount { provider, id, .. }))
+                            if label == RENAME_ACCOUNT =>
+                        {
+                            self.open_rename(provider, id);
                             None
                         }
                         chosen => chosen.map(|(_, action)| action),
@@ -681,6 +799,14 @@ impl ProvidersPanel {
         ));
         if let Some(account) = account {
             actions.push((
+                RENAME_ACCOUNT.into(),
+                Action::RenameAccount {
+                    provider: row.id.clone(),
+                    id: account.id.clone(),
+                    name: String::new(),
+                },
+            ));
+            actions.push((
                 REMOVE_ACCOUNT.into(),
                 Action::RemoveAccount {
                     provider: row.id.clone(),
@@ -696,10 +822,13 @@ impl ProvidersPanel {
             Ok(message) => {
                 self.notice = Some((message, false));
                 self.menu = None;
+                self.rename = None;
                 // Drop an old read so it cannot replace the result of this action.
                 self.pending = None;
                 self.retry();
             }
+            // A name that was refused stays in its field, with the reason beside it.
+            Err(error) if self.rename.is_some() => self.refuse_name(format!("{error:#}")),
             Err(error) => {
                 self.notice = Some((
                     format!(
@@ -760,6 +889,13 @@ impl ProvidersPanel {
                 }
             }
             Action::RemoveAccount { provider, id } => self.forget_account(provider, id),
+            Action::RenameAccount { provider, id, name } => {
+                if let Err(reason) = self.rename_account(provider, id, name) {
+                    self.refuse_name(reason);
+                    return;
+                }
+                self.rename = None;
+            }
             Action::Fallback(ids) => self.route.fallback = ids.clone(),
             Action::SignIn { .. } => {
                 self.notice = Some((
@@ -1126,7 +1262,7 @@ impl ProvidersPanel {
                     } else {
                         "Providers and accounts"
                     },
-                    self.menu.is_none(),
+                    !self.menu_open(),
                 ))
                 .highlight_symbol("❯ ")
                 .style(Style::default().fg(DIM_WHITE))
@@ -1139,16 +1275,20 @@ impl ProvidersPanel {
             &mut self.list,
         );
         let detail = panel(
-            if self.menu.is_some() {
+            if self.rename.is_some() {
+                "Rename account"
+            } else if self.menu.is_some() {
                 "Choose an action"
             } else {
                 "Details"
             },
-            self.menu.is_some(),
+            self.menu_open(),
         );
         let inner = detail.inner(detail_area);
         frame.render_widget(detail, detail_area);
-        if let Some(menu) = &self.menu {
+        if let Some(draft) = &self.rename {
+            render_rename(frame, inner, draft);
+        } else if let Some(menu) = &self.menu {
             let notice_height = if let Some((message, _)) = &self.notice {
                 Paragraph::new(message.as_str())
                     .wrap(Wrap { trim: false })
@@ -1203,6 +1343,66 @@ impl ProvidersPanel {
             frame.render_widget(paragraph.scroll((self.detail_scroll, 0)), inner);
         }
     }
+}
+
+/// The name field in the details area: the old name, the field with its
+/// cursor, what went wrong, and what stays the same.
+fn render_rename(frame: &mut ratatui::Frame<'_>, area: Rect, draft: &RenameDraft) {
+    const LABEL: &str = "New name: ";
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let room = usize::from(area.width).saturating_sub(LABEL.len() + 1);
+    let (shown, at) = draft.input.window(room);
+    let mut lines = vec![
+        Line::styled(
+            format!(
+                "Rename `{}`",
+                super::ellipsize(&draft.old_name, usize::from(area.width).saturating_sub(10))
+            ),
+            Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
+        ),
+        Line::from(vec![
+            Span::styled(LABEL, Style::default().fg(DIM_WHITE)),
+            Span::styled(
+                shown,
+                Style::default()
+                    .fg(WHITE)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ]),
+        Line::raw(""),
+    ];
+    if let Some(error) = &draft.error {
+        lines.push(Line::styled(error.clone(), Style::default().fg(YELLOW)));
+        lines.push(Line::styled(
+            format!(
+                "Fix the name and press Enter, or press Esc to keep `{}`.",
+                draft.old_name
+            ),
+            Style::default().fg(YELLOW),
+        ));
+        lines.push(Line::raw(""));
+    }
+    if draft.suggested {
+        lines.push(
+            "Started with the email this sign-in uses. Edit it, or press Ctrl-U to clear it."
+                .into(),
+        );
+    }
+    lines.push("A name can use letters, numbers, - and _. An email works too.".into());
+    lines.push("The saved sign-in stays the same.".into());
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(DIM_WHITE).bg(BG))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+    let column = u16::try_from(LABEL.len() + at).unwrap_or(u16::MAX);
+    frame.set_cursor_position((
+        area.x.saturating_add(column).min(area.right() - 1),
+        area.y.saturating_add(1).min(area.bottom() - 1),
+    ));
 }
 
 /// Saved choices remain white. A request's actual account gets the teal bullet,
@@ -1287,7 +1487,8 @@ fn account_rows(
         let spent = waits.iter().any(|wait| wait.model.is_none() && wait.spent);
         let waits = waits.into_iter().map(|wait| (wait.model, wait.until_ms)).collect();
         let note = accounts.login(&account.name).ok().flatten().and_then(|login| support.note(&login));
-        Ok(AccountRow { current: current.as_ref() == Some(&account.id), waits, spent, id: account.id, name: account.name, state, usage: None, usage_error: None, note })
+        let suggested_name = accounts.suggest_name(support, &account);
+        Ok(AccountRow { current: current.as_ref() == Some(&account.id), waits, spent, id: account.id, name: account.name, state, usage: None, usage_error: None, note, suggested_name })
     }).collect()
 }
 
@@ -1422,6 +1623,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                     waits: vec![(None, crate::rotation::now_ms() + 3_600_000)],
                     spent: false,
                     note: None,
+                    suggested_name: None,
                 },
                 AccountRow {
                     id: "demo-work".into(),
@@ -1446,6 +1648,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                     waits: Vec::new(),
                     spent: false,
                     note: None,
+                    suggested_name: None,
                 },
             ],
         },
@@ -1475,6 +1678,7 @@ fn demo_rows() -> Vec<ProviderRow> {
                 waits: Vec::new(),
                 spent: false,
                 note: None,
+                suggested_name: None,
             }],
         },
         ProviderRow {
@@ -1957,6 +2161,137 @@ mod tests {
         panel.observe(&served("kimi", "demo-kimi", EndpointKind::CountTokens));
         assert!(panel.serving.is_none());
         assert!(render(&mut panel, 160, 30).contains("No request served yet in this run."));
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    fn type_name(panel: &mut ProvidersPanel, text: &str) {
+        for ch in text.chars() {
+            assert_eq!(panel.press_rename(key(KeyCode::Char(ch))), None);
+        }
+    }
+
+    /// Opens the actions on the selected account and picks Rename.
+    fn start_rename(panel: &mut ProvidersPanel) {
+        panel.press(KeyCode::Enter);
+        let at = panel
+            .menu
+            .as_ref()
+            .unwrap()
+            .iter()
+            .position(|(label, _)| label == RENAME_ACCOUNT)
+            .expect("an account can be renamed");
+        panel.menu_state.select(Some(at));
+        assert_eq!(panel.press(KeyCode::Enter), None);
+        assert!(panel.renaming());
+    }
+
+    #[test]
+    fn rename_starts_with_the_email_and_keeps_what_was_typed_until_it_is_saved() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.rows[0].accounts[0].name = "account-2".into();
+        panel.rows[0].accounts[0].suggested_name = Some("ana@example.com".into());
+        panel.selected = Entry::Account("codex".into(), "demo-home".into());
+
+        start_rename(&mut panel);
+        let field = render(&mut panel, 120, 25);
+        for expected in [
+            "Rename account",
+            "Rename `account-2`",
+            "New name: ana@example.com",
+            "Started with the email this sign-in uses",
+            "The saved sign-in stays the same",
+        ] {
+            assert!(field.contains(expected), "{expected}: {field}");
+        }
+
+        // Escape keeps the old name, on the same account.
+        assert!(panel.close_menu());
+        assert!(!panel.renaming());
+        assert_eq!(panel.rows[0].accounts[0].name, "account-2");
+        assert_eq!(
+            panel.selected,
+            Entry::Account("codex".into(), "demo-home".into())
+        );
+
+        // The person clears the email and types their own name.
+        start_rename(&mut panel);
+        let ctrl_u = KeyEvent::new(KeyCode::Char('u'), crossterm::event::KeyModifiers::CONTROL);
+        assert_eq!(panel.press_rename(ctrl_u), None);
+        type_name(&mut panel, "Spare");
+        let save = panel.press_rename(key(KeyCode::Enter));
+        assert_eq!(
+            save,
+            Some(Action::RenameAccount {
+                provider: "codex".into(),
+                id: "demo-home".into(),
+                name: "Spare".into(),
+            })
+        );
+        assert!(!save.unwrap().needs_terminal());
+
+        // The save was refused: the field stays open with the text and the reason.
+        panel.finish_action(Err(anyhow::anyhow!(
+            "Codex already has an account called `spare`. Pick another name."
+        )));
+        assert!(panel.renaming());
+        let refused = render(&mut panel, 120, 25);
+        for expected in [
+            "New name: Spare",
+            "already has an account called `spare`",
+            "Fix the name and press Enter, or press Esc to keep `account-2`",
+        ] {
+            assert!(refused.contains(expected), "{expected}: {refused}");
+        }
+
+        // Fixing the name and saving again works, and the row follows at once.
+        type_name(&mut panel, "2");
+        let again = panel.press_rename(key(KeyCode::Enter)).unwrap();
+        panel.preview_action(&again);
+        assert!(!panel.renaming());
+        assert_eq!(panel.rows[0].accounts[0].name, "spare2");
+        assert_eq!(panel.rows[0].accounts[0].suggested_name, None);
+        assert_eq!(
+            panel.selected,
+            Entry::Account("codex".into(), "demo-home".into())
+        );
+    }
+
+    #[test]
+    fn rename_says_so_when_the_name_is_empty_or_unchanged_and_never_for_a_provider() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        assert!(
+            !panel
+                .actions()
+                .iter()
+                .any(|(_, action)| matches!(action, Action::RenameAccount { .. }))
+        );
+
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        start_rename(&mut panel);
+        // Nothing to suggest: the field starts with the current name.
+        assert!(render(&mut panel, 120, 25).contains("New name: work"));
+        assert!(!render(&mut panel, 120, 25).contains("Started with the email"));
+        assert_eq!(panel.press_rename(key(KeyCode::Enter)), None);
+        assert!(!panel.renaming());
+        assert!(render(&mut panel, 120, 25).contains("Nothing changed. That is the current name."));
+
+        start_rename(&mut panel);
+        let ctrl_u = KeyEvent::new(KeyCode::Char('u'), crossterm::event::KeyModifiers::CONTROL);
+        panel.press_rename(ctrl_u);
+        assert_eq!(panel.press_rename(key(KeyCode::Enter)), None);
+        assert!(panel.renaming());
+        assert!(render(&mut panel, 120, 25).contains("Type a name, or press Esc to keep `work`."));
+        assert_eq!(panel.rows[0].accounts[1].name, "work");
+
+        // A name the real rule refuses never reaches the disk in the demo either.
+        type_name(&mut panel, "a b");
+        let bad = panel.press_rename(key(KeyCode::Enter)).unwrap();
+        panel.preview_action(&bad);
+        assert!(panel.renaming());
+        assert!(render(&mut panel, 120, 25).contains("can't be an account name"));
     }
 
     #[test]

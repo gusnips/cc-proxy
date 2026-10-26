@@ -56,6 +56,12 @@ put details below the list.
   it or moves it earlier. When you choose another provider as primary, it moves
   to the front and the one you had before becomes the first fallback. The rest
   of the order stays.
+- Rename account opens a field under the actions. It starts with the old name,
+  or with the sign-in's email when the account is only called `main` or
+  `account-2`. Type the new name and press Enter to save it, or Escape to keep
+  the old one. Every key goes to the field, including `q`. A name that can't be
+  used stays in the field with the reason beside it. The sign-in, the wait
+  timers and the saved choice stay with the account. It also works for API keys.
 - Remove saved account deletes one saved login from this computer. Choosing it
   opens one more line that names the account and says what is deleted. Enter on
   that line deletes it, and Escape keeps it. If it was the current account, the

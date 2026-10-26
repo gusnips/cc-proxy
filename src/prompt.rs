@@ -74,6 +74,105 @@ pub fn read_visible_line() -> std::io::Result<String> {
     Ok(read_line()?.unwrap_or_default())
 }
 
+/// One visible line being edited. Names in a prompt and in the monitor share
+/// the same keys, including Ctrl-U to clear the suggested name.
+#[derive(Clone, Debug)]
+pub struct InputLine {
+    chars: Vec<char>,
+    cursor: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum InputResult {
+    Editing,
+    Submitted,
+    Cancelled,
+}
+
+impl InputLine {
+    pub fn new(initial: &str) -> Self {
+        let chars: Vec<_> = initial.chars().collect();
+        Self {
+            cursor: chars.len(),
+            chars,
+        }
+    }
+
+    pub fn value(&self) -> String {
+        self.chars.iter().collect()
+    }
+
+    /// What fits in `room` columns, scrolled so the cursor stays in view, and
+    /// the cursor's column inside it.
+    pub fn window(&self, room: usize) -> (String, usize) {
+        let from = self.cursor.saturating_sub(room.saturating_sub(1));
+        let shown = self.chars.iter().skip(from).take(room).collect();
+        (shown, self.cursor - from)
+    }
+
+    pub fn press(&mut self, key: KeyEvent) -> InputResult {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Enter => return InputResult::Submitted,
+            KeyCode::Esc => return InputResult::Cancelled,
+            KeyCode::Char('c') if control => return InputResult::Cancelled,
+            KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Right => self.cursor = (self.cursor + 1).min(self.chars.len()),
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.chars.len(),
+            KeyCode::Backspace if self.cursor > 0 => {
+                self.cursor -= 1;
+                self.chars.remove(self.cursor);
+            }
+            KeyCode::Delete if self.cursor < self.chars.len() => {
+                self.chars.remove(self.cursor);
+            }
+            KeyCode::Char('u') if control => {
+                self.chars.clear();
+                self.cursor = 0;
+            }
+            // Windows reports AltGr (`@`, `{`) as Ctrl and Alt together.
+            KeyCode::Char(ch) if control == alt => {
+                self.chars.insert(self.cursor, ch);
+                self.cursor += 1;
+            }
+            _ => {}
+        }
+        InputResult::Editing
+    }
+}
+
+/// A visible, editable line that starts with `initial`. Escape or Ctrl-C gives
+/// `None`. Only call it in a terminal: it needs raw mode, and it fails clearly
+/// when there is none.
+pub fn read_line_with_initial(prompt: &str, initial: &str) -> std::io::Result<Option<String>> {
+    let guard = RawModeGuard::enter_typing()?;
+    let mut input = InputLine::new(initial);
+    let result = loop {
+        let columns = crossterm::terminal::size().map_or(80, |(columns, _)| columns);
+        let room = usize::from(columns).saturating_sub(prompt.chars().count() + 1);
+        let (shown, at) = input.window(room);
+        print!(
+            "\r\x1b[K{prompt}{shown}\r\x1b[{}C",
+            prompt.chars().count() + at
+        );
+        std::io::stdout().flush()?;
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match input.press(key) {
+                InputResult::Editing => {}
+                InputResult::Submitted => break Some(input.value()),
+                InputResult::Cancelled => break None,
+            }
+        }
+    };
+    drop(guard);
+    println!();
+    Ok(result)
+}
+
 /// What one key press did to a secret being typed.
 #[derive(Debug, PartialEq, Eq)]
 enum SecretKey {
@@ -528,6 +627,65 @@ pub fn ask_yes_no(question: &str, default: bool) -> Result<Option<bool>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn type_into(input: &mut InputLine, keys: &[(KeyCode, KeyModifiers)]) -> InputResult {
+        let mut last = InputResult::Editing;
+        for (code, modifiers) in keys {
+            last = input.press(KeyEvent::new(*code, *modifiers));
+        }
+        last
+    }
+
+    #[test]
+    fn an_input_line_edits_in_the_middle_and_ends_on_enter_or_escape() {
+        let none = KeyModifiers::NONE;
+        let mut input = InputLine::new("work");
+        assert_eq!(input.value(), "work");
+        type_into(&mut input, &[(KeyCode::Left, none), (KeyCode::Left, none)]);
+        type_into(
+            &mut input,
+            &[(KeyCode::Char('-'), none), (KeyCode::Char('x'), none)],
+        );
+        assert_eq!(input.value(), "wo-xrk");
+        type_into(
+            &mut input,
+            &[(KeyCode::Backspace, none), (KeyCode::Delete, none)],
+        );
+        assert_eq!(input.value(), "wo-k");
+        type_into(
+            &mut input,
+            &[(KeyCode::Home, none), (KeyCode::Delete, none)],
+        );
+        assert_eq!(input.value(), "o-k");
+        // An AltGr character counts as typing, like in the secret field.
+        let alt_gr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        type_into(
+            &mut input,
+            &[(KeyCode::End, none), (KeyCode::Char('@'), alt_gr)],
+        );
+        assert_eq!(input.value(), "o-k@");
+        // A narrow window scrolls to keep the cursor in view.
+        assert_eq!(input.window(10), ("o-k@".to_string(), 4));
+        assert_eq!(input.window(3), ("k@".to_string(), 2));
+
+        assert_eq!(
+            type_into(&mut input, &[(KeyCode::Char('u'), KeyModifiers::CONTROL)]),
+            InputResult::Editing
+        );
+        assert_eq!(input.value(), "");
+        assert_eq!(
+            type_into(&mut input, &[(KeyCode::Enter, none)]),
+            InputResult::Submitted
+        );
+        assert_eq!(
+            type_into(&mut input, &[(KeyCode::Esc, none)]),
+            InputResult::Cancelled
+        );
+        assert_eq!(
+            type_into(&mut input, &[(KeyCode::Char('c'), KeyModifiers::CONTROL)]),
+            InputResult::Cancelled
+        );
+    }
 
     #[test]
     fn search_matches_every_word_in_any_case_and_order() {

@@ -57,6 +57,15 @@ pub enum AuthCommand {
         /// Account to use. Leave it out to pick from a list
         account: Option<String>,
     },
+    /// Give a saved account or API key a new name
+    Rename {
+        /// Provider whose account to rename. Leave it out to pick from a list
+        provider: Option<String>,
+        /// Account to rename. Leave it out to pick from a list
+        account: Option<String>,
+        /// New name. Leave it out to edit the suggested name
+        new_name: Option<String>,
+    },
     /// Sign in using a device code
     Device {
         /// Provider to sign in to. Leave it out to pick from a list

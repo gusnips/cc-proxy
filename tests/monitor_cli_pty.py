@@ -172,6 +172,31 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.text("Choose an action")
                 monitor.keys(b"\x1b[D")
                 assert (file.read_bytes(), index.read_bytes()) == before
+                # Rename opens a field that owns every key (q included). Escape keeps the old name.
+                monitor.keys(b"\x1b[C")
+                monitor.text("Choose an action")
+                monitor.keys(b"\x1b[B\x1b[B\x1b[B\r")
+                monitor.text("Rename account")
+                monitor.keys(b"\x15q2")
+                monitor.text("New name: q2")
+                monitor.keys(b"\x1b")
+                monitor.text("Details")
+                assert (file.read_bytes(), index.read_bytes()) == before
+                # Enter saves the new name. The saved choice and the login stay with the same id.
+                work_id = next(a["id"] for a in json.loads(index.read_text())["accounts"] if a["name"] == "work")
+                monitor.keys(b"\x1b[C")
+                monitor.text("Choose an action")
+                monitor.keys(b"\x1b[B\x1b[B\x1b[B\r")
+                monitor.text("Rename account")
+                monitor.keys(b"\x15Spare\r")
+                monitor.wait(lambda: [a["name"] for a in json.loads(index.read_text())["accounts"]] == ["home", "spare"],
+                             "The account was not renamed")
+                saved = json.loads(index.read_text())
+                assert saved["current"] == "spare", saved
+                assert saved["accounts"][1]["id"] == work_id, "Renaming changed the account id"
+                assert (provider / "accounts" / f"{work_id}.json").exists()
+                monitor.text("Renamed")
+                monitor.text("spare")
                 # Tab, Shift-Tab and 1-3 change tabs. Right on Activity opens details, not Settings.
                 monitor.keys(b"\t")
                 monitor.text("Recent requests")

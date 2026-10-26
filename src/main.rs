@@ -1119,6 +1119,28 @@ fn run_auth_cli(command: Option<cc_proxy::provider::AuthCommand>) -> Result<()> 
             })?;
             cc_proxy::auth_cli::AccountCli::open(&name, support)?.use_account(account.as_deref())
         }
+        AuthCommand::Rename {
+            provider,
+            account,
+            new_name,
+        } => {
+            let name = pick_auth_provider(
+                &registry,
+                provider.as_deref(),
+                "Which provider's account do you want to rename?",
+            )?;
+            let provider = registry
+                .provider(&name)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
+            let support = provider.cli().accounts().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} does not keep named accounts. There is no saved account to rename.",
+                    ui::provider_name(&name)
+                )
+            })?;
+            cc_proxy::auth_cli::AccountCli::open(&name, support)?
+                .rename(account.as_deref(), new_name.as_deref())
+        }
         AuthCommand::Device { provider } => {
             let name = pick_auth_provider(
                 &registry,

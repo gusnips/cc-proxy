@@ -401,6 +401,75 @@ fn saved_accounts_can_be_switched_and_removed_without_signing_in()
 }
 
 #[test]
+fn auth_rename_changes_only_the_name() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let config = temp.path().join("config/codex");
+    std::fs::create_dir_all(config.join("accounts"))?;
+    let a = uuid::Uuid::new_v4().to_string();
+    let b = uuid::Uuid::new_v4().to_string();
+    let index = serde_json::json!({"current":"main", "accounts":[
+        {"id":a,"name":"main","identity":"acct-main"},
+        {"id":b,"name":"work","identity":"acct-work"}
+    ]});
+    std::fs::write(config.join("accounts.json"), index.to_string())?;
+    for (id, identity) in [(&a, "acct-main"), (&b, "acct-work")] {
+        std::fs::write(config.join("accounts").join(format!("{id}.json")), serde_json::json!({
+            "access":"do-not-print-me","refresh":"do-not-print-me","expires":4102444800000_u64,"accountId":identity
+        }).to_string())?;
+    }
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.env("XDG_STATE_HOME", temp.path().join("state"));
+        cmd.args(args).assert()
+    };
+    let saved = || -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(config.join("accounts.json")).unwrap())
+            .unwrap()
+    };
+
+    // Without a terminal the new name has to be on the command line.
+    run(&["auth", "rename", "codex", "main"])
+        .failure()
+        .stderr(contains("cc-proxy auth rename codex main <new-name>"));
+    run(&["auth", "rename", "codex"])
+        .failure()
+        .stderr(contains("cc-proxy auth rename codex <account>"))
+        .stderr(contains("main, work"));
+    assert_eq!(saved(), index);
+
+    run(&["auth", "rename", "codex", "main", "Ana@Example.com"])
+        .success()
+        .stdout(contains(
+            "Renamed Codex account `main` to `ana@example.com`",
+        ))
+        .stdout(contains("do-not-print-me").not());
+    let after = saved();
+    // The saved choice follows the account, and its id and login file stay.
+    assert_eq!(after["current"], "ana@example.com");
+    assert_eq!(after["accounts"][0]["id"], a.as_str());
+    assert_eq!(after["accounts"][1]["name"], "work");
+    assert!(config.join("accounts").join(format!("{a}.json")).exists());
+
+    // A name another account has, or one that can't be a name, changes nothing.
+    run(&["auth", "rename", "codex", "work", "ANA@example.com"])
+        .failure()
+        .stderr(contains("already has an account called `ana@example.com`"));
+    run(&["auth", "rename", "codex", "work", "a b"])
+        .failure()
+        .stderr(contains("can't be an account name"));
+    run(&["auth", "rename", "codex", "nope", "x"])
+        .failure()
+        .stderr(contains("No Codex account is called `nope`"));
+    assert_eq!(saved(), after);
+
+    run(&["auth", "use", "codex", "ana@example.com"])
+        .success()
+        .stdout(contains("now uses `ana@example.com`"));
+    Ok(())
+}
+
+#[test]
 fn config_set_get_list_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
     let run = |args: &[&str]| {
