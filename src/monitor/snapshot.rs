@@ -3,6 +3,7 @@
 use super::{
     ActiveRequest, CompletedRequest, EndpointKind, MonitorState, RequestStatus, SessionSummary,
     Throughput,
+    accounting::{AccountUsage, UsageTotals},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -76,6 +77,8 @@ pub struct MonitorSnapshot {
     pub sessions: Vec<SessionSnapshot>,
     pub active: Vec<ActiveSnapshot>,
     pub recent: Vec<CompletedSnapshot>,
+    #[serde(default)]
+    pub account_usage: Vec<AccountUsage>,
 }
 
 impl MonitorSnapshot {
@@ -89,6 +92,7 @@ impl MonitorSnapshot {
             sessions: Vec::new(),
             active: Vec::new(),
             recent: Vec::new(),
+            account_usage: Vec::new(),
         }
     }
 }
@@ -102,6 +106,7 @@ impl From<MonitorState> for MonitorSnapshot {
             sessions: state.sessions.into_iter().map(Into::into).collect(),
             active: state.active.into_iter().map(Into::into).collect(),
             recent: state.recent.into_iter().map(Into::into).collect(),
+            account_usage: state.account_usage,
         }
     }
 }
@@ -129,6 +134,8 @@ pub struct ActiveSnapshot {
     pub stream_chunks: u64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub usage: UsageTotals,
     pub error: Option<String>,
     pub traffic_capture_path: Option<PathBuf>,
     elapsed: Duration,
@@ -168,6 +175,7 @@ impl From<ActiveRequest> for ActiveSnapshot {
             stream_chunks: value.stream_chunks,
             input_tokens: value.input_tokens,
             output_tokens: value.output_tokens,
+            usage: value.usage,
             error: value.error,
             traffic_capture_path: value.traffic_capture_path,
             elapsed,
@@ -198,6 +206,8 @@ pub struct CompletedSnapshot {
     pub stream_chunks: u64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub usage: UsageTotals,
     pub error: Option<String>,
     pub traffic_capture_path: Option<PathBuf>,
     pub finished_at: SystemTime,
@@ -235,6 +245,7 @@ impl From<CompletedRequest> for CompletedSnapshot {
             stream_chunks: value.stream_chunks,
             input_tokens: value.input_tokens,
             output_tokens: value.output_tokens,
+            usage: value.usage,
             error: value.error,
             traffic_capture_path: value.traffic_capture_path,
             finished_at: value.finished_at,
@@ -259,6 +270,8 @@ pub struct SessionSnapshot {
     pub last_seen: SystemTime,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub usage: UsageTotals,
     pub output_token_samples: Vec<(SystemTime, u64)>,
     pub generation_duration: Duration,
     pub last_status: String,
@@ -287,6 +300,7 @@ impl From<SessionSummary> for SessionSnapshot {
             last_seen: value.last_seen,
             input_tokens: value.input_tokens,
             output_tokens: value.output_tokens,
+            usage: value.usage,
             output_token_samples: value.output_token_samples,
             generation_duration: value.generation_duration,
             last_status: value.last_status,

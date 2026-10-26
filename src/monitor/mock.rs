@@ -6,7 +6,8 @@ use std::{
 
 use super::{
     ActiveRequest, CompletedRequest, EndpointKind, MonitorState, RequestStatus, SessionUsage,
-    session_summaries,
+    accounting::{RequestAccounting, UsageTotals},
+    recount_usage, session_summaries,
 };
 
 const TICK_MILLIS: u64 = 250;
@@ -351,23 +352,41 @@ fn mock_state_for_tick(
 
     add_simulated_requests(now, instant_now, tick, &mut active, &mut recent);
     let mut session_usage = HashMap::<Option<String>, SessionUsage>::new();
-    for request in &recent {
-        let usage = session_usage.entry(request.session_id.clone()).or_default();
-        usage.input_tokens = usage
-            .input_tokens
-            .saturating_add(request.input_tokens.unwrap_or(0));
-        usage.output_tokens = usage
-            .output_tokens
-            .saturating_add(request.output_tokens.unwrap_or(0));
+    for request in &mut recent {
+        request.billing_model = request.model.as_deref().map(billed_model);
+        recount_usage(
+            &mut request.accounting,
+            &mut request.usage,
+            request.endpoint,
+            request.billing_model.as_deref(),
+            request.provider.as_deref(),
+            request.account_id.as_deref(),
+            request.input_tokens,
+            request.output_tokens,
+        );
+        session_usage
+            .entry(request.session_id.clone())
+            .or_default()
+            .usage
+            .add(&request.usage);
     }
-    for request in &active {
-        let usage = session_usage.entry(request.session_id.clone()).or_default();
-        usage.input_tokens = usage
-            .input_tokens
-            .saturating_add(request.input_tokens.unwrap_or(0));
-        usage.output_tokens = usage
-            .output_tokens
-            .saturating_add(request.output_tokens.unwrap_or(0));
+    for request in &mut active {
+        request.billing_model = request.model.as_deref().map(billed_model);
+        recount_usage(
+            &mut request.accounting,
+            &mut request.usage,
+            request.endpoint,
+            request.billing_model.as_deref(),
+            request.provider.as_deref(),
+            request.account_id.as_deref(),
+            request.input_tokens,
+            request.output_tokens,
+        );
+        session_usage
+            .entry(request.session_id.clone())
+            .or_default()
+            .usage
+            .add(&request.usage);
     }
     let sessions = session_summaries(&active, &recent, &session_usage, output_buckets, now);
     MonitorState {
@@ -376,7 +395,13 @@ fn mock_state_for_tick(
         sessions,
         active,
         recent: recent.into_iter().collect(),
+        account_usage: Vec::new(),
     }
+}
+
+/// The model after `incoming → resolved`, which is the one billed.
+fn billed_model(label: &str) -> String {
+    label.rsplit(" → ").next().unwrap_or(label).to_string()
 }
 
 fn initial_output_buckets(now: SystemTime) -> HashMap<Option<String>, Vec<(u64, u64)>> {
@@ -681,6 +706,9 @@ fn active_request(
         stream_chunks: 0,
         input_tokens: None,
         output_tokens: None,
+        usage: UsageTotals::default(),
+        billing_model: None,
+        accounting: RequestAccounting::default(),
         error: None,
         traffic_capture_path: None,
     }
@@ -724,6 +752,9 @@ fn completed_request(
         stream_chunks: 0,
         input_tokens: None,
         output_tokens: None,
+        usage: UsageTotals::default(),
+        billing_model: None,
+        accounting: RequestAccounting::default(),
         error: None,
         traffic_capture_path: None,
     }

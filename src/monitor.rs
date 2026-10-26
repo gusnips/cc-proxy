@@ -5,9 +5,13 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+pub mod accounting;
 mod mock;
 pub mod remote;
 pub mod snapshot;
+
+use accounting::{AccountKey, Recount, RequestAccounting};
+pub use accounting::{AccountUsage, UsageObservation, UsageTotals};
 
 pub use mock::{MockMonitor, mock_state};
 
@@ -129,6 +133,10 @@ pub enum MonitorEvent {
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
     },
+    UsageObserved {
+        request_id: String,
+        usage: UsageObservation,
+    },
     RequestCompleted {
         request_id: String,
         http_status: u16,
@@ -170,6 +178,9 @@ pub struct ActiveRequest {
     pub stream_chunks: u64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub usage: UsageTotals,
+    billing_model: Option<String>,
+    accounting: RequestAccounting,
     pub error: Option<String>,
     pub traffic_capture_path: Option<PathBuf>,
 }
@@ -216,6 +227,9 @@ pub struct CompletedRequest {
     pub stream_chunks: u64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub usage: UsageTotals,
+    billing_model: Option<String>,
+    accounting: RequestAccounting,
     pub error: Option<String>,
     pub traffic_capture_path: Option<PathBuf>,
 }
@@ -262,6 +276,7 @@ pub struct MonitorState {
     pub sessions: Vec<SessionSummary>,
     pub active: Vec<ActiveRequest>,
     pub recent: Vec<CompletedRequest>,
+    pub account_usage: Vec<AccountUsage>,
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +293,7 @@ pub struct SessionSummary {
     pub last_seen: SystemTime,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub usage: UsageTotals,
     pub output_token_samples: Vec<(SystemTime, u64)>,
     rate_output_tokens: u64,
     pub generation_duration: Duration,
@@ -309,22 +325,21 @@ struct MonitorStore {
     active: HashMap<String, ActiveRequest>,
     recent: VecDeque<CompletedRequest>,
     session_usage: HashMap<Option<String>, SessionUsage>,
+    account_usage: HashMap<AccountKey, UsageTotals>,
     session_output_buckets: HashMap<Option<String>, Vec<(u64, u64)>>,
     recent_limit: usize,
 }
 
 #[derive(Debug)]
 struct SessionUsage {
-    input_tokens: u64,
-    output_tokens: u64,
+    usage: UsageTotals,
     last_seen: SystemTime,
 }
 
 impl Default for SessionUsage {
     fn default() -> Self {
         Self {
-            input_tokens: 0,
-            output_tokens: 0,
+            usage: UsageTotals::default(),
             last_seen: SystemTime::now(),
         }
     }
@@ -351,6 +366,7 @@ impl MonitorHandle {
                 active: HashMap::new(),
                 recent: VecDeque::new(),
                 session_usage: HashMap::new(),
+                account_usage: HashMap::new(),
                 session_output_buckets: HashMap::new(),
                 recent_limit,
             })),
@@ -372,6 +388,7 @@ impl MonitorHandle {
                 sessions: Vec::new(),
                 active: Vec::new(),
                 recent: Vec::new(),
+                account_usage: Vec::new(),
             },
         }
     }
@@ -508,6 +525,43 @@ impl MonitorHandle {
         });
     }
 
+    pub fn usage_observed(&self, request_id: impl Into<String>, usage: UsageObservation) {
+        if usage.has_tokens() || usage.reported_cost_usd.is_some() {
+            self.publish(MonitorEvent::UsageObserved {
+                request_id: request_id.into(),
+                usage,
+            });
+        }
+    }
+
+    pub fn observe_anthropic_sse(&self, request_id: &str, bytes: &[u8]) {
+        for value in sse_data_values(bytes) {
+            for usage in anthropic_usage_values(&value) {
+                self.usage_observed(request_id, UsageObservation::anthropic(usage));
+            }
+        }
+    }
+
+    /// An Anthropic Messages reply read whole: its `usage` is normalized.
+    pub fn observe_anthropic_message(&self, request_id: &str, message: &serde_json::Value) {
+        if let Some(usage) = message.get("usage") {
+            self.usage_observed(request_id, UsageObservation::anthropic(usage));
+        }
+    }
+
+    /// OpenAI Responses events: usage rides on `response.usage`, and its input
+    /// already includes cached tokens.
+    pub fn observe_openai_sse(&self, request_id: &str, bytes: &[u8]) {
+        for value in sse_data_values(bytes) {
+            if let Some(usage) = value
+                .pointer("/response/usage")
+                .or_else(|| value.get("usage"))
+            {
+                self.usage_observed(request_id, UsageObservation::openai(usage));
+            }
+        }
+    }
+
     pub fn request_completed(
         &self,
         request_id: impl Into<String>,
@@ -544,8 +598,33 @@ impl MonitorHandle {
     }
 }
 
+impl MonitorEvent {
+    fn request_id(&self) -> &str {
+        match self {
+            Self::RequestStarted { request_id, .. }
+            | Self::ProjectResolved { request_id, .. }
+            | Self::SessionSequenceResolved { request_id, .. }
+            | Self::ProviderSelected { request_id, .. }
+            | Self::AccountSelected { request_id, .. }
+            | Self::ProviderSwitched { request_id, .. }
+            | Self::ModelResolved { request_id, .. }
+            | Self::CompactionStarted { request_id, .. }
+            | Self::UpstreamStarted { request_id, .. }
+            | Self::GenerationStarted { request_id, .. }
+            | Self::TrafficCapturePath { request_id, .. }
+            | Self::StreamProgress { request_id, .. }
+            | Self::UsageUpdated { request_id, .. }
+            | Self::UsageObserved { request_id, .. }
+            | Self::RequestCompleted { request_id, .. }
+            | Self::RequestFailed { request_id, .. }
+            | Self::RequestAbandoned { request_id, .. } => request_id,
+        }
+    }
+}
+
 impl MonitorStore {
     fn apply(&mut self, event: MonitorEvent) {
+        let request_id = event.request_id().to_string();
         match event {
             MonitorEvent::RequestStarted {
                 request_id,
@@ -578,6 +657,9 @@ impl MonitorStore {
                         stream_chunks: 0,
                         input_tokens: None,
                         output_tokens: None,
+                        usage: UsageTotals::default(),
+                        billing_model: None,
+                        accounting: RequestAccounting::default(),
                         error: None,
                         traffic_capture_path: None,
                     },
@@ -618,6 +700,15 @@ impl MonitorStore {
                 account,
             } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
+                    if active
+                        .account_id
+                        .as_ref()
+                        .is_some_and(|id| id != &account_id)
+                    {
+                        active.accounting.seal();
+                        active.input_tokens = None;
+                        active.output_tokens = None;
+                    }
                     active.account_id = Some(account_id);
                     active.account = Some(account);
                 }
@@ -628,7 +719,13 @@ impl MonitorStore {
                 model,
             } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
+                    active.accounting.seal();
+                    active.input_tokens = None;
+                    active.output_tokens = None;
                     active.provider = Some(provider);
+                    // The incoming name is not what the new provider bills: no
+                    // price until it says which model it ran.
+                    active.billing_model = None;
                     active.model = Some(model);
                     // The account belonged to the provider that gave up. The
                     // new provider names its own when it picks one.
@@ -638,6 +735,7 @@ impl MonitorStore {
             }
             MonitorEvent::ModelResolved { request_id, model } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
+                    active.billing_model = Some(model.clone());
                     active.model = Some(match active.model.take() {
                         Some(incoming) if incoming != model => format!("{incoming} → {model}"),
                         Some(incoming) => incoming,
@@ -676,7 +774,6 @@ impl MonitorStore {
                 input_tokens,
                 output_tokens,
             } => {
-                let mut usage_update = None;
                 let mut history_update = None;
                 if let Some(active) = self.active.get_mut(&request_id) {
                     active.status = RequestStatus::Streaming;
@@ -693,9 +790,8 @@ impl MonitorStore {
                     }
                     active.streamed_bytes = active.streamed_bytes.saturating_add(bytes);
                     active.stream_chunks = active.stream_chunks.saturating_add(chunks);
-                    let input_delta = update_token_count(&mut active.input_tokens, input_tokens);
-                    let output_delta = update_token_count(&mut active.output_tokens, output_tokens);
-                    usage_update = Some((active.session_id.clone(), input_delta, output_delta));
+                    update_token_count(&mut active.input_tokens, input_tokens);
+                    update_token_count(&mut active.output_tokens, output_tokens);
                 } else if let Some(completed) = self
                     .recent
                     .iter_mut()
@@ -707,10 +803,9 @@ impl MonitorStore {
                     }
                     completed.streamed_bytes = completed.streamed_bytes.saturating_add(bytes);
                     completed.stream_chunks = completed.stream_chunks.saturating_add(chunks);
-                    let input_delta = update_token_count(&mut completed.input_tokens, input_tokens);
+                    update_token_count(&mut completed.input_tokens, input_tokens);
                     let output_delta =
                         update_token_count(&mut completed.output_tokens, output_tokens);
-                    usage_update = Some((completed.session_id.clone(), input_delta, output_delta));
                     if output_delta > 0 {
                         history_update = Some((
                             completed.session_id.clone(),
@@ -721,9 +816,6 @@ impl MonitorStore {
                         ));
                     }
                 }
-                if let Some((session_id, input_delta, output_delta)) = usage_update {
-                    self.record_session_usage(session_id, input_delta, output_delta);
-                }
                 if let Some((session_id, timestamp, tokens)) = history_update {
                     self.record_session_output(session_id, timestamp, tokens);
                 }
@@ -733,7 +825,6 @@ impl MonitorStore {
                 input_tokens,
                 output_tokens,
             } => {
-                let mut usage_update = None;
                 let mut history_update = None;
                 if let Some(active) = self.active.get_mut(&request_id) {
                     if output_tokens.is_some()
@@ -742,9 +833,8 @@ impl MonitorStore {
                         active.generation_finished_at = Some(SystemTime::now());
                         active.generation_duration = Some(started.elapsed());
                     }
-                    let input_delta = update_token_count(&mut active.input_tokens, input_tokens);
-                    let output_delta = update_token_count(&mut active.output_tokens, output_tokens);
-                    usage_update = Some((active.session_id.clone(), input_delta, output_delta));
+                    update_token_count(&mut active.input_tokens, input_tokens);
+                    update_token_count(&mut active.output_tokens, output_tokens);
                 } else if let Some(completed) = self
                     .recent
                     .iter_mut()
@@ -756,10 +846,9 @@ impl MonitorStore {
                         completed.generation_finished_at = Some(SystemTime::now());
                         completed.generation_duration = Some(started.elapsed());
                     }
-                    let input_delta = update_token_count(&mut completed.input_tokens, input_tokens);
+                    update_token_count(&mut completed.input_tokens, input_tokens);
                     let output_delta =
                         update_token_count(&mut completed.output_tokens, output_tokens);
-                    usage_update = Some((completed.session_id.clone(), input_delta, output_delta));
                     if output_delta > 0 {
                         history_update = Some((
                             completed.session_id.clone(),
@@ -770,11 +859,19 @@ impl MonitorStore {
                         ));
                     }
                 }
-                if let Some((session_id, input_delta, output_delta)) = usage_update {
-                    self.record_session_usage(session_id, input_delta, output_delta);
-                }
                 if let Some((session_id, timestamp, tokens)) = history_update {
                     self.record_session_output(session_id, timestamp, tokens);
+                }
+            }
+            MonitorEvent::UsageObserved { request_id, usage } => {
+                if let Some(active) = self.active.get_mut(&request_id) {
+                    active.accounting.observe(usage, true);
+                } else if let Some(completed) = self
+                    .recent
+                    .iter_mut()
+                    .find(|request| request.request_id == request_id)
+                {
+                    completed.accounting.observe(usage, true);
                 }
             }
             MonitorEvent::RequestCompleted {
@@ -817,6 +914,7 @@ impl MonitorStore {
                 );
             }
         }
+        self.account_request(&request_id);
         self.prune_session_history_if_due(SystemTime::now());
     }
 
@@ -876,6 +974,9 @@ impl MonitorStore {
                 stream_chunks: 0,
                 input_tokens: None,
                 output_tokens: None,
+                usage: UsageTotals::default(),
+                billing_model: None,
+                accounting: RequestAccounting::default(),
                 error: None,
                 traffic_capture_path: None,
             });
@@ -885,9 +986,8 @@ impl MonitorStore {
             active.generation_finished_at = Some(SystemTime::now());
             active.generation_duration = Some(started.elapsed());
         }
-        let input_delta = update_token_count(&mut active.input_tokens, input_tokens);
-        let output_delta = update_token_count(&mut active.output_tokens, output_tokens);
-        self.record_session_usage(active.session_id.clone(), input_delta, output_delta);
+        update_token_count(&mut active.input_tokens, input_tokens);
+        update_token_count(&mut active.output_tokens, output_tokens);
         let completed = CompletedRequest {
             request_id: active.request_id,
             session_id: active.session_id,
@@ -913,6 +1013,9 @@ impl MonitorStore {
             stream_chunks: active.stream_chunks,
             input_tokens: active.input_tokens,
             output_tokens: active.output_tokens,
+            usage: active.usage,
+            billing_model: active.billing_model,
+            accounting: active.accounting,
             error: error.or(active.error),
             traffic_capture_path: active.traffic_capture_path,
         };
@@ -926,21 +1029,67 @@ impl MonitorStore {
             );
         }
         self.recent.push_front(completed);
+        self.account_request(request_id);
         while self.recent.len() > self.recent_limit {
             self.recent.pop_back();
         }
     }
 
-    fn record_session_usage(
-        &mut self,
-        session_id: Option<String>,
-        input_tokens: u64,
-        output_tokens: u64,
-    ) {
-        let usage = self.session_usage.entry(session_id).or_default();
-        usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
-        usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
-        usage.last_seen = SystemTime::now();
+    fn account_request(&mut self, request_id: &str) {
+        let update = if let Some(request) = self.active.get_mut(request_id) {
+            let update = recount_usage(
+                &mut request.accounting,
+                &mut request.usage,
+                request.endpoint,
+                request.billing_model.as_deref(),
+                request.provider.as_deref(),
+                request.account_id.as_deref(),
+                request.input_tokens,
+                request.output_tokens,
+            );
+            Some((request.session_id.clone(), update))
+        } else {
+            self.recent
+                .iter_mut()
+                .find(|request| request.request_id == request_id)
+                .map(|request| {
+                    let update = recount_usage(
+                        &mut request.accounting,
+                        &mut request.usage,
+                        request.endpoint,
+                        request.billing_model.as_deref(),
+                        request.provider.as_deref(),
+                        request.account_id.as_deref(),
+                        request.input_tokens,
+                        request.output_tokens,
+                    );
+                    (request.session_id.clone(), update)
+                })
+        };
+        let Some((session_id, Some(change))) = update else {
+            return;
+        };
+        let session = self.session_usage.entry(session_id).or_default();
+        session.usage.replace(&change.old, &change.new);
+        session.last_seen = SystemTime::now();
+        if change.old_account == change.account {
+            if let Some(key) = change.account {
+                self.account_usage
+                    .entry(key)
+                    .or_default()
+                    .replace(&change.old, &change.new);
+            }
+        } else {
+            if let Some(key) = change.old_account {
+                self.account_usage
+                    .entry(key)
+                    .or_default()
+                    .replace(&change.old, &UsageTotals::default());
+            }
+            if let Some(key) = change.account {
+                self.account_usage.entry(key).or_default().add(&change.new);
+            }
+        }
     }
 
     fn record_session_output(
@@ -998,14 +1147,63 @@ impl MonitorStore {
             &self.session_output_buckets,
             now,
         );
+        let mut account_usage: Vec<_> = self
+            .account_usage
+            .iter()
+            .filter(|(_, usage)| usage.observed_requests > 0)
+            .map(|(key, usage)| AccountUsage {
+                provider: key.provider.clone(),
+                account_id: key.account_id.clone(),
+                usage: usage.clone(),
+            })
+            .collect();
+        account_usage
+            .sort_by(|a, b| (&a.provider, &a.account_id).cmp(&(&b.provider, &b.account_id)));
         MonitorState {
             started_at: self.started_at,
             uptime: self.started_instant.elapsed(),
             sessions,
             active,
             recent: self.recent.iter().cloned().collect(),
+            account_usage,
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recount_usage(
+    accounting: &mut RequestAccounting,
+    usage: &mut UsageTotals,
+    endpoint: EndpointKind,
+    model: Option<&str>,
+    provider: Option<&str>,
+    account_id: Option<&str>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+) -> Option<Recount> {
+    if endpoint == EndpointKind::CountTokens {
+        return None;
+    }
+    let key = provider.map(|provider| AccountKey {
+        provider: provider.to_string(),
+        account_id: account_id.map(str::to_string),
+    });
+    let text_endpoint = matches!(
+        endpoint,
+        EndpointKind::Messages | EndpointKind::Responses | EndpointKind::ChatCompletions
+    );
+    let update = accounting.recount(
+        model,
+        text_endpoint,
+        UsageObservation {
+            input_tokens,
+            output_tokens,
+            ..UsageObservation::default()
+        },
+        key,
+    );
+    *usage = accounting.all_totals();
+    update
 }
 
 fn session_summaries(
@@ -1032,6 +1230,7 @@ fn session_summaries(
                 last_seen: request.finished_at,
                 input_tokens: 0,
                 output_tokens: 0,
+                usage: UsageTotals::default(),
                 output_token_samples: Vec::new(),
                 rate_output_tokens: 0,
                 generation_duration: Duration::ZERO,
@@ -1078,6 +1277,7 @@ fn session_summaries(
                 last_seen: request.started_at,
                 input_tokens: 0,
                 output_tokens: 0,
+                usage: UsageTotals::default(),
                 output_token_samples: Vec::new(),
                 rate_output_tokens: 0,
                 generation_duration: Duration::ZERO,
@@ -1109,8 +1309,9 @@ fn session_summaries(
     let first_bucket = first_session_output_bucket(now);
     for (session_id, session) in &mut sessions {
         if let Some(usage) = session_usage.get(session_id) {
-            session.input_tokens = usage.input_tokens;
-            session.output_tokens = usage.output_tokens;
+            session.input_tokens = usage.usage.input_tokens;
+            session.output_tokens = usage.usage.output_tokens;
+            session.usage = usage.usage.clone();
         }
         if let Some(buckets) = session_output_buckets.get(session_id) {
             session.output_token_samples = buckets
@@ -1183,31 +1384,37 @@ pub fn throughput(
     Throughput::None
 }
 
+fn sse_data_values(bytes: &[u8]) -> impl Iterator<Item = serde_json::Value> + '_ {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter_map(|line| serde_json::from_str(line.strip_prefix("data:")?.trim()).ok())
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+fn anthropic_usage_values(value: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
+    [
+        value.pointer("/usage"),
+        value.pointer("/delta/usage"),
+        value.pointer("/message/usage"),
+    ]
+    .into_iter()
+    .flatten()
+}
+
 pub fn usage_from_anthropic_sse(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
-    let text = String::from_utf8_lossy(bytes);
     let mut input_tokens = None;
     let mut output_tokens = None;
-    for line in text.lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(data.trim()) else {
-            continue;
-        };
-        for usage in [
-            value.pointer("/usage"),
-            value.pointer("/delta/usage"),
-            value.pointer("/message/usage"),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if let Some(tokens) = usage.get("input_tokens").and_then(|value| value.as_u64()) {
-                input_tokens = Some(tokens);
-            }
-            if let Some(tokens) = usage.get("output_tokens").and_then(|value| value.as_u64()) {
-                output_tokens = Some(tokens);
-            }
+    for value in sse_data_values(bytes) {
+        for usage in anthropic_usage_values(&value) {
+            input_tokens = usage
+                .get("input_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .or(input_tokens);
+            output_tokens = usage
+                .get("output_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .or(output_tokens);
         }
     }
     (input_tokens, output_tokens)
@@ -1476,6 +1683,9 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
             stream_chunks: 0,
             input_tokens: None,
             output_tokens: Some(output_tokens),
+            usage: UsageTotals::default(),
+            billing_model: None,
+            accounting: RequestAccounting::default(),
             error: None,
             traffic_capture_path: None,
         }
@@ -1485,10 +1695,12 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
         let mut usage = HashMap::<Option<String>, SessionUsage>::new();
         for request in recent {
             let entry = usage.entry(request.session_id.clone()).or_default();
-            entry.input_tokens = entry
+            entry.usage.input_tokens = entry
+                .usage
                 .input_tokens
                 .saturating_add(request.input_tokens.unwrap_or(0));
-            entry.output_tokens = entry
+            entry.usage.output_tokens = entry
+                .usage
                 .output_tokens
                 .saturating_add(request.output_tokens.unwrap_or(0));
         }
