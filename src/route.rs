@@ -60,24 +60,43 @@ pub fn preflight() -> Result<()> {
     })
 }
 
+/// What happens to the fallback chain when a provider takes the lead.
+pub enum Chain {
+    /// The provider moves to the front of the pool and the rest keep their
+    /// order, so the old primary becomes the first fallback.
+    Keep,
+    /// Exactly these providers, in this order. An empty list clears the chain.
+    Set(Vec<String>),
+}
+
+/// The fallbacks that follow `provider` once it takes the lead: the old
+/// primary first, then the old fallbacks in their order.
+pub fn promoted(route: &config::Route, provider: &str) -> Vec<String> {
+    let mut fallback: Vec<String> = Vec::new();
+    for name in route.provider.iter().chain(&route.fallback) {
+        if name != provider && !fallback.contains(name) {
+            fallback.push(name.clone());
+        }
+    }
+    fallback
+}
+
 /// Send Claude Code through the proxy at `base_url`, to `provider`.
-pub fn activate(provider: &str, base_url: &str) -> Result<()> {
+pub fn activate(provider: &str, base_url: &str, chain: Chain) -> Result<()> {
     // The settings file is the step that can refuse (a file we can't read as
     // JSON), so it goes first and nothing else changes when it does.
     claude_settings::claim(base_url)?;
+    let fallback = match chain {
+        Chain::Keep => promoted(&config::route(), provider),
+        Chain::Set(mut chain) => {
+            chain.retain(|name| name != provider);
+            chain
+        }
+    };
     config_keys::write_values([
         ("route.on", serde_json::Value::Bool(true)),
         ("route.provider", provider.into()),
-        (
-            "route.fallback",
-            serde_json::json!(
-                config::route()
-                    .fallback
-                    .into_iter()
-                    .filter(|name| name != provider)
-                    .collect::<Vec<_>>()
-            ),
-        ),
+        ("route.fallback", serde_json::json!(fallback)),
     ])?;
     refresh_model_labels();
     Ok(())
@@ -261,6 +280,13 @@ pub fn status_lines() -> Vec<String> {
 /// Save the providers to try, in order, when the routed provider is spent.
 /// An empty list turns the chain off.
 pub fn set_fallback(providers: &[String]) -> Result<()> {
+    let names = clean_chain(providers)?;
+    config_keys::write_values([("route.fallback", serde_json::json!(names))])?;
+    Ok(())
+}
+
+/// A fallback list that is safe to save: known providers only, lowercase, no repeats.
+pub fn clean_chain(providers: &[String]) -> Result<Vec<String>> {
     let routable = routable_providers(&Registry::new());
     let mut names: Vec<String> = Vec::new();
     for raw in providers {
@@ -278,8 +304,7 @@ pub fn set_fallback(providers: &[String]) -> Result<()> {
             names.push(name);
         }
     }
-    config_keys::write_values([("route.fallback", serde_json::json!(names))])?;
-    Ok(())
+    Ok(names)
 }
 
 /// A note for when the running proxy is not the version of this binary,
@@ -321,6 +346,24 @@ mod tests {
                 models: (0..models).map(|i| format!("vendor/model-{i}")).collect(),
             },
         ))
+    }
+
+    #[test]
+    fn a_new_primary_takes_the_lead_and_the_pool_keeps_its_order() {
+        let route = config::Route {
+            on: true,
+            provider: Some("codex".into()),
+            fallback: vec!["kimi".into(), "glm".into()],
+            ..Default::default()
+        };
+        // The old primary becomes the first fallback.
+        assert_eq!(promoted(&route, "glm"), ["codex", "kimi"]);
+        // Choosing the primary again changes nothing.
+        assert_eq!(promoted(&route, "codex"), ["kimi", "glm"]);
+        // A provider outside the pool joins at the front and keeps the whole pool.
+        assert_eq!(promoted(&route, "grok"), ["codex", "kimi", "glm"]);
+        // A first choice has no old primary.
+        assert!(promoted(&config::Route::default(), "codex").is_empty());
     }
 
     #[test]

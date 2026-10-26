@@ -1,14 +1,16 @@
 //! `cc-proxy usage`: how much of each plan is used, read from each
 //! provider's own usage endpoint with the sign-in the proxy already holds.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::ValueEnum;
 use jiff::{Timestamp, tz::TimeZone};
 use ratatui::text::Line;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::accounts::Accounts;
@@ -113,6 +115,42 @@ impl UsageProvider {
     }
 }
 
+impl Failure {
+    /// One short line for the monitor, which already names the account and
+    /// offers sign-in. The command line keeps the longer `describe`.
+    fn short(&self, name: &str) -> String {
+        match self {
+            Self::SignInUnusable => {
+                "cc-proxy can't read or renew this sign-in. Choose Sign in to this account again."
+                    .into()
+            }
+            Self::Setup(_) => {
+                "cc-proxy can't build the usage request. Check the provider settings.".into()
+            }
+            Self::Rejected(401 | 403) => {
+                format!("{name} rejected the sign-in. Choose Sign in to this account again.")
+            }
+            Self::Rejected(429) => format!("{name} is limiting requests. Try again later."),
+            Self::Rejected(status @ 500..) => {
+                format!("{name} had a problem (HTTP {status}). Press r to retry in a few minutes.")
+            }
+            Self::Rejected(status) => format!(
+                "{name} refused the usage request (HTTP {status}). Check for a cc-proxy update."
+            ),
+            Self::TimedOut => format!(
+                "{name} didn't answer in {} seconds. Press r to retry.",
+                REQUEST_TIMEOUT.as_secs()
+            ),
+            Self::Unreachable => {
+                format!("cc-proxy couldn't reach {name}. Check your connection, then press r.")
+            }
+            Self::Unreadable => format!(
+                "{name} sent a usage reply cc-proxy can't read. Check for a cc-proxy update."
+            ),
+        }
+    }
+}
+
 /// Why a Codex or Kimi usage lookup failed, before it is put into words.
 #[derive(Debug)]
 enum Failure {
@@ -178,8 +216,15 @@ struct AccountUsage {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum AccountResult {
-    Usage { usage: PlanUsage },
-    Unavailable { error: String },
+    Usage {
+        usage: PlanUsage,
+    },
+    Unavailable {
+        error: String,
+        /// The same failure in one line, for the monitor.
+        #[serde(skip)]
+        short: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -350,7 +395,7 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
             Ok(Some(report)) => {
                 if let Report::Accounts(_, accounts) = &report {
                     for account in accounts {
-                        if let AccountResult::Unavailable { error } = &account.result {
+                        if let AccountResult::Unavailable { error, .. } = &account.result {
                             eprintln!("{error}");
                             code = 2;
                         }
@@ -480,7 +525,9 @@ pub(crate) fn account_usage() -> HashMap<(String, String), MonitorUsage> {
                 for account in accounts {
                     let report = match account.result {
                         AccountResult::Usage { usage } => usage.monitor_usage(),
-                        AccountResult::Unavailable { error } => MonitorUsage::Unavailable(error),
+                        AccountResult::Unavailable { short, .. } => {
+                            MonitorUsage::Unavailable(short)
+                        }
                     };
                     usage.insert((provider.id().to_string(), account.id), report);
                 }
@@ -489,7 +536,103 @@ pub(crate) fn account_usage() -> HashMap<(String, String), MonitorUsage> {
             _ => {}
         }
     }
+    remember_last_good(&last_good_path(), &usage);
     usage
+}
+
+/// Every label a window can carry, so a saved window gets its `&'static str` back.
+const WINDOW_LABELS: [&str; 6] = [
+    "5h",
+    "week",
+    "Gemini 5h",
+    "Gemini week",
+    "Claude 5h",
+    "Claude week",
+];
+
+#[derive(Serialize, Deserialize)]
+struct SavedWindow {
+    label: String,
+    remaining_percent: f64,
+    resets_at_ms: Option<i64>,
+}
+
+/// Keyed `provider/account id`.
+type SavedUsage = HashMap<String, Vec<SavedWindow>>;
+
+fn last_good_path() -> PathBuf {
+    crate::paths::state_dir().join("usage-last.json")
+}
+
+fn read_saved_usage(path: &Path) -> SavedUsage {
+    fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// The numbers from each account's last successful lookup. A failed refresh
+/// shows these with a warning, instead of replacing them with an error.
+pub(crate) fn last_good_usage() -> HashMap<(String, String), Vec<UsageWindow>> {
+    restore_usage(read_saved_usage(&last_good_path()))
+}
+
+fn restore_usage(saved: SavedUsage) -> HashMap<(String, String), Vec<UsageWindow>> {
+    saved
+        .into_iter()
+        .filter_map(|(key, windows)| {
+            let (provider, id) = key.split_once('/')?;
+            let windows = windows
+                .into_iter()
+                .filter_map(|window| {
+                    Some(UsageWindow {
+                        label: WINDOW_LABELS
+                            .into_iter()
+                            .find(|label| *label == window.label)?,
+                        remaining_percent: window.remaining_percent,
+                        resets_at_ms: window.resets_at_ms,
+                    })
+                })
+                .collect();
+            Some(((provider.to_string(), id.to_string()), windows))
+        })
+        .collect()
+}
+
+/// Saves the accounts that answered and forgets the ones that are gone.
+// ponytail: read, change, write with no lock. Two monitors refreshing at the
+// same moment can lose one account's entry until the next refresh.
+fn remember_last_good(path: &Path, usage: &HashMap<(String, String), MonitorUsage>) {
+    let mut saved = read_saved_usage(path);
+    let present: HashSet<String> = usage
+        .keys()
+        .map(|(provider, id)| format!("{provider}/{id}"))
+        .collect();
+    saved.retain(|key, _| present.contains(key));
+    for ((provider, id), usage) in usage {
+        if let MonitorUsage::Reported(windows) = usage
+            && !windows.is_empty()
+        {
+            saved.insert(
+                format!("{provider}/{id}"),
+                windows
+                    .iter()
+                    .map(|window| SavedWindow {
+                        label: window.label.to_string(),
+                        remaining_percent: window.remaining_percent,
+                        resets_at_ms: window.resets_at_ms,
+                    })
+                    .collect(),
+            );
+        }
+    }
+    if let Some(folder) = path.parent()
+        && fs::create_dir_all(folder).is_ok()
+        && let Ok(raw) = serde_json::to_vec(&saved)
+        && let Err(error) = crate::fsutil::write_atomic(path, &raw)
+    {
+        tracing::warn!(%error, "Could not save the last good usage");
+    }
 }
 
 fn fetch_reports(
@@ -550,6 +693,7 @@ async fn fetch(
                     AccountResult::Usage { usage }
                 }
                 Err(failure) => AccountResult::Unavailable {
+                    short: failure.short(provider.name()),
                     error: provider.describe(&account.name, failure),
                 },
             };
@@ -577,7 +721,9 @@ async fn fetch_account(
         UsageProvider::Antigravity => antigravity(client, id).await?,
         UsageProvider::OpenCode => return Err(Failure::Unreadable),
     };
-    if usage.five_hour.is_none() && usage.weekly.is_none() && usage.groups.is_empty() {
+    // A free plan has no windows to count, and that is not a broken reply.
+    let free = usage.plan.as_deref() == Some("free");
+    if !free && usage.five_hour.is_none() && usage.weekly.is_none() && usage.groups.is_empty() {
         return Err(Failure::Unreadable);
     }
     Ok(usage)
@@ -588,10 +734,21 @@ async fn claude(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure
     let store = Accounts::new("claude")
         .for_request::<StoredAuth>(Some(id))
         .map_err(|_| Failure::SignInUnusable)?;
-    let auth = AuthManager::new(store)
+    let manager = AuthManager::new(store);
+    let auth = manager
         .get_auth()
         .await
         .map_err(|_| Failure::SignInUnusable)?;
+    // A login saved before cc-proxy asked for the plan learns it here.
+    let auth = manager.learn_plan(auth).await;
+    // Claude's usage endpoint turns a free account away, which would read as a
+    // broken sign-in. There is nothing to count: Claude Code can't use it.
+    if auth.plan.as_deref() == Some("free") {
+        return Ok(PlanUsage {
+            plan: auth.plan,
+            ..PlanUsage::default()
+        });
+    }
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,
@@ -1349,6 +1506,61 @@ mod tests {
         );
         let usage = MonitorUsage::Unavailable("Press r to retry.".into());
         assert_eq!(usage.compact_line(now).to_string(), "unavailable");
+    }
+
+    #[test]
+    fn the_monitor_gets_one_short_line_and_the_command_line_keeps_the_long_one() {
+        let timed_out = UsageProvider::Claude.name();
+        assert_eq!(
+            Failure::TimedOut.short(timed_out),
+            "Claude subscription didn't answer in 10 seconds. Press r to retry."
+        );
+        assert_eq!(
+            Failure::Rejected(401).short("Codex"),
+            "Codex rejected the sign-in. Choose Sign in to this account again."
+        );
+        for failure in [
+            Failure::SignInUnusable,
+            Failure::TimedOut,
+            Failure::Unreachable,
+            Failure::Unreadable,
+            Failure::Rejected(429),
+            Failure::Rejected(502),
+        ] {
+            let short = failure.short("Kimi");
+            assert!(short.len() < 90, "{short}");
+            assert!(!short.contains("cc-proxy usage"), "{short}");
+            assert!(!short.contains("auth login"), "{short}");
+        }
+    }
+
+    #[test]
+    fn the_last_good_numbers_survive_a_failed_refresh_and_a_removed_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state").join("usage-last.json");
+        let window = |remaining_percent| UsageWindow {
+            label: "5h",
+            remaining_percent,
+            resets_at_ms: Some(1_700_000_000_000),
+        };
+        let key = |id: &str| ("codex".to_string(), id.to_string());
+        let mut usage = HashMap::from([
+            (key("a"), MonitorUsage::Reported(vec![window(58.0)])),
+            (key("b"), MonitorUsage::Reported(vec![window(12.0)])),
+        ]);
+        remember_last_good(&path, &usage);
+
+        // `a` fails the next time and `b` was removed.
+        usage.remove(&key("b"));
+        usage.insert(key("a"), MonitorUsage::Unavailable("Timed out.".into()));
+        remember_last_good(&path, &usage);
+        let restored = restore_usage(read_saved_usage(&path));
+        assert_eq!(restored.get(&key("a")), Some(&vec![window(58.0)]));
+        assert!(!restored.contains_key(&key("b")));
+
+        // A file that isn't ours restores nothing and never panics.
+        std::fs::write(&path, "not json").unwrap();
+        assert!(restore_usage(read_saved_usage(&path)).is_empty());
     }
 
     #[test]

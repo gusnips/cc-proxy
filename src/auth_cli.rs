@@ -185,8 +185,13 @@ impl<'a> AccountCli<'a> {
             ),
         };
         let chosen = self.accounts.require(&name)?;
-        self.accounts.set_current(&chosen.name)?;
-        let _ = crate::rotation::Cooldowns::new().clear_account(self.provider, &chosen.id);
+        crate::rotation::switch_account(
+            self.provider,
+            &self.accounts,
+            &crate::rotation::Cooldowns::new(),
+            &chosen,
+            crate::rotation::Switch::Chosen(self.support),
+        )?;
         println!("{label} now uses `{name}`. A running proxy switches on its next request.");
         Ok(())
     }

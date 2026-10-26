@@ -40,6 +40,12 @@ pub trait AccountSupport: Send + Sync {
     fn note(&self, _login: &Value) -> Option<String> {
         None
     }
+    /// Why this login can't serve requests at all, when its plan says so (a
+    /// free Claude plan). Rotation skips it and choosing it is refused. Written
+    /// as a clause: "cc-proxy won't use `work`: {reason}."
+    fn unusable(&self, _login: &Value) -> Option<&'static str> {
+        None
+    }
     /// Where the provider kept its one login before accounts existed.
     fn single_login(&self) -> Box<dyn AuthStorage<Value>>;
     /// Copy an existing local login without taking ownership of its source.
@@ -338,6 +344,16 @@ impl Accounts {
         self.file_store(&self.require(name)?.id).load()
     }
 
+    /// Why `account` can't serve requests, when its saved plan says so.
+    pub fn unusable(
+        &self,
+        support: &dyn AccountSupport,
+        account: &Account,
+    ) -> Option<&'static str> {
+        let login: Value = self.file_store(&account.id).load().ok()??;
+        support.unusable(&login)
+    }
+
     /// Saves only if the slot still matches the command's starting state.
     /// A browser sign-in can take minutes; another process may change it meanwhile.
     pub fn install(
@@ -397,8 +413,9 @@ impl Accounts {
     }
 
     /// A late request must not overwrite a switch made by a newer request or
-    /// by `auth use` while it was waiting for the provider.
-    pub(crate) fn switch_if_current(&self, expected_id: &str, next_id: &str) -> Result<()> {
+    /// by `auth use` while it was waiting for the provider. Returns whether it
+    /// switched.
+    pub(crate) fn switch_if_current(&self, expected_id: &str, next_id: &str) -> Result<bool> {
         self.locked(|| {
             let mut index = self.read_index()?;
             let current = index
@@ -410,8 +427,9 @@ impl Accounts {
             {
                 index.current = Some(next.name.clone());
                 self.write_index(&index)?;
+                return Ok(true);
             }
-            Ok(())
+            Ok(false)
         })
     }
 

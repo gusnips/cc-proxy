@@ -59,6 +59,10 @@ with a file fallback. Copilot keeps `copilot/auth.json`.
 internal account ID, with a model name when the limit applies to one model.
 It holds no tokens. `auth status` reads it without contacting a provider.
 
+`usage-last.json` in the same folder keeps the numbers from each saved account's
+last good usage lookup: the remaining percent and reset time of each window. The
+monitor shows them, with a warning, when a later lookup fails. It holds no tokens.
+
 OpenCode Go is the exception: it reads its API key from
 `CCP_OPENCODE_API_KEY`, `OPENCODE_API_KEY`, or `opencode.apiKey` in
 `config.json` and does not create a provider auth store.

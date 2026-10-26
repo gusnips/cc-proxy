@@ -53,19 +53,22 @@ If `settings.json` isn't valid JSON, `start` stops before it does anything and n
 
 ```sh
 cc-proxy use <provider>... | direct
+cc-proxy use <provider> --no-fallback
 ```
 
 Changes where Claude Code goes, with the proxy kept running. `claude` uses a saved Claude subscription through the proxy, like any other provider. `cc-proxy provider list` shows all provider names.
 
 `cc-proxy use direct` bypasses the proxy and restores Claude Code's original settings and login. It needs no provider sign-in, never selects a saved cc-proxy account and does not start or stop the proxy. Use `direct` on its own, not in a fallback chain.
 
-More than one provider is a fallback chain, tried in the order you list them:
+One provider keeps your fallbacks. It moves to the front, and the provider you had before becomes the first fallback. If Codex is first and Kimi follows, `cc-proxy use kimi` makes Kimi first and Codex its fallback.
+
+More than one provider sets the chain, tried in the order you list them:
 
 ```sh
 cc-proxy use codex antigravity
 ```
 
-When every saved Codex account is spent, the next request goes to Antigravity. The first request after Codex frees up goes back to Codex. This needs `auth.autoRotate` on for providers with more than one saved account. `cc-proxy use codex` on its own clears the chain.
+When every saved Codex account is spent, the next request goes to Antigravity. The first request after Codex frees up goes back to Codex. This needs `auth.autoRotate` on for providers with more than one saved account. `cc-proxy use codex --no-fallback` clears the chain.
 
 With no argument, `use` asks the same question as `start`. If the provider isn't signed in, it asks `Sign in now? [y/N]` and runs that provider's sign-in. The default is no, so a script never opens a browser. For GLM and OpenCode Go, sign-in reads an API key.
 

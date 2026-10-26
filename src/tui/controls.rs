@@ -54,7 +54,7 @@ impl Action {
                 };
                 match pick {
                     start_flow::Pick::Provider(provider) => {
-                        route::activate(provider, &info.listen_url())?;
+                        route::activate(provider, &info.listen_url(), route::Chain::Keep)?;
                         Ok(format!(
                             "The proxy is on. Claude Code uses {} through it. Open windows follow within a few seconds.",
                             ui::provider_name(provider)
@@ -70,7 +70,7 @@ impl Action {
                 route::preflight()?;
                 match start_flow::pick(Some(provider))? {
                     start_flow::Pick::Provider(provider) => {
-                        route::activate(provider, base_url)?;
+                        route::activate(provider, base_url, route::Chain::Keep)?;
                         Ok(format!(
                             "Saved. Claude Code uses {} through the proxy. Open windows follow within a few seconds.",
                             ui::provider_name(provider)
@@ -98,8 +98,13 @@ impl Action {
                 }
                 let accounts = Accounts::open(provider, support)?;
                 let account = saved_account(&accounts, id)?;
-                accounts.set_current(&account.name)?;
-                let _ = crate::rotation::Cooldowns::new().clear_account(provider, &account.id);
+                crate::rotation::switch_account(
+                    provider,
+                    &accounts,
+                    &crate::rotation::Cooldowns::new(),
+                    &account,
+                    crate::rotation::Switch::Chosen(support),
+                )?;
                 Ok(format!(
                     "Saved. New {} requests use {}. Requests already running keep their account.",
                     ui::provider_name(provider),

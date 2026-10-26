@@ -166,8 +166,9 @@ cc-proxy use codex antigravity gemini
 writes `"provider": "codex"` and `"fallback": ["antigravity", "gemini"]`.
 Each request starts on the routed provider again, so the chain returns to it as
 soon as it frees up. A fallback provider without an account for the requested
-tier is skipped. Leave the array out, or run `cc-proxy use codex`, to turn the
-chain off.
+tier is skipped. Leave the array out, or run `cc-proxy use codex --no-fallback`,
+to turn the chain off. `cc-proxy use kimi` on its own keeps the chain: Kimi
+moves to the front and Codex becomes its first fallback.
 
 When every provider in the chain is spent, the proxy answers one 429 that names
 the provider freeing up first and when. The response carries the

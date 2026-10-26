@@ -48,9 +48,12 @@ enum Commands {
     },
     /// Switch provider, set a fallback order, or use `direct` to bypass the proxy
     Use {
-        /// A provider, or `direct` to bypass the proxy. Multiple providers form a fallback chain. Leave it out to pick from a list
+        /// A provider, or `direct` to bypass the proxy. One provider keeps your fallbacks and puts the old primary first among them. Several set the chain: the first is primary, the rest follow in order. Leave it out to pick from a list
         #[arg(value_name = "PROVIDER")]
         targets: Vec<String>,
+        /// Clear the fallback chain, so only this provider is used
+        #[arg(long)]
+        no_fallback: bool,
     },
     /// Switch routing off and stop the background proxy service
     Stop,
@@ -296,7 +299,10 @@ fn run() -> Result<()> {
             no_monitor,
             monitor,
         }),
-        Commands::Use { targets } => use_target(&targets),
+        Commands::Use {
+            targets,
+            no_fallback,
+        } => use_target(&targets, no_fallback),
         Commands::Demo => {
             let registry = Registry::new();
             tui::run_mock_monitor(config::port(), &registry)
@@ -662,9 +668,9 @@ fn ensure_proxy(port: Option<u16>) -> Result<Proxy> {
 }
 
 /// Point Claude Code at the proxy for a provider, or restore its original settings.
-fn set_route(pick: Pick, url: &str) -> Result<()> {
+fn set_route(pick: Pick, url: &str, chain: route::Chain) -> Result<()> {
     match pick {
-        Pick::Provider(provider) => route::activate(provider, url),
+        Pick::Provider(provider) => route::activate(provider, url, chain),
         Pick::Direct => route::deactivate(),
     }
 }
@@ -688,7 +694,7 @@ fn start_daemon(target: Option<&str>, port: Option<u16>) -> Result<()> {
     let hook_note = remove_old_hook();
     let pick = start_flow::pick(target)?;
     let proxy = ensure_proxy(port)?;
-    set_route(pick, &proxy.url)?;
+    set_route(pick, &proxy.url, route::Chain::Keep)?;
 
     let mut lines = proxy.lines;
     lines.extend(route_lines(pick));
@@ -701,7 +707,7 @@ fn start_daemon(target: Option<&str>, port: Option<u16>) -> Result<()> {
 }
 
 /// `cc-proxy use`: switch where Claude Code goes, with the proxy kept running.
-fn use_target(targets: &[String]) -> Result<()> {
+fn use_target(targets: &[String], no_fallback: bool) -> Result<()> {
     if targets.len() > 1
         && targets
             .iter()
@@ -712,16 +718,27 @@ fn use_target(targets: &[String]) -> Result<()> {
              Run `cc-proxy use direct` on its own, or list only providers."
         );
     }
+    if no_fallback && targets.len() > 1 {
+        anyhow::bail!(
+            "`--no-fallback` clears the fallback chain, so it can't come with a list of providers. \
+             Name one provider, or drop the flag."
+        );
+    }
     route::preflight()?;
     let pick = start_flow::pick(targets.first().map(String::as_str))?;
     let mut lines = Vec::new();
     let mut proxy_port = None;
     match pick {
         Pick::Provider(_) => {
-            // Checked before the proxy starts, so a typo changes nothing.
-            route::set_fallback(targets.get(1..).unwrap_or_default())?;
+            // Checked before the proxy starts, so a typo changes nothing. One
+            // provider keeps your fallbacks. A list or the flag replaces them.
+            let chain = match targets.get(1..) {
+                Some(rest) if !rest.is_empty() => route::Chain::Set(route::clean_chain(rest)?),
+                _ if no_fallback => route::Chain::Set(Vec::new()),
+                _ => route::Chain::Keep,
+            };
             let proxy = ensure_proxy(None)?;
-            set_route(pick, &proxy.url)?;
+            set_route(pick, &proxy.url, chain)?;
             proxy_port = Some(proxy.port);
             lines.extend(proxy.lines);
         }
@@ -778,7 +795,11 @@ fn serve_with_monitor(target: Option<&str>, port: Option<u16>) -> Result<()> {
     let listener = runtime.block_on(server::bind_proxy_listener(&bind_address, effective_port))?;
     let local_addr = listener.local_addr()?;
     let ip = local_addr.ip().to_string();
-    set_route(pick, &daemon::client_url(&ip, local_addr.port()))?;
+    set_route(
+        pick,
+        &daemon::client_url(&ip, local_addr.port()),
+        route::Chain::Keep,
+    )?;
     let monitor_listen_url = daemon::client_url(&ip, local_addr.port());
     let server_monitor = monitor.clone();
     let server_task = runtime.spawn(async move {

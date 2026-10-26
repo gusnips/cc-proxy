@@ -4,10 +4,12 @@ use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use serde_json::json;
+use serde_json::{Value, json};
 use url::Url;
 
-use super::auth::{CLIENT_ID, StoredAuth, TOKEN_URL, TokenResponse};
+use super::auth::{
+    CLIENT_ID, PROFILE_URL, StoredAuth, TOKEN_URL, TokenResponse, USAGE_BETA, plan_from_profile,
+};
 use crate::providers::grok::auth::pkce::{PkceCodes, generate_pkce, generate_state};
 
 const CALLBACK_PORT: u16 = 54545;
@@ -72,7 +74,21 @@ pub fn sign_in(manual: bool) -> Result<StoredAuth> {
             response.status()
         );
     }
-    response.json::<TokenResponse>()?.into_auth(None)
+    let mut auth = response.json::<TokenResponse>()?.into_auth(None)?;
+    // Best effort. A login that can't name its plan now learns it on the next
+    // usage lookup or renewal.
+    auth.plan = client
+        .get(PROFILE_URL)
+        .bearer_auth(&auth.access)
+        .header("anthropic-beta", USAGE_BETA)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .and_then(|response| response.error_for_status())
+        .and_then(|response| response.json::<Value>())
+        .ok()
+        .and_then(|profile| plan_from_profile(&profile))
+        .or(auth.plan);
+    Ok(auth)
 }
 
 fn pasted_code(raw: &str, expected_state: &str) -> Result<String> {
