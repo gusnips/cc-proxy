@@ -6,6 +6,7 @@ use futures_util::{Stream, StreamExt};
 use http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};
 
+use crate::monitor::UsageObservation;
 use crate::providers::codex::native::NativeResponseOutcome;
 use crate::{provider::RequestContext, traffic::MAX_SSE_CAPTURE_BYTES};
 
@@ -176,6 +177,11 @@ impl StreamState {
         };
         if let Some(traffic) = self.ctx.traffic.as_deref() {
             traffic.write_json_event("040-upstream-event", &event);
+        }
+        if let Some(monitor) = self.ctx.monitor.as_ref()
+            && let Some(usage) = event.pointer("/response/usage")
+        {
+            monitor.usage_observed(&self.ctx.req_id, UsageObservation::openai(usage));
         }
         match self.completion.observe(&event) {
             Ok(Some(delta)) => {

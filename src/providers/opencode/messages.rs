@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 
 use crate::anthropic::schema::MessagesRequest;
 use crate::anthropic::sse::encode_sse_event;
-use crate::monitor::MonitorHandle;
+use crate::monitor::{MonitorHandle, UsageObservation};
 use crate::providers::grok::translate::stream::SseDecoder;
 use crate::providers::upstream_error;
 use crate::traffic::{StreamTrafficCapture, TrafficCapture};
@@ -190,6 +190,13 @@ where
                 .or_else(|| value.pointer("/usage/input_tokens"))
                 .and_then(serde_json::Value::as_u64)
                 .or(input_tokens);
+            if let Some(monitor) = self.monitor.as_ref()
+                && let Some(usage) = value
+                    .pointer("/message/usage")
+                    .or_else(|| value.get("usage"))
+            {
+                monitor.usage_observed(&self.req_id, UsageObservation::anthropic(usage));
+            }
             output_tokens = value
                 .pointer("/message/usage/output_tokens")
                 .or_else(|| value.pointer("/usage/output_tokens"))

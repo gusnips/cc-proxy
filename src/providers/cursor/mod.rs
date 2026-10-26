@@ -144,6 +144,7 @@ impl Provider for CursorProvider {
             };
             if let Some(monitor) = ctx.monitor.as_ref() {
                 let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
+                monitor.observe_anthropic_sse(&ctx.req_id, &sse_bytes);
                 monitor.stream_progress(
                     &ctx.req_id,
                     sse_bytes.len() as u64,
@@ -162,6 +163,7 @@ impl Provider for CursorProvider {
             match decode_cursor_upstream(&upstream, &message_id, model) {
                 Ok(json) => {
                     if let Some(monitor) = ctx.monitor.as_ref() {
+                        monitor.observe_anthropic_message(&ctx.req_id, &json);
                         monitor.usage_updated(
                             &ctx.req_id,
                             json.pointer("/usage/input_tokens").and_then(|v| v.as_u64()),
@@ -273,6 +275,7 @@ impl Provider for CursorProvider {
         }
         if let Some(monitor) = ctx.monitor.as_ref() {
             let (input_tokens, output_tokens) = usage_from_anthropic_sse(&bytes);
+            monitor.observe_anthropic_sse(&ctx.req_id, &bytes);
             monitor.stream_progress(
                 &ctx.req_id,
                 bytes.len() as u64,

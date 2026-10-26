@@ -194,6 +194,7 @@ where
             return;
         };
         let (input_tokens, output_tokens) = usage_from_anthropic_sse(output);
+        monitor.observe_anthropic_sse(&self.req_id, output);
         monitor.stream_progress(
             &self.req_id,
             output.len() as u64,
