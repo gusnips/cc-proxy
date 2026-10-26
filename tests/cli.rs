@@ -54,12 +54,12 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
     for description in [
         "Print version information",
         "Start the proxy as a background service and send Claude Code through it",
-        "Switch where Claude Code goes: a provider, or `claude` for your own subscription",
+        "Switch provider, set a fallback order, or use `direct` to bypass the proxy",
         "Switch routing off and stop the background proxy service",
         "Show whether the proxy is running and where Claude Code goes",
         "Restart the background proxy service",
         "Validate the config file and ask a running service to reload it",
-        "Attach a read-only dashboard to a running proxy",
+        "Open accounts, settings and live activity. If the proxy is off, press s to start it",
         "List every provider and where Claude Code goes, or add and remove your own",
         "Sign in to providers, or see who is signed in (login, device, status, logout)",
         "See or choose the model each Claude name uses, and list provider models",
@@ -288,6 +288,17 @@ fn isolated_opencode_env(cmd: &mut Command, temp: &TempDir) {
         .env_remove("OPENCODE_API_KEY");
 }
 
+/// Every saved login file of a provider, joined. Empty when none is saved.
+fn saved_logins(temp: &TempDir, provider: &str) -> String {
+    let dir = temp.path().join("config").join(provider).join("accounts");
+    let Ok(files) = std::fs::read_dir(dir) else {
+        return String::new();
+    };
+    files
+        .filter_map(|file| std::fs::read_to_string(file.ok()?.path()).ok())
+        .collect()
+}
+
 #[test]
 fn opencode_auth_status_reports_config_source() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
@@ -322,8 +333,8 @@ fn opencode_auth_login_stores_key_from_stdin() -> Result<(), Box<dyn std::error:
         .write_stdin("login-key\n")
         .assert()
         .success()
-        .stdout(contains("saved"));
-    let raw = std::fs::read_to_string(temp.path().join("config/config.json"))?;
+        .stdout(contains("Signed in to OpenCode Go as `main`"));
+    let raw = saved_logins(&temp, "opencode");
     assert!(raw.contains("\"apiKey\""));
     assert!(raw.contains("login-key"));
     Ok(())
@@ -339,10 +350,7 @@ fn top_level_login_and_logout_use_the_auth_handlers() -> Result<(), Box<dyn std:
         let mut cmd = Command::cargo_bin("cc-proxy")?;
         isolated_opencode_env(&mut cmd, &temp);
         cmd.args(["logout", "opencode"]).assert().success();
-        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
-            temp.path().join("config/config.json"),
-        )?)?;
-        assert!(config.pointer("/opencode/apiKey").is_none());
+        assert!(!saved_logins(&temp, "opencode").contains("fake-key"));
     }
     Ok(())
 }
@@ -1020,13 +1028,12 @@ fn custom_provider_add_auth_models_and_remove_round_trip() -> Result<(), Box<dyn
         .write_stdin("or-secret-key\n")
         .assert()
         .success()
-        .stdout(contains("saved"));
+        .stdout(contains("Signed in to openrouter as `main`"));
 
     run(&["auth", "status", "openrouter"])
         .assert()
         .success()
-        .stdout(contains("Format: openai"))
-        .stdout(contains("https://openrouter.ai/api/v1"));
+        .stdout(contains("openrouter `main` (current)"));
 
     run(&["models", "list"])
         .assert()
@@ -1051,12 +1058,12 @@ fn custom_provider_add_auth_models_and_remove_round_trip() -> Result<(), Box<dyn
         .write_stdin("sk-ant-test\n")
         .assert()
         .success()
-        .stdout(contains("Anthropic API key saved"));
+        .stdout(contains("Signed in to Anthropic as `main`"));
 
     run(&["auth", "status", "anthropic"])
         .assert()
         .success()
-        .stdout(contains("https://api.anthropic.com"));
+        .stdout(contains("Anthropic `main` (current)"));
 
     Ok(())
 }
