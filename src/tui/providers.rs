@@ -15,7 +15,11 @@ use ratatui::{
 use super::controls::Action;
 use super::{BG, DIM_WHITE, GREEN, SELECTED_BG, TEAL, WHITE, YELLOW, panel};
 use crate::accounts::Accounts;
-use crate::monitor::{EndpointKind, RequestStatus, snapshot::MonitorSnapshot};
+use crate::monitor::{
+    EndpointKind, RequestStatus,
+    accounting::{AccountUsage, UsageTotals},
+    snapshot::MonitorSnapshot,
+};
 use crate::provider::AuthState;
 use crate::registry::Registry;
 use crate::usage::{MonitorUsage, UsageWindow};
@@ -195,6 +199,9 @@ pub(super) struct ProvidersPanel {
     auto_rotate: bool,
     /// Last request that reached generation, not the route's first choice.
     serving: Option<Serving>,
+    /// What each saved account used since the proxy started, by provider and
+    /// immutable account id, so a rename never splits it.
+    spend: HashMap<(String, String), UsageTotals>,
     loaded_at: Option<Instant>,
     pending: Option<mpsc::Receiver<Vec<ProviderRow>>>,
     selected: Entry,
@@ -213,6 +220,7 @@ impl ProvidersPanel {
             route: config::Route::default(),
             auto_rotate: false,
             serving: None,
+            spend: HashMap::new(),
             loaded_at: None,
             pending: None,
             selected: Entry::Direct,
@@ -301,6 +309,19 @@ impl ProvidersPanel {
     /// Follow requests that reached generation. A provider being tried is not
     /// proof it served anything, and a token-count request is not a generation.
     pub fn observe(&mut self, snapshot: &MonitorSnapshot) {
+        self.spend = snapshot
+            .account_usage
+            .iter()
+            .filter_map(
+                |AccountUsage {
+                     provider,
+                     account_id,
+                     usage,
+                 }| {
+                    Some(((provider.clone(), account_id.clone()?), usage.clone()))
+                },
+            )
+            .collect();
         let before = self.primary_entry();
         self.serving = snapshot
             .active
@@ -410,6 +431,27 @@ impl ProvidersPanel {
         match &self.serving {
             Some(serving) => serving.provider == provider,
             None => self.route.target() == Some(provider),
+        }
+    }
+
+    /// What this account used since the proxy started, if it served anything.
+    fn spent_since_start(&self, provider: &str, account: &AccountRow) -> Option<&UsageTotals> {
+        self.spend
+            .get(&(provider.to_string(), account.id.clone()))
+            .filter(|totals| totals.observed_requests > 0)
+    }
+
+    /// The row's usage text. An account that reports no quota (an API key)
+    /// shows what it used instead of "not reported". A wait still wins.
+    fn row_summary(&self, provider: &str, account: &AccountRow, now: u64) -> Line<'static> {
+        let summary = account.usage_summary(now);
+        match (&account.usage, self.spent_since_start(provider, account)) {
+            (Some(MonitorUsage::NotReported(_)), Some(totals))
+                if summary.to_string() == "not reported" =>
+            {
+                Line::styled(totals.compact(), Style::default().fg(DIM_WHITE))
+            }
+            _ => summary,
         }
     }
 
@@ -783,7 +825,7 @@ impl ProvidersPanel {
                     && row
                         .first_reset(now)
                         .is_some_and(|(first, _)| first.id == account.id);
-                let summary = account.usage_summary(now);
+                let summary = self.row_summary(provider, account, now);
                 let tags = account_tags(account, first_reset);
                 let tags_width: usize = tags.iter().map(Span::width).sum();
                 let marker = account_marker(account, serving);
@@ -900,6 +942,23 @@ impl ProvidersPanel {
                             }
                         }
                         text.push(account.state.clone().into());
+                        if let Some(totals) = self.spent_since_start(&row.id, account) {
+                            text.push("".into());
+                            text.push(Line::styled(
+                                format!("Since the proxy started: {}", totals.tokens_label()),
+                                Style::default().fg(DIM_WHITE),
+                            ));
+                            if let Some(cache) = totals.cache_label() {
+                                text.push(Line::styled(
+                                    format!("Cached input: {cache}"),
+                                    Style::default().fg(DIM_WHITE),
+                                ));
+                            }
+                            text.push(Line::styled(
+                                format!("Cost: {}", totals.cost_detail()),
+                                Style::default().fg(DIM_WHITE),
+                            ));
+                        }
                         if let Some(note) = &account.note {
                             text.push(Line::styled(note.clone(), Style::default().fg(YELLOW)));
                         }
@@ -1900,6 +1959,38 @@ mod tests {
         panel.observe(&served("kimi", "demo-kimi", EndpointKind::CountTokens));
         assert!(panel.serving.is_none());
         assert!(render(&mut panel, 160, 30).contains("No request served yet in this run."));
+    }
+
+    #[test]
+    fn an_account_shows_what_it_used_since_the_proxy_started() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.rows[1].accounts[0].usage = Some(MonitorUsage::NotReported("No balance."));
+        panel.selected = Entry::Account("kimi".into(), "demo-kimi".into());
+        // Nothing served yet: the row says so and Details stay quiet.
+        assert!(render(&mut panel, 160, 30).contains("not reported"));
+        assert!(!render(&mut panel, 160, 30).contains("Since the proxy started"));
+
+        let monitor = crate::monitor::MonitorHandle::default();
+        monitor.request_started("r", Some("s".into()), Some(1), EndpointKind::Messages);
+        monitor.provider_selected("r", "kimi", "kimi-k2.6", None);
+        monitor.account_selected("r", "demo-kimi", "personal");
+        monitor.usage_updated("r", Some(1_200), Some(300));
+        monitor.request_completed("r", 200, Some(1_200), Some(300));
+        panel.observe(&monitor.snapshot().into());
+
+        let text = render(&mut panel, 160, 30);
+        // An API-key row shows the use instead of "not reported".
+        assert!(text.contains("1.2k in / 300 out"), "{text}");
+        assert!(!text.contains("not reported"), "{text}");
+        // Details say what the number is, and say when no price is known.
+        assert!(
+            text.contains("Since the proxy started: 1.2k in / 300 out"),
+            "{text}"
+        );
+        assert!(text.contains("no price for this model"), "{text}");
+        // The totals follow the immutable id: a rename keeps them.
+        panel.rows[1].accounts[0].name = "renamed".into();
+        assert!(render(&mut panel, 160, 30).contains("1.2k in / 300 out"));
     }
 
     #[test]
