@@ -244,7 +244,20 @@ fn run_monitor_events(
                     {
                         run_settings_key(terminal, app, key)?;
                     }
-                    KeyCode::Char('q') if app.is_attached() => return Ok(MonitorExit::Detached),
+                    // A name being typed owns every key, `q` and `?` included. Only
+                    // Ctrl-C still leaves, like in a settings field.
+                    _ if app.phase == MonitorPhase::Running
+                        && !app.show_help
+                        && !app.show_setup
+                        && app.page == Page::Accounts
+                        && app.providers.renaming()
+                        && !(key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)) =>
+                    {
+                        if let Some(action) = app.providers.press_rename(key) {
+                            run_account_action(terminal, app, state, action)?;
+                        }
+                    }
                     KeyCode::Char('c')
                         if app.is_attached() && key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
@@ -647,6 +660,10 @@ fn run_account_action(
     }
     if let (Ok(_), controls::Action::RemoveAccount { provider, id }) = (&result, &action) {
         app.providers.forget_account(provider, id);
+    }
+    // The row shows its new name at once. The next read confirms it.
+    if let (Ok(_), controls::Action::RenameAccount { provider, id, name }) = (&result, &action) {
+        let _ = app.providers.rename_account(provider, id, name);
     }
     if starting {
         app.providers.finish_start(result);
@@ -2030,6 +2047,8 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
         });
     let hint = if let Some(hint) = settings_hint {
         hint
+    } else if app.page == Page::Accounts && app.providers.renaming() {
+        " Enter save · Esc keep the old name · Ctrl-U clear · Ctrl-C close".to_string()
     } else if app.page == Page::Accounts && app.providers.menu_open() {
         " Esc back · ↑/↓ choose · Enter run · q close".to_string()
     } else if area.width < 80 {

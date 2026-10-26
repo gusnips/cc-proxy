@@ -22,6 +22,12 @@ pub(super) enum Action {
         provider: String,
         id: String,
     },
+    /// Gives a saved account a new name. Its sign-in and id stay as they are.
+    RenameAccount {
+        provider: String,
+        id: String,
+        name: String,
+    },
     Fallback(Vec<String>),
     SignIn {
         provider: String,
@@ -37,7 +43,10 @@ impl Action {
         match self {
             Self::StartProxy | Self::SignIn { .. } => true,
             Self::UseProvider(provider) => start_flow::will_ask(provider),
-            Self::UseAccount { .. } | Self::RemoveAccount { .. } | Self::Fallback(_) => false,
+            Self::UseAccount { .. }
+            | Self::RemoveAccount { .. }
+            | Self::RenameAccount { .. }
+            | Self::Fallback(_) => false,
         }
     }
 
@@ -132,6 +141,25 @@ impl Action {
                     "Removed {} account {}.{next} Sign in to add it back.",
                     ui::provider_name(provider),
                     account.name
+                ))
+            }
+            Self::RenameAccount { provider, id, name } => {
+                let registry = Registry::new();
+                let handler = registry
+                    .provider(provider)
+                    .context("This provider was removed. Press r to refresh.")?;
+                let support = handler
+                    .cli()
+                    .accounts()
+                    .context("This provider does not support saved accounts.")?;
+                let accounts = Accounts::open(provider, support)?;
+                let account = saved_account(&accounts, id)?;
+                let renamed = accounts.rename(&account.name, name)?;
+                Ok(format!(
+                    "Renamed {} account {} to {}. Its sign-in stays the same.",
+                    ui::provider_name(provider),
+                    account.name,
+                    renamed.name
                 ))
             }
             Self::Fallback(providers) => {
