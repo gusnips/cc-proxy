@@ -20,6 +20,7 @@ use crate::provider::{Provider, RequestContext};
 use crate::registry::Registry;
 use crate::request_identity::ConversationIdentity;
 
+mod chats;
 mod routed;
 pub(crate) use routed::execute_routed;
 
