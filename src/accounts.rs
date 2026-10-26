@@ -120,6 +120,20 @@ pub fn clean_name(raw: &str) -> Result<String> {
     Ok(name)
 }
 
+/// A better name for an account, when its name is only a number in the list
+/// (`main`, `account-2`) and the sign-in says an email. A name the person chose
+/// is never second-guessed.
+pub fn suggested_name(name: &str, email: Option<&str>) -> Option<String> {
+    let numbered = name == FIRST_NAME
+        || name
+            .strip_prefix("account-")
+            .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()));
+    if !numbered {
+        return None;
+    }
+    clean_name(email?).ok().filter(|email| email.contains('@'))
+}
+
 impl Accounts {
     pub fn new(provider: &str) -> Self {
         Self::in_dir(provider, crate::paths::config_dir().join(provider))
@@ -344,6 +358,19 @@ impl Accounts {
         self.file_store(&self.require(name)?.id).load()
     }
 
+    /// A name worth offering for `account`, when it has only a number for a
+    /// name and its saved sign-in says an email that no other account uses.
+    pub fn suggest_name(&self, support: &dyn AccountSupport, account: &Account) -> Option<String> {
+        let login: Value = self.file_store(&account.id).load().ok()??;
+        let email = support.email(&login);
+        let suggestion = suggested_name(&account.name, email.as_deref())?;
+        let taken = self.list().ok()?;
+        taken
+            .iter()
+            .all(|other| other.name != suggestion)
+            .then_some(suggestion)
+    }
+
     /// Why `account` can't serve requests, when its saved plan says so.
     pub fn unusable(
         &self,
@@ -430,6 +457,33 @@ impl Accounts {
                 return Ok(true);
             }
             Ok(false)
+        })
+    }
+
+    /// Gives an account a new name. Its id, login and place stay as they are,
+    /// so waits, usage and request history stay with it. Returns the account
+    /// under its new name.
+    pub fn rename(&self, old: &str, new: &str) -> Result<Account> {
+        let new = clean_name(new)?;
+        self.locked(|| {
+            let mut index = self.read_index()?;
+            let Some(at) = index.position(old) else {
+                bail!(self.missing(old, &index));
+            };
+            if new != old && index.position(&new).is_some() {
+                bail!(
+                    "{} already has an account called `{new}`. Pick another name.",
+                    crate::ui::provider_name(&self.provider)
+                );
+            }
+            index.accounts[at].name = new.clone();
+            // The index keeps the current account by name.
+            if index.current.as_deref() == Some(old) {
+                index.current = Some(new);
+            }
+            let account = index.accounts[at].clone();
+            self.write_index(&index)?;
+            Ok(account)
         })
     }
 
@@ -1047,6 +1101,125 @@ mod tests {
         assert_eq!(suffixed, format!("{room_for_suffix}-2"));
         assert_eq!(suffixed.len(), MAX_EMAIL_NAME_LEN);
         assert_eq!(clean_name(&suffixed).unwrap(), suffixed);
+    }
+
+    #[test]
+    fn renaming_keeps_the_id_the_login_and_the_saved_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts
+            .save("main", &json!({"access": "m"}), Some("id-m".into()))
+            .unwrap();
+        accounts
+            .save("work", &json!({"access": "w"}), None)
+            .unwrap();
+        let before = accounts.require("main").unwrap();
+
+        let renamed = accounts.rename("main", " Ana@Example.com ").unwrap();
+        assert_eq!(renamed.name, "ana@example.com");
+        assert_eq!(renamed.id, before.id);
+        assert_eq!(renamed.identity, before.identity);
+        assert_eq!(names(&accounts), ["ana@example.com", "work"]);
+        // `main` was the saved choice: the index follows it to its new name.
+        assert_eq!(accounts.current().unwrap().unwrap().id, before.id);
+        assert_eq!(
+            accounts.login("ana@example.com").unwrap().unwrap()["access"],
+            "m"
+        );
+        assert!(accounts.require("main").is_err());
+
+        // Another account being renamed leaves the choice alone.
+        accounts.rename("work", "office").unwrap();
+        assert_eq!(accounts.current().unwrap().unwrap().id, before.id);
+    }
+
+    #[test]
+    fn a_rename_that_cannot_work_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts.save("main", &json!({}), None).unwrap();
+        accounts.save("work", &json!({}), None).unwrap();
+
+        let taken = accounts.rename("work", "MAIN").unwrap_err().to_string();
+        assert!(
+            taken.contains("already has an account called `main`"),
+            "{taken}"
+        );
+        for bad in ["", "   ", "a b", "-x"] {
+            assert!(accounts.rename("work", bad).is_err(), "{bad:?}");
+        }
+        assert!(accounts.rename("nope", "fine").is_err());
+        assert_eq!(names(&accounts), ["main", "work"]);
+        // The same name again is not an error.
+        assert_eq!(accounts.rename("work", "Work").unwrap().name, "work");
+    }
+
+    #[test]
+    fn only_a_number_for_a_name_gets_an_email_suggestion() {
+        let email = Some("Ana@Example.com");
+        assert_eq!(
+            suggested_name("main", email).as_deref(),
+            Some("ana@example.com")
+        );
+        assert_eq!(
+            suggested_name("account-2", email).as_deref(),
+            Some("ana@example.com")
+        );
+        assert_eq!(
+            suggested_name("account-15", email).as_deref(),
+            Some("ana@example.com")
+        );
+        for name in [
+            "work",
+            "account-",
+            "account-x",
+            "account-2b",
+            "mainframe",
+            "ana@example.com",
+        ] {
+            assert_eq!(suggested_name(name, email), None, "{name}");
+        }
+        assert_eq!(suggested_name("main", None), None);
+        assert_eq!(suggested_name("main", Some("not an email")), None);
+        assert_eq!(suggested_name("main", Some("opaque-id")), None);
+    }
+
+    #[test]
+    fn a_suggestion_reads_the_saved_email_and_skips_a_name_already_taken() {
+        struct WithEmail;
+        impl AccountSupport for WithEmail {
+            fn sign_in(&self, _device: bool) -> Result<Value> {
+                unreachable!()
+            }
+            fn identity(&self, _login: &Value) -> Option<String> {
+                None
+            }
+            fn email(&self, login: &Value) -> Option<String> {
+                login["email"].as_str().map(str::to_string)
+            }
+            fn state(&self, _login: &Value) -> AuthState {
+                AuthState::Missing
+            }
+            fn single_login(&self) -> Box<dyn AuthStorage<Value>> {
+                Box::new(NoLogin)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = accounts(&dir);
+        accounts
+            .save("main", &json!({"email": "ana@example.com"}), None)
+            .unwrap();
+        accounts.save("account-2", &json!({}), None).unwrap();
+        let main = accounts.require("main").unwrap();
+        let no_email = accounts.require("account-2").unwrap();
+
+        assert_eq!(
+            accounts.suggest_name(&WithEmail, &main).as_deref(),
+            Some("ana@example.com")
+        );
+        assert_eq!(accounts.suggest_name(&WithEmail, &no_email), None);
+        accounts.rename("account-2", "ana@example.com").unwrap();
+        assert_eq!(accounts.suggest_name(&WithEmail, &main), None);
     }
 
     #[test]
