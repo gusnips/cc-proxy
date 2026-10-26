@@ -502,7 +502,7 @@ impl ProvidersPanel {
             Action::Fallback(ids) => self.route.fallback = ids.clone(),
             Action::SignIn { .. } => {
                 self.notice = Some((
-                    "Demo only. Run cc-proxy monitor to sign in to a real account.".into(),
+                    "Demo only. Run cc-proxy open to sign in to a real account.".into(),
                     false,
                 ));
                 self.menu = None;
@@ -748,7 +748,7 @@ impl ProvidersPanel {
 
     pub fn render(&mut self, frame: &mut ratatui::Frame<'_>, area: Rect) {
         if self.mode == Mode::Remote {
-            frame.render_widget(Paragraph::new("Accounts are managed on the computer running the proxy. This --url connection is read-only.\n\nOpen cc-proxy monitor on that computer to choose providers, accounts or rotation. Press 2 for activity.")
+            frame.render_widget(Paragraph::new("Accounts are managed on the computer running the proxy. This --url connection is read-only.\n\nRun cc-proxy open on that computer to choose providers, accounts or rotation. Press 2 for activity.")
                 .style(Style::default().fg(DIM_WHITE)).wrap(Wrap { trim: false }).block(panel("Remote proxy", false)), area);
             return;
         }

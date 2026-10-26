@@ -94,13 +94,13 @@ If routing is on but nothing answers on the port (the proxy crashed, or the mach
 
 `cc-proxy claude`, `on`, `off`, `shell install`, `shell uninstall` and `setup` are gone. `start` and `use` do their jobs without a shell hook. `cc-proxy claude` still runs, only to remove the old hook and print what to do next. Run `unset -f claude` or open a new terminal, then run `claude` directly. The config keys `claude.enabled`, `claude.model`, `claude.fastModel` and `aliasProvider` (and `CCP_ALIAS_PROVIDER`) are gone too. See [Models and routing](/using/models-and-routing/) for the replacement.
 
-## `monitor`
+## `open`
 
 ```sh
-cc-proxy monitor [--url <URL>]
+cc-proxy open [--url <URL>]
 ```
 
-Open the monitor. If the proxy is stopped, the monitor still opens and `s` starts it with the provider you chose last. Accounts opens first, with provider and account choices, usage, rotation and fallback actions. Use arrows and Enter; press `2` for requests and errors in Activity. Changes save without a restart. `q` and `Ctrl-C` close the monitor without stopping the proxy.
+Open the monitor. `cc-proxy monitor` is another name for this command. If the proxy is stopped, the monitor still opens and `s` starts it with the provider you chose last. Accounts opens first, with provider and account choices, usage, rotation and fallback actions. Use arrows and Enter; press `2` for requests and errors in Activity. Changes save without a restart. `q` and `Ctrl-C` close the monitor without stopping the proxy.
 
 The default URL is `http://127.0.0.1:<configured-port>`. An explicit `--url` opens read-only Activity and never loads or changes local accounts. It fails if nothing answers there, because that is most likely a typo. No provider login is needed for that connection. The endpoint accepts only loopback peers; use an SSH port forward for another machine. After a connection failure, the monitor keeps its last snapshot, pauses changes and retries. See [Monitor](/using/monitor-tui/) for the actions and keys.
 

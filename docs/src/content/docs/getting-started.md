@@ -53,7 +53,7 @@ That is all. There is no shell hook to install and nothing to source.
 claude
 ```
 
-Send a prompt. You can watch the request with `cc-proxy monitor`.
+Send a prompt. You can watch the request with `cc-proxy open`.
 
 Claude Code windows that are already open follow the change within a few
 seconds. Editors and new terminals work the same way.

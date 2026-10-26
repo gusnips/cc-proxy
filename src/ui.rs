@@ -478,14 +478,14 @@ mod tests {
 
     #[test]
     fn a_tip_hangs_under_the_card_text_and_keeps_its_command_in_teal() {
-        let text = "`cc-proxy monitor` shows your accounts, how much quota each one has left and the requests running now.";
+        let text = "`cc-proxy open` shows your accounts, how much quota each one has left and the requests running now.";
         assert_eq!(tip(text, false, 80), format!("Tip: {text}"));
         let styled = tip(text, true, 60);
         let plain = strip_ansi(&styled);
         let lines: Vec<_> = plain.lines().collect();
         assert!(lines.len() > 1, "{plain}");
         assert!(
-            lines[0].starts_with("         Tip: cc-proxy monitor shows"),
+            lines[0].starts_with("         Tip: cc-proxy open shows"),
             "{plain}"
         );
         assert!(lines[1].starts_with("              "), "{plain}");

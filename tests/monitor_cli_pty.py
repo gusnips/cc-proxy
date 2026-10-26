@@ -126,7 +126,7 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
 
     # A monitor opened while the proxy is off says so, and `s` starts it.
     saved_config = file.read_text()
-    off = Monitor(env, "monitor")
+    off = Monitor(env, "open")
     try:
         off.text("Proxy off. Press s to start it")
         off.text("s start proxy")
@@ -147,18 +147,22 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
         server = subprocess.Popen([binary, "start", "--no-monitor"], env=env, stdout=log, stderr=log)
         try:
             wait_for(alive, "Isolated proxy did not start")
-            monitor = Monitor(env, "monitor")
+            monitor = Monitor(env, "open")
             try:
                 monitor.text("work")
-                # End opens rotation, the last row. Enter first chooses an action, then runs it.
-                monitor.keys(b"\x1b[F\r\r")
+                # Settings is the third tab. Auto-rotate is its first row; Right turns it on and saves at once.
+                monitor.keys(b"3")
+                monitor.text("auth.autoRotate")
+                monitor.keys(b"\x1b[C")
                 monitor.wait(lambda: read().get("auth", {}).get("autoRotate") is True, "Rotation did not save")
-                # Direct and Claude subscription come first, then the primary provider and its saved accounts.
-                monitor.keys(b"\x1b[H" + b"\x1b[B" * 4 + b"\r\r")
+                monitor.keys(b"\x1b")
+                monitor.text("Providers and accounts")
+                # The primary provider comes first, then its saved accounts.
+                monitor.keys(b"\x1b[H" + b"\x1b[B" * 2 + b"\r\r")
                 monitor.wait(lambda: json.loads(index.read_text())["current"] == "work", "Account did not switch")
                 assert read()["route"]["provider"] == "ztest"
                 # The other connected provider follows the primary's accounts.
-                monitor.keys(b"\x1b[H" + b"\x1b[B" * 5 + b"\r\x1b[B\r")
+                monitor.keys(b"\x1b[H" + b"\x1b[B" * 3 + b"\r\x1b[B\r")
                 monitor.wait(lambda: read()["route"]["fallback"] == ["ytest"], "Fallback did not save")
                 # Choose that provider. The model choices and login already exist.
                 monitor.keys(b"\r\r")
@@ -177,7 +181,7 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.text("Recent requests")
                 assert (file.read_bytes(), index.read_bytes()) == before
                 # Reuse hidden key entry, then return to the same action on failure.
-                monitor.keys(b"1\x1b[H" + b"\x1b[B" * 5 + b"\r\x1b[B\x1b[B\x1b[B\r")
+                monitor.keys(b"1\x1b[H" + b"\r\x1b[B\x1b[B\x1b[B\r")
                 monitor.text("API key:")
                 monitor.keys(b"\r")
                 monitor.text("Couldn't save the change")
@@ -188,7 +192,7 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
 
             # Explicit URLs never read local account rows or write local configuration.
             before = file.read_bytes(), index.read_bytes()
-            remote = Monitor(env, "monitor", "--url", url, width=80, height=24)
+            remote = Monitor(env, "open", "--url", url, width=80, height=24)
             try:
                 remote.text("Recent requests")
                 remote.keys(b"1")

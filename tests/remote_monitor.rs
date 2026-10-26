@@ -271,7 +271,7 @@ async fn production_monitor_client_bypasses_outbound_proxy_environment() {
     let proxy_requests = Arc::new(AtomicUsize::new(0));
     let proxy = serve(snapshot_app(proxy_requests.clone())).await;
     let mut child = Command::new(env!("CARGO_BIN_EXE_cc-proxy"))
-        .args(["monitor", "--url", target.url.as_str()])
+        .args(["open", "--url", target.url.as_str()])
         .env("HTTP_PROXY", proxy.url.as_str())
         .env("http_proxy", proxy.url.as_str())
         .env("ALL_PROXY", proxy.url.as_str())

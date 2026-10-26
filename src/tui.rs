@@ -656,7 +656,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
                 settings.render(frame, body);
             } else {
                 frame.render_widget(
-                    Paragraph::new("Settings belong to the computer running the proxy. This --url connection is read-only.\n\nOpen cc-proxy monitor on that computer to change settings. Press 2 for activity.")
+                    Paragraph::new("Settings belong to the computer running the proxy. This --url connection is read-only.\n\nRun cc-proxy open on that computer to change settings. Press 2 for activity.")
                         .style(Style::default().fg(DIM_WHITE))
                         .wrap(Wrap { trim: false })
                         .block(panel("Remote proxy", false)),
