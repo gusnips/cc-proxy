@@ -3,6 +3,15 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.3 (2026-10-26)
+
+- The monitor changes tab with Tab, Shift-Tab and `1` to `3`. Left and Right no longer change tab, so a stray arrow on Settings can't flip auto-rotate while you try to leave. Right opens the actions or details of the row and never runs anything. Left and Escape go back one step. Settings keeps Left and Right for changing a value.
+- The account list says less. The bullet marks the saved account (no second `[current]` tag), the primary provider's name is bold teal, and the cursor moves with the saved account when auto-rotate switches it. `?` explains the bullet and the `*`.
+- A failed usage lookup keeps the last good numbers and ends the row with a yellow `*`. Details gives the reason in one line. Before, the numbers were replaced by a long error, and a monitor opened during an outage showed none. The last good numbers are saved in `usage-last.json`. `cc-proxy usage` keeps the longer text.
+- `cc-proxy use <provider>` keeps your fallbacks. The provider moves to the front and the one you had becomes the first fallback. Before, it cleared the whole chain. `use codex kimi glm` still sets the chain exactly, and `use codex --no-fallback` clears it. The monitor's Use provider follows the same rule.
+- Choosing an account in the monitor or with `auth use` now goes through the same step as auto-rotation. It clears the account's wait first, so a request in between can't move off the account you chose, and `proxy.log` records who switched (`by`: `user` or `rotation`).
+- Free Claude accounts are skipped. Claude Code can't use them, so rotation and the hourly ping leave them out, `auth use` and the monitor refuse to choose one, and usage shows `(free)` instead of a sign-in error. cc-proxy reads the plan from Claude at sign-in, on every renewal and during the usage lookup. If every saved account is free, none is hidden.
+
 ## v0.4.2 (2026-10-25)
 
 - Run `cc-proxy open` to open accounts, settings and activity. `cc-proxy monitor` still works as another name for the command.
