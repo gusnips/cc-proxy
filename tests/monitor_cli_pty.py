@@ -70,6 +70,7 @@ class Monitor:
         os.write(self.fd, keys)
 
     def close(self):
+        # q detaches an attached monitor and leaves the proxy running.
         self.keys(b"q")
         def finished():
             self.read()
@@ -105,6 +106,11 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
     index.write_text(json.dumps({"current": "home", "accounts": accounts}))
     for account in accounts:
         (provider / "accounts" / f"{account['id']}.json").write_text(json.dumps({"apiKey": "fake-secret"}))
+    other = config / "ytest"
+    (other / "accounts").mkdir(parents=True)
+    other_account = {"id": str(uuid.uuid4()), "name": "main"}
+    (other / "accounts.json").write_text(json.dumps({"current": "main", "accounts": [other_account]}))
+    (other / "accounts" / f"{other_account['id']}.json").write_text(json.dumps({"apiKey": "fake-secret"}))
     file = config / "config.json"
     file.write_text(json.dumps({
         "port": port,
@@ -115,14 +121,7 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                             for name in ["ytest", "ztest"]}},
     }))
     read = lambda: json.loads(file.read_text())
-
-    def pool_order():
-        # The providers that are on, in the order requests try them.
-        names = []
-        for row in read()["route"].get("pool", []):
-            if row["enabled"] and row["provider"] not in names:
-                names.append(row["provider"])
-        return names
+    pool = lambda: read()["route"].get("pool", [])
     url = f"http://127.0.0.1:{port}"
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     def alive():
@@ -164,11 +163,18 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.keys(b"\x1b[C")
                 monitor.wait(lambda: read().get("auth", {}).get("autoRotate") is True, "Rotation did not save")
                 monitor.keys(b"\x1b")
-                monitor.text("Providers and accounts")
-                # The primary provider comes first, then its saved accounts.
-                monitor.keys(b"\x1b[H" + b"\x1b[B" * 2 + b"\r\r")
+                monitor.text("Request order")
+                # One flat list in the order requests try it: the saved accounts of ztest, then ytest's row (off).
+                # Use now on the second row puts that account first and turns it on.
+                monitor.keys(b"\x1b[H" + b"\x1b[B" + b"\r\r")
                 monitor.wait(lambda: json.loads(index.read_text())["current"] == "work", "Account did not switch")
-                assert read()["route"]["provider"] == "ztest"
+                work_id = next(a["id"] for a in json.loads(index.read_text())["accounts"] if a["name"] == "work")
+                monitor.wait(lambda: bool(pool()) and pool()[0].get("accountId") == work_id,
+                             "The account did not move to the top")
+                assert [row["provider"] for row in pool()] == ["ztest", "ztest", "ytest"], pool()
+                assert pool()[0]["enabled"] is True
+                # The first save writes the pool and drops the older keys.
+                assert "provider" not in read()["route"] and "fallback" not in read()["route"], read()["route"]
                 # Right opens the actions and Left comes back to the same row. Neither runs one.
                 before = file.read_bytes(), index.read_bytes()
                 monitor.keys(b"\x1b[C")
@@ -183,19 +189,19 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 # Rename opens a field that owns every key (q included). Escape keeps the old name.
                 monitor.keys(b"\x1b[C")
                 monitor.text("Choose an action")
-                monitor.keys(b"\x1b[B\x1b[B\x1b[B\r")
-                monitor.text("Rename account")
+                monitor.keys(b"\x1b[B" * 5 + b"\r")
+                monitor.text("New name:")
                 monitor.keys(b"\x15q2")
-                monitor.text("New name: q2")
+                # The field owns q; it must not close the attached monitor.
+                monitor.text("q")
                 monitor.keys(b"\x1b")
                 monitor.text("Details")
                 assert (file.read_bytes(), index.read_bytes()) == before
                 # Enter saves the new name. The saved choice and the login stay with the same id.
-                work_id = next(a["id"] for a in json.loads(index.read_text())["accounts"] if a["name"] == "work")
                 monitor.keys(b"\x1b[C")
                 monitor.text("Choose an action")
-                monitor.keys(b"\x1b[B\x1b[B\x1b[B\r")
-                monitor.text("Rename account")
+                monitor.keys(b"\x1b[B" * 5 + b"\r")
+                monitor.text("New name:")
                 monitor.keys(b"\x15Spare\r")
                 monitor.wait(lambda: [a["name"] for a in json.loads(index.read_text())["accounts"]] == ["home", "spare"],
                              "The account was not renamed")
@@ -210,15 +216,19 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.text("Recent requests")
                 monitor.keys(b"\x1b[C")
                 monitor.keys(b"\x1b[Z")
-                monitor.text("Providers and accounts")
-                # The other connected provider follows the primary's accounts.
-                monitor.keys(b"\x1b[H" + b"\x1b[B" * 3 + b"\r\x1b[B\r")
-                monitor.wait(lambda: pool_order() == ["ztest", "ytest"], "Fallback did not save")
-                # Choose that provider. The model choices and login already exist.
-                monitor.keys(b"\r\r")
-                monitor.wait(lambda: pool_order()[:1] == ["ytest"], "Provider did not switch")
+                monitor.text("Request order")
+                # The other provider's row is off and last. Enable turns it on and keeps its place.
+                monitor.keys(b"\x1b[H" + b"\x1b[B" * 2 + b"\r" + b"\x1b[B" * 2 + b"\r")
+                monitor.wait(lambda: pool()[2]["enabled"] is True, "The row was not turned on")
+                assert [row["provider"] for row in pool()] == ["ztest", "ztest", "ytest"], pool()
+                # Move up changes where the row stands. The cursor stays on it.
+                monitor.keys(b"\x1b[H" + b"\x1b[B" * 2 + b"\r" + b"\x1b[B" + b"\r")
+                monitor.wait(lambda: [row["provider"] for row in pool()] == ["ztest", "ytest", "ztest"], "The row did not move up")
+                # Use provider sends Claude Code there and puts its rows first. The model choices and login already exist.
+                monitor.keys(b"\r" + b"\x1b[B" * 4 + b"\r")
+                monitor.wait(lambda: pool()[0]["provider"] == "ytest", "Provider did not switch")
                 monitor.text("Claude Code uses ytest")
-                assert pool_order() == ["ytest", "ztest"], "The old first provider did not stay second"
+                assert [row["provider"] for row in pool()] == ["ytest", "ztest", "ztest"], pool()
                 settings = json.loads((root / "claude/settings.json").read_text())
                 assert settings["env"]["ANTHROPIC_BASE_URL"].rstrip("/") == url
                 # A cancelled action must not save anything or exit the monitor.
@@ -231,7 +241,7 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.text("Recent requests")
                 assert (file.read_bytes(), index.read_bytes()) == before
                 # Reuse hidden key entry, then return to the same action on failure.
-                monitor.keys(b"1\x1b[H" + b"\r\x1b[B\x1b[B\x1b[B\r")
+                monitor.keys(b"1\x1b[H" + b"\r" + b"\x1b[B" * 4 + b"\r")
                 monitor.text("API key:")
                 monitor.keys(b"\r")
                 monitor.text("Couldn't save the change")
@@ -256,7 +266,7 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
             # Demo actions work on simulated rows, never this computer's saved logins.
             demo = Monitor(env, "demo", width=40, height=16)
             try:
-                demo.text("Providers and accounts")
+                demo.text("Request order")
                 demo.keys(b"\x1b[F\r\r")
                 demo.text("Demo only")
                 demo.keys(b"2")
@@ -272,4 +282,4 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 server.kill()
                 server.wait()
 
-print("PASS: start from an off proxy, account/provider selection, rotation, fallback, cancel, detach, remote read-only and safe demo")
+print("PASS: start from an off proxy, one flat request order (use now, move, enable, use provider, rename), cancel, detach, remote read-only and safe demo")

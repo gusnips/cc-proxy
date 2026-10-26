@@ -258,6 +258,7 @@ fn run_monitor_events(
                             run_account_action(terminal, app, state, action)?;
                         }
                     }
+                    KeyCode::Char('q') if app.is_attached() => return Ok(MonitorExit::Detached),
                     KeyCode::Char('c')
                         if app.is_attached() && key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
@@ -664,6 +665,10 @@ fn run_account_action(
     // The row shows its new name at once. The next read confirms it.
     if let (Ok(_), controls::Action::RenameAccount { provider, id, name }) = (&result, &action) {
         let _ = app.providers.rename_account(provider, id, name);
+    }
+    // The list shows the new order at once. The next read confirms it.
+    if result.is_ok() {
+        app.providers.apply_pool_action(&action);
     }
     if starting {
         app.providers.finish_start(result);
@@ -2186,7 +2191,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ),
         ("?", "toggle help"),
         ("b", "toggle setup"),
-        ("1 / p", "providers and saved accounts"),
+        ("1 / p", "request order and saved accounts"),
         ("2", "sessions, requests and errors"),
         ("3", "settings, including auto-rotate"),
         ("Tab / Shift-Tab", "next / previous tab"),
@@ -2197,7 +2202,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ("u / d", "scroll account details"),
         ("r", "refresh accounts and usage"),
         ("s", "start the proxy when it is off"),
-        ("●", "the account in use now"),
+        ("●", "the row that answered the newest request"),
         ("*", "last refresh failed; values may be old"),
         (
             "Esc",

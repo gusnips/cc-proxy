@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     accounts::{Account, Accounts},
-    auth_cli, config, daemon,
+    auth_cli, config, daemon, pool,
     registry::Registry,
     route, start_flow, ui,
 };
@@ -14,9 +14,22 @@ pub(super) enum Action {
     /// Starts the proxy from a monitor opened while it was off.
     StartProxy,
     UseProvider(String),
+    /// Puts a saved account first in the pool and turns it on, so new chats use it.
     UseAccount {
         provider: String,
         id: String,
+    },
+    /// Moves a row up (negative) or down (positive) in the pool.
+    MoveRow {
+        provider: String,
+        account: Option<String>,
+        offset: isize,
+    },
+    /// Turns a row on or off. It keeps its place.
+    SetEnabled {
+        provider: String,
+        account: Option<String>,
+        enabled: bool,
     },
     RemoveAccount {
         provider: String,
@@ -28,7 +41,6 @@ pub(super) enum Action {
         id: String,
         name: String,
     },
-    Fallback(Vec<String>),
     SignIn {
         provider: String,
         account: Option<String>,
@@ -44,9 +56,10 @@ impl Action {
             Self::StartProxy | Self::SignIn { .. } => true,
             Self::UseProvider(provider) => start_flow::will_ask(provider),
             Self::UseAccount { .. }
+            | Self::MoveRow { .. }
+            | Self::SetEnabled { .. }
             | Self::RemoveAccount { .. }
-            | Self::RenameAccount { .. }
-            | Self::Fallback(_) => false,
+            | Self::RenameAccount { .. } => false,
         }
     }
 
@@ -114,11 +127,41 @@ impl Action {
                     &account,
                     crate::rotation::Switch::Chosen(support),
                 )?;
+                // On first, then to the top: a request in between sees it on, never first and off.
+                pool::set_enabled(provider, Some(id), true)?;
+                pool::move_by(provider, Some(id), isize::MIN)?;
                 Ok(format!(
-                    "Saved. New {} requests use {}. Requests already running keep their account.",
+                    "Saved. {} / {} is first in the list now. New chats use it. Chats already running keep their account.",
                     ui::provider_name(provider),
                     account.name
                 ))
+            }
+            Self::MoveRow {
+                provider,
+                account,
+                offset,
+            } => {
+                let at = pool::move_by(provider, account.as_deref(), *offset)?;
+                Ok(format!(
+                    "Saved. {} is number {} in the list. New chats try the rows from the top.",
+                    row_label(provider, account.as_deref())?,
+                    at + 1
+                ))
+            }
+            Self::SetEnabled {
+                provider,
+                account,
+                enabled,
+            } => {
+                pool::set_enabled(provider, account.as_deref(), *enabled)?;
+                let label = row_label(provider, account.as_deref())?;
+                Ok(if *enabled {
+                    format!("Saved. {label} is on. New chats can use it.")
+                } else {
+                    format!(
+                        "Saved. {label} is off. New chats skip it. Chats already on it move to the next row when they need to."
+                    )
+                })
             }
             Self::RemoveAccount { provider, id } => {
                 let registry = Registry::new();
@@ -132,13 +175,10 @@ impl Action {
                 // The monitor already asked: removing is a second, explicit choice.
                 let accounts = Accounts::open(provider, support)?;
                 let account = saved_account(&accounts, id)?;
-                let next = accounts.remove(&account)?;
+                accounts.remove(&account)?;
                 let _ = crate::rotation::Cooldowns::new().clear_account(provider, id);
-                let next = next.map_or_else(String::new, |next| {
-                    format!(" New requests use {}.", next.name)
-                });
                 Ok(format!(
-                    "Removed {} account {}.{next} Sign in to add it back.",
+                    "Removed {} account {}. Sign in to add it back.",
                     ui::provider_name(provider),
                     account.name
                 ))
@@ -161,15 +201,6 @@ impl Action {
                     account.name,
                     renamed.name
                 ))
-            }
-            Self::Fallback(providers) => {
-                route::set_fallback(providers)?;
-                Ok(if config::auth_auto_rotate() {
-                    "Saved the fallback order. New requests use it when a provider is spent.".into()
-                } else {
-                    "Saved the fallback order. Turn on auto-rotate to try other saved accounts too."
-                        .into()
-                })
             }
             Self::SignIn {
                 provider,
@@ -208,6 +239,25 @@ impl Action {
             }
         }
     }
+}
+
+/// What a pool row is called in a message: `Codex / work`, or the provider
+/// alone when it holds one credential.
+fn row_label(provider: &str, account: Option<&str>) -> Result<String> {
+    let provider_name = ui::provider_name(provider);
+    let Some(id) = account else {
+        return Ok(provider_name.to_string());
+    };
+    let registry = Registry::new();
+    let handler = registry
+        .provider(provider)
+        .context("This provider was removed. Press r to refresh.")?;
+    let support = handler
+        .cli()
+        .accounts()
+        .context("This provider does not support saved accounts.")?;
+    let name = saved_account(&Accounts::open(provider, support)?, id)?.name;
+    Ok(format!("{provider_name} / {name}"))
 }
 
 fn saved_account(accounts: &Accounts, id: &str) -> Result<Account> {
