@@ -18,7 +18,7 @@ use crate::accounts::Accounts;
 use crate::provider::AuthState;
 use crate::registry::Registry;
 use crate::usage::{MonitorUsage, UsageWindow};
-use crate::{config, rotation::Cooldowns, ui};
+use crate::{config, rotation::Cooldowns, route, ui};
 
 const REFRESH_AFTER: Duration = Duration::from_secs(60);
 
@@ -587,9 +587,9 @@ impl ProvidersPanel {
                 if id == "direct" {
                     self.route.on = false;
                 } else {
+                    self.route.fallback = route::promoted(&self.route, id);
                     self.route.on = true;
                     self.route.provider = Some(id.clone());
-                    self.route.fallback.retain(|name| name != id);
                 }
             }
             Action::UseAccount { provider, id } => {
@@ -1749,6 +1749,20 @@ mod tests {
     }
 
     #[test]
+    fn choosing_a_provider_puts_the_old_primary_first_among_the_fallbacks() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.route = config::Route {
+            on: true,
+            provider: Some("codex".into()),
+            fallback: vec!["kimi".into(), "glm".into()],
+            ..Default::default()
+        };
+        panel.preview_action(&Action::UseProvider("glm".into()));
+        assert_eq!(panel.route.provider.as_deref(), Some("glm"));
+        assert_eq!(panel.route.fallback, ["codex", "kimi"]);
+    }
+
+    #[test]
     fn the_cursor_follows_the_account_rotation_picks_only_while_it_sits_on_it() {
         let mut panel = ProvidersPanel::new(Mode::Demo);
         panel.route = config::Route {
@@ -2286,7 +2300,7 @@ mod tests {
         assert_eq!(panel.route.target(), Some("claude"));
         assert_eq!(
             providers(&panel),
-            ["claude", "kimi", "codex", "opencode-zen"]
+            ["claude", "codex", "kimi", "opencode-zen"]
         );
         panel.selected = Entry::Direct;
         assert_eq!(panel.actions()[0].1, Action::UseProvider("direct".into()));
@@ -2297,7 +2311,7 @@ mod tests {
         assert!(text.contains("Disable proxy routing [in use]"), "{text}");
         assert!(text.contains("original settings and login"), "{text}");
         panel.press(KeyCode::Home);
-        assert_eq!(panel.selected, Entry::Provider("kimi".into()));
+        assert_eq!(panel.selected, Entry::Provider("codex".into()));
         panel.press(KeyCode::End);
         assert_eq!(panel.selected, Entry::Direct);
     }

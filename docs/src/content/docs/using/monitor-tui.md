@@ -51,8 +51,9 @@ put details below the list.
   screen, and the monitor comes back when you are done. Adding a login does not
   change the provider or current account.
 - Fallback adds a signed-in provider to the end of the fallback order, removes
-  it or moves it earlier. When you choose a fallback provider as primary, it is
-  removed from its own fallback list.
+  it or moves it earlier. When you choose another provider as primary, it moves
+  to the front and the one you had before becomes the first fallback. The rest
+  of the order stays.
 - Remove saved account deletes one saved login from this computer. Choosing it
   opens one more line that names the account and says what is deleted. Enter on
   that line deletes it, and Escape keeps it. If it was the current account, the

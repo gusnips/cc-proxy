@@ -185,7 +185,7 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.keys(b"\r\r")
                 monitor.wait(lambda: read()["route"]["provider"] == "ytest", "Provider did not switch")
                 monitor.text("Claude Code uses ytest")
-                assert read()["route"]["fallback"] == [], "Primary provider remained in its own fallback chain"
+                assert read()["route"]["fallback"] == ["ztest"], "The old primary did not become the first fallback"
                 settings = json.loads((root / "claude/settings.json").read_text())
                 assert settings["env"]["ANTHROPIC_BASE_URL"].rstrip("/") == url
                 # A cancelled action must not save anything or exit the monitor.

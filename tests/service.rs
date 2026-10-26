@@ -318,7 +318,7 @@ fn use_switches_provider_and_direct_without_restarting_the_proxy() {
         .stdout(contains("Claude Code goes to Kimi"));
     assert_eq!(
         sandbox.route(),
-        json!({"on": true, "provider": "kimi", "fallback": []})
+        json!({"on": true, "provider": "kimi", "fallback": ["codex"]})
     );
     sandbox.assert_routed_to_proxy();
 
@@ -333,13 +333,61 @@ fn use_switches_provider_and_direct_without_restarting_the_proxy() {
     sandbox.assert_routed_to_anthropic();
     assert_eq!(
         sandbox.route(),
-        json!({"on": false, "provider": "kimi", "fallback": []})
+        json!({"on": false, "provider": "kimi", "fallback": ["codex"]})
     );
 
     // The proxy ran through all of it, and picks the last provider up again.
     sandbox.cmd().args(["use", "codex"]).assert().success();
     sandbox.assert_routed_to_proxy();
     assert_eq!(sandbox.pid(), pid);
+}
+
+#[test]
+fn use_keeps_the_pool_and_only_a_chain_or_no_fallback_replaces_it() {
+    let sandbox = Sandbox::new();
+    for provider in ["codex", "kimi", "grok"] {
+        sandbox.sign_in(provider);
+    }
+    sandbox
+        .cmd()
+        .args(["use", "codex", "kimi", "grok"])
+        .assert()
+        .success();
+    assert_eq!(
+        sandbox.route(),
+        json!({"on": true, "provider": "codex", "fallback": ["kimi", "grok"]})
+    );
+
+    // One provider takes the lead. The old primary becomes the first fallback
+    // and the others keep their order.
+    sandbox.cmd().args(["use", "grok"]).assert().success();
+    assert_eq!(
+        sandbox.route(),
+        json!({"on": true, "provider": "grok", "fallback": ["codex", "kimi"]})
+    );
+
+    // The flag clears the chain.
+    sandbox
+        .cmd()
+        .args(["use", "kimi", "--no-fallback"])
+        .assert()
+        .success();
+    assert_eq!(
+        sandbox.route(),
+        json!({"on": true, "provider": "kimi", "fallback": []})
+    );
+
+    // A list and the flag contradict each other, so nothing changes.
+    sandbox
+        .cmd()
+        .args(["use", "codex", "grok", "--no-fallback"])
+        .assert()
+        .failure()
+        .stderr(contains("--no-fallback"));
+    assert_eq!(
+        sandbox.route(),
+        json!({"on": true, "provider": "kimi", "fallback": []})
+    );
 }
 
 #[test]

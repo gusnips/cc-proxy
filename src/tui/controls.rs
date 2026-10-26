@@ -54,7 +54,7 @@ impl Action {
                 };
                 match pick {
                     start_flow::Pick::Provider(provider) => {
-                        route::activate(provider, &info.listen_url())?;
+                        route::activate(provider, &info.listen_url(), route::Chain::Keep)?;
                         Ok(format!(
                             "The proxy is on. Claude Code uses {} through it. Open windows follow within a few seconds.",
                             ui::provider_name(provider)
@@ -70,7 +70,7 @@ impl Action {
                 route::preflight()?;
                 match start_flow::pick(Some(provider))? {
                     start_flow::Pick::Provider(provider) => {
-                        route::activate(provider, base_url)?;
+                        route::activate(provider, base_url, route::Chain::Keep)?;
                         Ok(format!(
                             "Saved. Claude Code uses {} through the proxy. Open windows follow within a few seconds.",
                             ui::provider_name(provider)
