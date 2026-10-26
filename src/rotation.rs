@@ -20,6 +20,10 @@ use crate::provider::{Provider, RequestContext};
 use crate::registry::Registry;
 use crate::request_identity::ConversationIdentity;
 
+mod chats;
+mod routed;
+pub(crate) use routed::execute_routed;
+
 /// How long an account whose balance is spent sits out before one request
 /// tries it again. A top-up is invisible to cc-proxy, so this is a recheck, not
 /// a reset. A failed recheck costs one quick error that the next account
@@ -41,14 +45,13 @@ pub(crate) enum RotationHint {
     Spent,
 }
 
-/// Rides on the 429 answered when every account (and, for a routed chain,
-/// every provider) is spent: the earliest moment one frees up. The server
-/// reads it to decide whether a fallback provider is worth trying.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ExhaustedAt {
-    pub until_ms: u64,
-    /// `until_ms` is a recheck of a spent balance, not a reset.
-    pub spent: bool,
+/// Set on a response that a fallback provider answered. The server reads it so
+/// the log and the monitor name the provider that really served the request,
+/// not the one that gave up.
+#[derive(Debug, Clone)]
+pub(crate) struct ServedBy {
+    pub provider: String,
+    pub model: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -387,7 +390,7 @@ fn all_limited(
                 list.len()
             ),
         };
-        return Some(spent_response(first, &message));
+        return Some(spent_response(&message));
     }
     Some(exhausted_response(
         first,
@@ -423,26 +426,17 @@ pub(crate) fn exhausted_response(until_ms: u64, message: &str) -> Response {
             Some(until_ms),
             None,
         ));
-    response.extensions_mut().insert(ExhaustedAt {
-        until_ms,
-        spent: false,
-    });
     response
 }
 
 /// A 402 for accounts with no credit left. It names no reset, so Claude Code
 /// gets no countdown to resume on: it stops and shows the message, not the
-/// "temporarily limiting requests" wording a 429 gets. The routed chain still
-/// reads `ExhaustedAt` to try the next provider.
-fn spent_response(until_ms: u64, message: &str) -> Response {
+/// "temporarily limiting requests" wording a 429 gets.
+fn spent_response(message: &str) -> Response {
     let mut response = json_error(StatusCode::PAYMENT_REQUIRED, "billing_error", message);
     response
         .headers_mut()
         .insert("x-should-retry", http::HeaderValue::from_static("false"));
-    response.extensions_mut().insert(ExhaustedAt {
-        until_ms,
-        spent: true,
-    });
     response
 }
 
@@ -478,115 +472,6 @@ pub(crate) async fn execute(
     .await
 }
 
-/// A routed request: the provider Claude Code points at first, then the
-/// `route.fallback` list in order, each one once. A provider is skipped the
-/// moment it answers "every account is spent", so the request lands on the
-/// first provider with room. When every one of them is spent, the answer
-/// names the one that frees up first and when, which is what lets Claude Code
-/// count down and resume by itself.
-pub(crate) async fn execute_routed(
-    registry: &Registry,
-    route: &crate::config::Route,
-    requested: &str,
-    primary: Arc<dyn Provider>,
-    mut body: MessagesRequest,
-    mut context: RequestContext,
-    identity: Option<ConversationIdentity>,
-) -> Response {
-    let mut response = execute(
-        primary.as_ref(),
-        body.clone(),
-        context.clone(),
-        identity.clone(),
-    )
-    .await;
-    let mut earliest: Option<(ExhaustedAt, &str)> = exhausted_by(&response, primary.name());
-    let mut spent_providers = usize::from(earliest.is_some());
-    for fallback in route.fallback() {
-        if fallback == primary.name() {
-            continue;
-        }
-        if response.extensions().get::<ExhaustedAt>().is_none() {
-            return response;
-        }
-        let Ok(model) = crate::tiers::resolve_for(registry, route, fallback, requested) else {
-            continue;
-        };
-        let Some(next) = registry.provider_for_model(&model) else {
-            continue;
-        };
-        // A provider nobody signed in to would answer with an auth error and
-        // hide the limit this request is really about.
-        if next.name() != fallback || next.cli().auth_state() == crate::provider::AuthState::Missing
-        {
-            continue;
-        }
-        crate::logging::create_logger("auth").info(
-            "provider_switched",
-            Some(serde_json::Map::from_iter([
-                ("from".into(), serde_json::json!(primary.name())),
-                ("to".into(), serde_json::json!(fallback)),
-                ("model".into(), serde_json::json!(&model)),
-                ("reqId".into(), serde_json::json!(&context.req_id)),
-            ])),
-        );
-        body.model = Some(model);
-        context.provider = fallback.to_string();
-        response = execute(
-            next.as_ref(),
-            body.clone(),
-            context.clone(),
-            identity.clone(),
-        )
-        .await;
-        if let Some((at, name)) = exhausted_by(&response, fallback) {
-            spent_providers += 1;
-            if earliest.is_none_or(|(first, _)| at.until_ms < first.until_ms) {
-                earliest = Some((at, name));
-            }
-        }
-    }
-    // One spent provider already answered with its own message, which names
-    // the account to fix. The chain's message only helps when several are spent.
-    match (
-        response.extensions().get::<ExhaustedAt>().copied(),
-        earliest,
-    ) {
-        (Some(last), Some((at, name))) if spent_providers > 1 && at.until_ms <= last.until_ms => {
-            let wait = crate::ui::duration(std::time::Duration::from_millis(
-                at.until_ms.saturating_sub(now_ms()),
-            ));
-            let provider = crate::ui::provider_name(name);
-            if at.spent {
-                spent_response(
-                    at.until_ms,
-                    &format!(
-                        "Every routed provider is out of credit or at its limit. cc-proxy tries \
-                         {provider} again in {wait}. Add credit, or use `cc-proxy auth add` to add \
-                         an account."
-                    ),
-                )
-            } else {
-                exhausted_response(
-                    at.until_ms,
-                    &format!(
-                        "Every routed provider is at its limit. {provider} frees up first, in \
-                         {wait}. Use `cc-proxy auth add` to add an account sooner."
-                    ),
-                )
-            }
-        }
-        _ => response,
-    }
-}
-
-fn exhausted_by<'a>(response: &Response, provider: &'a str) -> Option<(ExhaustedAt, &'a str)> {
-    response
-        .extensions()
-        .get::<ExhaustedAt>()
-        .map(|at| (*at, provider))
-}
-
 /// Milliseconds from `now_ms` until the next top of the hour (`XX:00:00.000`).
 fn ms_until_next_hour(now_ms: u64) -> u64 {
     const HOUR_MS: u64 = 3_600_000;
@@ -601,8 +486,8 @@ fn ms_until_next_hour(now_ms: u64) -> u64 {
 /// nothing; one wrongly added would cost money.
 const WINDOWED_PLANS: &[&str] = &["antigravity", "claude", "codex", "glm", "kimi", "opencode"];
 
-/// The providers one hourly ping reaches: the routed provider and its
-/// fallbacks, in that order, when their plan has a window.
+/// The providers one hourly ping reaches: the providers with an enabled row in
+/// the pool, in pool order, when their plan has a window.
 fn pinged_providers(route: &crate::config::Route) -> Vec<&str> {
     // Routing off means Claude Code bypasses the proxy: there is no pool.
     let Some(primary) = route.target() else {
@@ -618,10 +503,15 @@ fn pinged_providers(route: &crate::config::Route) -> Vec<&str> {
 }
 
 /// Sends a one-token Messages request at the start of every hour (`XX:00`) to
-/// every saved account, not only the current one, of each routed provider
-/// whose plan has a rolling window (see `WINDOWED_PLANS`), skipping accounts
-/// that are waiting on a limit. The windows start counting down early while
-/// `cc-proxy` is running. Controlled by `auth.hourlyPing` (read on each tick).
+/// every enabled account of the request pool, not only the one in use, for each
+/// provider whose plan has a rolling window (see `WINDOWED_PLANS`). The windows
+/// start counting down early while `cc-proxy` is running. Controlled by
+/// `auth.hourlyPing` (read on each tick).
+///
+/// A saved wait never stops a ping. A window that ends at the top of the hour
+/// is still "waiting" for a moment when the tick fires, and skipping it would
+/// leave the next window unstarted for a whole hour. The provider answers: a
+/// limited account says 429, which also refreshes its wait.
 pub(crate) fn spawn_hourly_ping(registry: Arc<Registry>) {
     tokio::spawn(async move {
         loop {
@@ -634,26 +524,10 @@ pub(crate) fn spawn_hourly_ping(registry: Arc<Registry>) {
     });
 }
 
-/// Every saved account that is not waiting on a limit, not only the current
-/// one: a window only starts on the account that is asked.
-fn ping_targets(
-    list: &[Account],
-    cooldowns: &[Cooldown],
-    provider: &str,
-    model: &str,
-    now: u64,
-) -> Vec<Option<String>> {
-    list.iter()
-        .filter(|account| {
-            !cooldowns.iter().any(|c| {
-                c.provider == provider
-                    && c.account == account.id
-                    && c.model.as_deref().is_none_or(|m| m == model)
-                    && c.until_ms > now
-            })
-        })
-        .map(|account| Some(account.id.clone()))
-        .collect()
+/// Every saved account, not only the current one: a window only starts on the
+/// account that is asked. Saved waits are not an input on purpose.
+fn ping_targets(list: Vec<Account>) -> Vec<Option<String>> {
+    list.into_iter().map(|account| Some(account.id)).collect()
 }
 
 async fn ping_routed_providers(
@@ -662,6 +536,7 @@ async fn ping_routed_providers(
     cooldowns: &Cooldowns,
 ) {
     let log = crate::logging::create_logger("auth");
+    let rows = crate::pool::active(route, registry);
     for name in pinged_providers(route).into_iter().map(str::to_string) {
         let Some(provider) = registry.provider(&name) else {
             continue;
@@ -680,12 +555,18 @@ async fn ping_routed_providers(
                 let accounts = Accounts::open(&name, support).ok()?;
                 Some(servable(Some(support), &accounts, accounts.list().ok()?))
             });
+        let enabled = |id: Option<&str>| {
+            rows.iter()
+                .any(|row| row.provider == name && row.account_id.as_deref() == id)
+        };
         let targets: Vec<Option<String>> = match saved {
-            Some(list) if !list.is_empty() => {
-                let snapshot = cooldowns.read().unwrap_or_default();
-                ping_targets(&list, &snapshot, &name, &model, now_ms())
-            }
-            _ => vec![None],
+            Some(list) if !list.is_empty() => ping_targets(
+                list.into_iter()
+                    .filter(|account| enabled(Some(&account.id)))
+                    .collect(),
+            ),
+            _ if enabled(None) => vec![None],
+            _ => Vec::new(),
         };
         for account in targets {
             let Ok(body) = serde_json::from_value::<MessagesRequest>(serde_json::json!({
@@ -1240,8 +1121,8 @@ mod tests {
         let response = call(&fake, &accounts, &cooldowns).await;
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
-            response.extensions().get::<ExhaustedAt>().unwrap().until_ms,
-            first_reset
+            response.headers()["anthropic-ratelimit-unified-reset"],
+            (first_reset / 1_000).to_string().as_str()
         );
         assert!(fake.calls.lock().unwrap().is_empty());
         assert_eq!(accounts.current().unwrap().unwrap().id, list[1].id);
@@ -1284,12 +1165,6 @@ mod tests {
             .parse()
             .unwrap();
         assert!(reset > now_ms() / 1_000);
-        let Some(ExhaustedAt { until_ms, .. }) =
-            response.extensions().get::<ExhaustedAt>().copied()
-        else {
-            panic!("an all-limited answer must name the first release");
-        };
-        assert_eq!(reset, until_ms / 1_000);
         call(&fake, &accounts, &cooldowns).await;
         assert_eq!(fake.calls.lock().unwrap().len(), 2);
     }
@@ -1360,6 +1235,28 @@ mod tests {
         );
         let tried = list.iter().map(|a| a.id.clone()).collect();
         assert!(eligible(&list, &list[0].id, &tried, &[], "codex", "test", 300).is_none());
+    }
+
+    #[test]
+    fn anthropic_api_throttles_do_not_become_saved_usage_resets() {
+        for delay in ["1", "10", "60"] {
+            let response = crate::providers::upstream_error::from_http(
+                429,
+                r#"{"error":{"type":"rate_limit_error","message":"This request would exceed your organization's rate limit. Try again later."}}"#,
+                Some(delay),
+                "Anthropic",
+            )
+            .response();
+            assert_eq!(retry_deadline(&response, now_ms()), None);
+            assert_eq!(response.headers()[http::header::RETRY_AFTER], delay);
+            assert!(
+                !response
+                    .headers()
+                    .contains_key("anthropic-ratelimit-unified-reset")
+            );
+        }
+        // A spent API balance still rotates, rather than retrying an empty key.
+        assert!(retry_deadline(&spent_balance(), now_ms()).unwrap().spent);
     }
 
     #[test]
@@ -1655,8 +1552,6 @@ mod tests {
                 .contains_key("anthropic-ratelimit-unified-reset")
         );
         assert_eq!(response.headers()["x-should-retry"], "false");
-        let at = response.extensions().get::<ExhaustedAt>().copied().unwrap();
-        assert!(at.spent && at.until_ms > now_ms());
         let body = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .unwrap();
@@ -1699,14 +1594,14 @@ mod tests {
         // One of two keys is spent and the other is free: not all limited.
         assert!(all_limited(&list, &snapshot, "codex", "test", now).is_none());
         let one = all_limited(&list[..1], &snapshot, "codex", "test", now).unwrap();
-        assert!(one.extensions().get::<ExhaustedAt>().unwrap().spent);
+        assert_eq!(one.status(), StatusCode::PAYMENT_REQUIRED);
 
         cooldowns
             .mark("codex", &list[1].id, None, now + 3_600_000)
             .unwrap();
         let snapshot = cooldowns.read().unwrap();
         let mixed = all_limited(&list, &snapshot, "codex", "test", now).unwrap();
-        assert!(!mixed.extensions().get::<ExhaustedAt>().unwrap().spent);
+        assert_eq!(mixed.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(
             mixed
                 .headers()
@@ -1744,9 +1639,6 @@ mod tests {
 
     struct ChainFake {
         name: &'static str,
-        spent_until: Option<u64>,
-        /// The wait is a spent balance, not a reset.
-        out_of_credit: bool,
     }
 
     impl CliHandlers for ChainFake {
@@ -1785,178 +1677,8 @@ mod tests {
             unreachable!()
         }
         async fn handle_messages(&self, _: MessagesRequest, _: RequestContext) -> Response {
-            match self.spent_until {
-                Some(until) if self.out_of_credit => {
-                    spent_response(until, &format!("{} is out of credit", self.name))
-                }
-                Some(until) => exhausted_response(until, &format!("{} is spent", self.name)),
-                None => Response::new(axum::body::Body::from(self.name)),
-            }
+            Response::new(axum::body::Body::from(self.name))
         }
-    }
-
-    fn chain_route(fallback: &[&str]) -> crate::config::Route {
-        crate::config::Route {
-            on: true,
-            provider: Some("codex".into()),
-            fallback: fallback.iter().map(|name| (*name).to_string()).collect(),
-            tiers: [(
-                "antigravity".to_string(),
-                [("opus".to_string(), "antigravity/test-1".to_string())].into(),
-            )]
-            .into(),
-        }
-    }
-
-    async fn routed_call(
-        codex_until: Option<u64>,
-        antigravity_until: Option<u64>,
-        route: &crate::config::Route,
-    ) -> Response {
-        routed_call_with(
-            |name, spent_until| ChainFake {
-                name,
-                spent_until,
-                out_of_credit: false,
-            },
-            codex_until,
-            antigravity_until,
-            route,
-        )
-        .await
-    }
-
-    async fn routed_call_with(
-        fake: impl Fn(&'static str, Option<u64>) -> ChainFake,
-        codex_until: Option<u64>,
-        antigravity_until: Option<u64>,
-        route: &crate::config::Route,
-    ) -> Response {
-        let registry = Registry::from_providers([
-            Arc::new(fake("codex", codex_until)) as Arc<dyn Provider>,
-            Arc::new(fake("antigravity", antigravity_until)),
-        ]);
-        execute_routed(
-            &registry,
-            route,
-            "claude-opus-4-8",
-            registry.provider("codex").unwrap(),
-            serde_json::from_value(json!({"messages":[],"model":"claude-opus-4-8"})).unwrap(),
-            RequestContext {
-                req_id: "chain-test".into(),
-                session_id: None,
-                session_seq: None,
-                provider: "codex".into(),
-                account: None,
-                traffic: None,
-                monitor: None,
-            },
-            None,
-        )
-        .await
-    }
-
-    #[tokio::test]
-    async fn a_spent_provider_moves_the_request_to_the_next_one_in_the_chain() {
-        let response = routed_call(
-            Some(now_ms() + 60 * 60 * 1_000),
-            None,
-            &chain_route(&["antigravity"]),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        assert_eq!(&body[..], b"antigravity");
-    }
-
-    #[tokio::test]
-    async fn a_provider_out_of_credit_moves_the_request_on_and_an_all_spent_chain_says_so() {
-        let credit = |name, spent_until| ChainFake {
-            name,
-            spent_until,
-            out_of_credit: true,
-        };
-        let recheck = Some(now_ms() + SPENT_RECHECK_MS);
-        let response =
-            routed_call_with(credit, recheck, None, &chain_route(&["antigravity"])).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        assert_eq!(&body[..], b"antigravity");
-
-        // Both out of credit: the answer has no countdown and says what to do.
-        let response =
-            routed_call_with(credit, recheck, recheck, &chain_route(&["antigravity"])).await;
-        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
-        assert!(
-            !response
-                .headers()
-                .contains_key("anthropic-ratelimit-unified-reset")
-        );
-        assert_eq!(response.headers()["x-should-retry"], "false");
-        assert!(response.extensions().get::<ExhaustedAt>().unwrap().spent);
-        let body = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let message = body["error"]["message"].as_str().unwrap();
-        for expected in ["out of credit", "tries", "again in", "cc-proxy auth add"] {
-            assert!(message.contains(expected), "{expected}: {message}");
-        }
-
-        // Codex waits on a real reset sooner than Antigravity is rechecked: the
-        // earlier one decides, so Claude Code gets a countdown it can resume on.
-        let response = routed_call_with(
-            |name, spent_until| ChainFake {
-                name,
-                spent_until,
-                out_of_credit: name == "antigravity",
-            },
-            Some(now_ms() + 10 * 60 * 1_000),
-            recheck,
-            &chain_route(&["antigravity"]),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert!(!response.extensions().get::<ExhaustedAt>().unwrap().spent);
-        assert!(
-            response
-                .headers()
-                .contains_key("anthropic-ratelimit-unified-reset")
-        );
-    }
-
-    #[tokio::test]
-    async fn a_spent_chain_names_the_provider_that_frees_up_first() {
-        let now = now_ms();
-        let response = routed_call(
-            Some(now + 4 * 60 * 60 * 1_000),
-            Some(now + 2 * 60 * 60 * 1_000),
-            &chain_route(&["antigravity"]),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        let reset: u64 = response.headers()["anthropic-ratelimit-unified-reset"]
-            .to_str()
-            .unwrap()
-            .parse()
-            .unwrap();
-        // Antigravity frees up two hours before Codex does.
-        assert_eq!(reset, (now + 2 * 60 * 60 * 1_000) / 1_000);
-        let body = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(
-            body["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("Antigravity"),
-            "{body}"
-        );
     }
 
     #[tokio::test]
@@ -1969,11 +1691,8 @@ mod tests {
         let cooldowns = Cooldowns {
             path: dir.path().join("rotation.json"),
         };
-        let registry = Registry::from_providers([Arc::new(ChainFake {
-            name: "codex",
-            spent_until: None,
-            out_of_credit: false,
-        }) as Arc<dyn Provider>]);
+        let registry =
+            Registry::from_providers([Arc::new(ChainFake { name: "codex" }) as Arc<dyn Provider>]);
         ping_routed_providers(&registry, &crate::config::Route::default(), &cooldowns).await;
     }
 
@@ -2027,7 +1746,7 @@ mod tests {
             on: true,
             provider: Some(primary.into()),
             fallback: fallback.iter().map(|name| (*name).to_string()).collect(),
-            tiers: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -2064,38 +1783,19 @@ mod tests {
     }
 
     #[test]
-    fn the_hourly_ping_asks_every_account_that_is_not_waiting_not_only_the_current_one() {
+    fn the_hourly_ping_asks_every_account_even_one_a_saved_wait_calls_limited() {
         let (_dir, accounts, cooldowns, list) = fixture();
         accounts.set_current("b").unwrap();
-        let now = now_ms();
-        let ids = |targets: Vec<Option<String>>| targets.into_iter().flatten().collect::<Vec<_>>();
-        let snapshot = cooldowns.read().unwrap();
-        assert_eq!(
-            ids(ping_targets(&list, &snapshot, "codex", "test", now)),
-            [list[0].id.clone(), list[1].id.clone()]
-        );
-        // An account that is waiting is skipped, and so is one out of credit.
+        // A wait that ends a moment after the tick must not hide the account:
+        // the window it belongs to is over, and the next one has to start.
         cooldowns
-            .mark_with("codex", &list[0].id, None, now + 60_000, true)
+            .mark_with("codex", &list[0].id, None, now_ms() + 500, false)
             .unwrap();
-        let snapshot = cooldowns.read().unwrap();
-        assert_eq!(
-            ids(ping_targets(&list, &snapshot, "codex", "test", now)),
-            [list[1].id.clone()]
-        );
-        // A wait on another model or another provider does not stop the ping.
         cooldowns
-            .mark("codex", &list[1].id, Some("other-model"), now + 60_000)
+            .mark_with("codex", &list[1].id, None, now_ms() + 60_000, true)
             .unwrap();
-        let snapshot = cooldowns.read().unwrap();
-        assert_eq!(
-            ids(ping_targets(&list, &snapshot, "codex", "test", now)),
-            [list[1].id.clone()]
-        );
-        assert_eq!(
-            ids(ping_targets(&list, &snapshot, "kimi", "test", now)).len(),
-            2
-        );
+        let ids: Vec<_> = ping_targets(list.clone()).into_iter().flatten().collect();
+        assert_eq!(ids, [list[0].id.clone(), list[1].id.clone()]);
     }
 
     #[tokio::test]
@@ -2133,5 +1833,42 @@ mod tests {
         assert_eq!(calls(&antigravity_calls), 1);
         assert_eq!(calls(&kimi_calls), 0);
         assert_eq!(calls(&anthropic_calls), 0);
+    }
+
+    #[tokio::test]
+    async fn the_hourly_ping_skips_a_row_that_is_turned_off() {
+        let count = |name| {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Arc::new(Counting {
+                    name,
+                    calls: calls.clone(),
+                }) as Arc<dyn Provider>,
+                calls,
+            )
+        };
+        let (codex, codex_calls) = count("codex");
+        let (kimi, kimi_calls) = count("kimi");
+        let registry = Registry::from_providers([codex, kimi]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            json!({"route": {"on": true, "pool": [
+                {"provider": "codex", "enabled": true},
+                {"provider": "kimi", "enabled": false}
+            ]}})
+            .to_string(),
+        )
+        .unwrap();
+        let route = crate::config::route_from(dir.path());
+        let cooldowns = Cooldowns {
+            path: dir.path().join("rotation.json"),
+        };
+        ping_routed_providers(&registry, &route, &cooldowns).await;
+        let calls = |counter: &Arc<std::sync::atomic::AtomicUsize>| {
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        assert_eq!(calls(&codex_calls), 1);
+        assert_eq!(calls(&kimi_calls), 0);
     }
 }

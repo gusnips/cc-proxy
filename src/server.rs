@@ -1886,12 +1886,18 @@ async fn dispatch_request(
         )
         .await
     };
+    // A fallback provider may have answered, so name the one that did.
+    let (served_provider, served_model) = response
+        .extensions()
+        .get::<crate::rotation::ServedBy>()
+        .map(|by| (by.provider.clone(), by.model.clone()))
+        .unwrap_or_else(|| (provider.name().to_string(), normalized_model.to_string()));
     log_request_completed(
         &log,
         RequestLogContext {
             req_id: &req_id,
-            provider: Some(provider.name()),
-            model: Some(&normalized_model),
+            provider: Some(&served_provider),
+            model: Some(&served_model),
             count_tokens,
             status: response.status(),
             started_at,
@@ -1906,8 +1912,8 @@ async fn dispatch_request(
         &log,
         FailedResponseLogContext {
             req_id: &req_id,
-            provider: Some(provider.name()),
-            model: Some(&normalized_model),
+            provider: Some(&served_provider),
+            model: Some(&served_model),
             count_tokens,
             started_at,
         },

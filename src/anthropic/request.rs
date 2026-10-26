@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+pub(crate) const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+
 const CLIENT_IDENTITIES: &[&str] = &[
     "You are Claude Code, Anthropic's official CLI for Claude.",
     "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
@@ -27,6 +29,33 @@ pub fn prepare_api_key_request(body: &mut Value) {
     }
     strip_client_system(body);
     strip_proxy_thinking(body);
+    prepare_thinking(body);
+}
+
+/// Each path has stable system text and tool names, but switching between the
+/// subscription and API changes both. Keep valid reasoning on later turns and
+/// let Anthropic discard only blocks that cannot verify on the receiving path.
+pub(crate) fn prepare_thinking(body: &mut Value) {
+    if let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut)
+        && matches!(
+            thinking.get("type").and_then(Value::as_str),
+            Some("adaptive" | "enabled")
+        )
+    {
+        let binding = thinking
+            .entry("block_binding")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(binding) = binding.as_object_mut() {
+            binding
+                .entry("prefix_mismatch_behavior")
+                .or_insert_with(|| Value::String("drop_block".into()));
+        }
+    } else {
+        // Disabled and between-tools thinking do not accept block_binding.
+        // Keep text and tool calls, but do not replay reasoning bound to the
+        // subscription's prompt when the API cannot selectively drop it.
+        strip_thinking(body, true);
+    }
 }
 
 /// Drops thinking blocks that this proxy signed (`ccp:<provider>:...`). They
@@ -35,6 +64,10 @@ pub fn prepare_api_key_request(body: &mut Value) {
 /// A message left with no blocks goes too. A message that was empty to begin
 /// with stays, because Claude Code sends effort changes as empty system messages.
 pub(crate) fn strip_proxy_thinking(body: &mut Value) {
+    strip_thinking(body, false);
+}
+
+fn strip_thinking(body: &mut Value, all: bool) {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
@@ -44,11 +77,15 @@ pub(crate) fn strip_proxy_thinking(body: &mut Value) {
         };
         let before = blocks.len();
         blocks.retain(|block| {
-            !(block.get("type").and_then(Value::as_str) == Some("thinking")
-                && block
-                    .get("signature")
-                    .and_then(Value::as_str)
-                    .is_some_and(|signature| signature.starts_with("ccp:")))
+            let thinking = matches!(
+                block.get("type").and_then(Value::as_str),
+                Some("thinking" | "redacted_thinking")
+            );
+            let proxy_signed = block
+                .get("signature")
+                .and_then(Value::as_str)
+                .is_some_and(|signature| signature.starts_with("ccp:"));
+            !(thinking && (all || proxy_signed))
         });
         before == 0 || !blocks.is_empty()
     });
@@ -164,6 +201,66 @@ mod tests {
                 {"role": "user", "content": [{"type": "text", "text": "go"}]}
             ])
         );
+    }
+
+    #[test]
+    fn api_switch_keeps_signed_thinking_and_asks_to_drop_only_prefix_mismatches() {
+        for mode in ["adaptive", "enabled"] {
+            let mut body = json!({
+                "thinking": {"type": mode, "budget_tokens": 2048},
+                "messages": [{"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "prior reasoning", "signature": "native-signature"},
+                    {"type": "redacted_thinking", "data": "encrypted"},
+                    {"type": "tool_use", "id": "tool-1", "name": "Read", "input": {"file": "README.md"}}
+                ]}]
+            });
+            let history = body["messages"].clone();
+            prepare_api_key_request(&mut body);
+            assert_eq!(body["messages"], history);
+            assert_eq!(body["thinking"]["type"], mode);
+            assert_eq!(body["thinking"]["budget_tokens"], 2048);
+            assert_eq!(
+                body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+                "drop_block"
+            );
+            let once = body.clone();
+            prepare_api_key_request(&mut body);
+            assert_eq!(body, once);
+        }
+        let mut explicit = json!({"thinking": {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}}});
+        prepare_api_key_request(&mut explicit);
+        assert_eq!(
+            explicit["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+            "error"
+        );
+    }
+
+    #[test]
+    fn api_switch_without_thinking_controls_keeps_tool_rounds_and_message_controls() {
+        for thinking in [
+            Value::Null,
+            json!({"type": "disabled"}),
+            json!({"type": "between_tools"}),
+        ] {
+            let mut body = json!({"messages": [
+                {"role": "assistant", "content": [{"type": "thinking", "thinking": "old", "signature": "native"}]},
+                {"role": "assistant", "content": [
+                    {"type": "redacted_thinking", "data": "encrypted"},
+                    {"type": "tool_use", "id": "tool-1", "name": "Read", "input": {}}
+                ]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "result"}]},
+                {"role": "system", "content": [], "output_config": {"effort": "high"}}
+            ]});
+            if !thinking.is_null() {
+                body["thinking"] = thinking.clone();
+            }
+            prepare_api_key_request(&mut body);
+            assert_eq!(body["thinking"], thinking);
+            assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+            assert_eq!(body["messages"][0]["content"][0]["type"], "tool_use");
+            assert_eq!(body["messages"][1]["content"][0]["tool_use_id"], "tool-1");
+            assert_eq!(body["messages"][2]["output_config"]["effort"], "high");
+        }
     }
 
     #[test]

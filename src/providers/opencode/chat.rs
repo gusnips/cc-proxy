@@ -1235,6 +1235,7 @@ where
             if !output.is_empty() {
                 let (input_tokens, output_tokens) = usage_from_anthropic_sse(&output);
                 if let Some(monitor) = self.monitor.as_ref() {
+                    monitor.observe_anthropic_sse(&self.req_id, &output);
                     monitor.stream_progress(
                         &self.req_id,
                         output.len() as u64,

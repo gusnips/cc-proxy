@@ -46,14 +46,19 @@ enum Commands {
         #[arg(long, conflicts_with = "no_monitor", action = ArgAction::SetTrue)]
         monitor: bool,
     },
-    /// Switch provider, set a fallback order, or use `direct` to bypass the proxy
+    /// Put a provider first, set the order of several, or use `direct` to bypass the proxy
     Use {
-        /// A provider, or `direct` to bypass the proxy. One provider keeps your fallbacks and puts the old primary first among them. Several set the chain: the first is primary, the rest follow in order. Leave it out to pick from a list
+        /// A provider, or `direct` to bypass the proxy. One provider moves to the top of the pool and the rest keep their order. Several set the order requests try them, and turn the rest off. Leave it out to pick from a list
         #[arg(value_name = "PROVIDER")]
         targets: Vec<String>,
-        /// Clear the fallback chain, so only this provider is used
+        /// Turn every other provider off, so only this provider is used
         #[arg(long)]
-        no_fallback: bool,
+        only: bool,
+    },
+    /// See the order requests try providers and accounts, turn them on or off, and move them
+    Pool {
+        #[command(subcommand)]
+        command: Option<PoolCommand>,
     },
     /// Switch routing off and stop the background proxy service
     Stop,
@@ -87,7 +92,7 @@ enum Commands {
         json: bool,
     },
     /// Open accounts, settings and live activity. If the proxy is off, press s to start it
-    #[command(visible_alias = "monitor")]
+    #[command(visible_aliases = ["monitor", "show"])]
     Open {
         #[arg(long)]
         url: Option<reqwest::Url>,
@@ -132,6 +137,31 @@ enum Commands {
     /// Open the monitor TUI with mock data and no proxy server
     #[command(hide = true)]
     Demo,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum PoolCommand {
+    /// Show the order requests try, with each row on or off
+    List,
+    /// Turn on a provider, or one of its accounts
+    On {
+        provider: String,
+        /// One account of the provider. Leave it out for all of them
+        account: Option<String>,
+    },
+    /// Turn off a provider, or one of its accounts
+    Off {
+        provider: String,
+        /// One account of the provider. Leave it out for all of them
+        account: Option<String>,
+    },
+    /// Move a provider or an account up or down one place
+    Move {
+        provider: String,
+        /// `up` or `down`, after the account when the provider has several
+        #[arg(num_args = 1..=2, value_name = "ACCOUNT> <up|down")]
+        rest: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -299,10 +329,17 @@ fn run() -> Result<()> {
             no_monitor,
             monitor,
         }),
-        Commands::Use {
-            targets,
-            no_fallback,
-        } => use_target(&targets, no_fallback),
+        Commands::Use { targets, only } => use_target(&targets, only),
+        Commands::Pool { command } => match command.unwrap_or(PoolCommand::List) {
+            PoolCommand::List => cc_proxy::pool_cli::list(),
+            PoolCommand::On { provider, account } => {
+                cc_proxy::pool_cli::turn(true, &provider, account.as_deref())
+            }
+            PoolCommand::Off { provider, account } => {
+                cc_proxy::pool_cli::turn(false, &provider, account.as_deref())
+            }
+            PoolCommand::Move { provider, rest } => cc_proxy::pool_cli::shift(&provider, &rest),
+        },
         Commands::Demo => {
             let registry = Registry::new();
             tui::run_mock_monitor(config::port(), &registry)
@@ -707,20 +744,20 @@ fn start_daemon(target: Option<&str>, port: Option<u16>) -> Result<()> {
 }
 
 /// `cc-proxy use`: switch where Claude Code goes, with the proxy kept running.
-fn use_target(targets: &[String], no_fallback: bool) -> Result<()> {
+fn use_target(targets: &[String], only: bool) -> Result<()> {
     if targets.len() > 1
         && targets
             .iter()
             .any(|target| target.trim().eq_ignore_ascii_case(route::DIRECT))
     {
         anyhow::bail!(
-            "`direct` bypasses the proxy and can't be part of a fallback chain. \
+            "`direct` bypasses the proxy and can't be listed with providers. \
              Run `cc-proxy use direct` on its own, or list only providers."
         );
     }
-    if no_fallback && targets.len() > 1 {
+    if only && targets.len() > 1 {
         anyhow::bail!(
-            "`--no-fallback` clears the fallback chain, so it can't come with a list of providers. \
+            "`--only` leaves one provider on, so it can't come with a list of providers. \
              Name one provider, or drop the flag."
         );
     }
@@ -731,10 +768,11 @@ fn use_target(targets: &[String], no_fallback: bool) -> Result<()> {
     match pick {
         Pick::Provider(_) => {
             // Checked before the proxy starts, so a typo changes nothing. One
-            // provider keeps your fallbacks. A list or the flag replaces them.
+            // provider goes to the top and the rest keep their order. A list or
+            // the flag turns the others off.
             let chain = match targets.get(1..) {
                 Some(rest) if !rest.is_empty() => route::Chain::Set(route::clean_chain(rest)?),
-                _ if no_fallback => route::Chain::Set(Vec::new()),
+                _ if only => route::Chain::Set(Vec::new()),
                 _ => route::Chain::Keep,
             };
             let proxy = ensure_proxy(None)?;
@@ -1119,6 +1157,28 @@ fn run_auth_cli(command: Option<cc_proxy::provider::AuthCommand>) -> Result<()> 
             })?;
             cc_proxy::auth_cli::AccountCli::open(&name, support)?.use_account(account.as_deref())
         }
+        AuthCommand::Rename {
+            provider,
+            account,
+            new_name,
+        } => {
+            let name = pick_auth_provider(
+                &registry,
+                provider.as_deref(),
+                "Which provider's account do you want to rename?",
+            )?;
+            let provider = registry
+                .provider(&name)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
+            let support = provider.cli().accounts().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} does not keep named accounts. There is no saved account to rename.",
+                    ui::provider_name(&name)
+                )
+            })?;
+            cc_proxy::auth_cli::AccountCli::open(&name, support)?
+                .rename(account.as_deref(), new_name.as_deref())
+        }
         AuthCommand::Device { provider } => {
             let name = pick_auth_provider(
                 &registry,
@@ -1368,8 +1428,8 @@ mod tests {
     }
 
     #[test]
-    fn open_is_the_command_and_monitor_still_works_as_its_name() {
-        for name in ["open", "monitor"] {
+    fn open_is_the_command_and_monitor_and_show_work_as_its_names() {
+        for name in ["open", "monitor", "show"] {
             let cli = Cli::try_parse_from(["cc-proxy", name]).unwrap();
             assert!(
                 matches!(cli.command, Some(Commands::Open { url: None })),

@@ -165,26 +165,9 @@ impl<'a> AccountCli<'a> {
 
     /// `cc-proxy auth use`: the account requests use from now on.
     pub fn use_account(&self, raw: Option<&str>) -> Result<()> {
-        let list = self.accounts.list()?;
-        let (label, provider) = (self.label(), self.provider);
-        if list.is_empty() {
-            bail!("You're not signed in to {label}. Run `cc-proxy auth login {provider}` first.");
-        }
-        let name = match raw {
-            Some(raw) => self.accounts.require(raw)?.name,
-            None if prompt::is_interactive() => {
-                let names: Vec<String> = list.iter().map(|a| a.name.clone()).collect();
-                let current = self.accounts.current()?.map(|account| account.name);
-                let default = names.iter().position(|n| Some(n) == current.as_ref());
-                let question = format!("Which {label} account should requests use?");
-                names[prompt::choose(&question, &names, default.unwrap_or(0))?].clone()
-            }
-            None => bail!(
-                "Say which account: `cc-proxy auth use {provider} <account>`. You have: {}.",
-                names_of(&list)
-            ),
-        };
-        let chosen = self.accounts.require(&name)?;
+        let question = format!("Which {} account should requests use?", self.label());
+        let chosen = self.choose_account(raw, "use", &question)?;
+        let (label, name) = (self.label(), &chosen.name);
         crate::rotation::switch_account(
             self.provider,
             &self.accounts,
@@ -192,8 +175,97 @@ impl<'a> AccountCli<'a> {
             &chosen,
             crate::rotation::Switch::Chosen(self.support),
         )?;
-        println!("{label} now uses `{name}`. A running proxy switches on its next request.");
+        crate::pool::use_now(self.provider, &chosen.id)?;
+        println!(
+            "{label} now uses `{name}`. It is first in the request order, so new chats start there. Chats already running keep their account."
+        );
         Ok(())
+    }
+
+    /// `cc-proxy auth rename`: change the label, not the saved sign-in.
+    pub fn rename(&self, raw: Option<&str>, new: Option<&str>) -> Result<()> {
+        let question = format!("Which {} account do you want to rename?", self.label());
+        let chosen = self.choose_account(raw, "rename", &question)?;
+        let renamed = match new {
+            Some(new) => self.accounts.rename(&chosen.name, new)?,
+            None => match self.ask_new_name(&chosen)? {
+                Some(renamed) => renamed,
+                None => {
+                    println!("Nothing changed.");
+                    return Ok(());
+                }
+            },
+        };
+        if renamed.name == chosen.name {
+            println!(
+                "Nothing changed. The account is already called `{}`.",
+                chosen.name
+            );
+            return Ok(());
+        }
+        println!(
+            "Renamed {} account `{}` to `{}`. Its sign-in stays the same.",
+            self.label(),
+            chosen.name,
+            renamed.name
+        );
+        Ok(())
+    }
+
+    /// Asks for the new name in a terminal, starting from the email when the
+    /// account only has a number for a name. A name that can't be used says why
+    /// and asks again. `None` when the person pressed Esc.
+    fn ask_new_name(&self, chosen: &Account) -> Result<Option<Account>> {
+        if !prompt::is_interactive() {
+            bail!(
+                "Say the new name: `cc-proxy auth rename {} {} <new-name>`. The saved sign-in stays the same.",
+                self.provider,
+                chosen.name
+            );
+        }
+        let mut text = self
+            .accounts
+            .suggest_name(self.support, chosen)
+            .unwrap_or_else(|| chosen.name.clone());
+        loop {
+            let Some(typed) = prompt::read_line_with_initial("New name: ", &text)? else {
+                return Ok(None);
+            };
+            match self.accounts.rename(&chosen.name, &typed) {
+                Ok(renamed) => return Ok(Some(renamed)),
+                Err(error) => {
+                    println!("{error}");
+                    println!("Type another name, or press Esc to keep `{}`.", chosen.name);
+                    text = typed;
+                }
+            }
+        }
+    }
+
+    /// Account commands share one picker and the same script-friendly error.
+    fn choose_account(&self, raw: Option<&str>, command: &str, question: &str) -> Result<Account> {
+        let list = self.accounts.list()?;
+        let (label, provider) = (self.label(), self.provider);
+        if list.is_empty() {
+            bail!("You're not signed in to {label}. Run `cc-proxy auth login {provider}` first.");
+        }
+        if let Some(raw) = raw {
+            return self.accounts.require(raw);
+        }
+        if !prompt::is_interactive() {
+            bail!(
+                "Say which account: `cc-proxy auth {command} {provider} <account>`. You have: {}.",
+                names_of(&list)
+            );
+        }
+        let names: Vec<String> = list.iter().map(|a| a.name.clone()).collect();
+        let current = self.accounts.current()?.map(|account| account.name);
+        let default = names
+            .iter()
+            .position(|name| Some(name) == current.as_ref())
+            .unwrap_or(0);
+        let at = prompt::choose(question, &names, default)?;
+        Ok(list[at].clone())
     }
 
     /// `cc-proxy auth logout`: one account, or every account.
@@ -512,6 +584,56 @@ mod tests {
         fake.as_user_with_email("other", "unsafe;name@example.com");
         cli.add(None, false).unwrap();
         assert_eq!(names(&cli), ["main", "account-2"]);
+    }
+
+    #[test]
+    fn renaming_with_a_name_keeps_the_login_and_the_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::new();
+        let cli = cli(&fake, &dir);
+        fake.as_user_with_email("ana", "ana@example.com");
+        cli.add(None, false).unwrap();
+        fake.as_user("bo");
+        cli.add(Some("work"), false).unwrap();
+        let before = cli.accounts.require("ana@example.com").unwrap();
+
+        cli.rename(Some("ana@example.com"), Some("Personal"))
+            .unwrap();
+
+        let after = cli.accounts.require("personal").unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(cli.accounts.current().unwrap().unwrap().id, before.id);
+        assert_eq!(names(&cli), ["personal", "work"]);
+        let error = cli
+            .rename(Some("work"), Some("personal"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("already has an account called `personal`"),
+            "{error}"
+        );
+        assert_eq!(names(&cli), ["personal", "work"]);
+    }
+
+    #[test]
+    fn renaming_without_a_name_and_without_a_terminal_says_what_to_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::new();
+        let cli = cli(&fake, &dir);
+        fake.as_user("ana");
+        cli.add(None, false).unwrap();
+
+        let error = cli.rename(Some("main"), None).unwrap_err().to_string();
+        assert!(
+            error.contains("cc-proxy auth rename codex main <new-name>"),
+            "{error}"
+        );
+        let error = cli.rename(None, None).unwrap_err().to_string();
+        assert!(
+            error.contains("cc-proxy auth rename codex <account>"),
+            "{error}"
+        );
+        assert_eq!(names(&cli), ["main"]);
     }
 
     #[test]

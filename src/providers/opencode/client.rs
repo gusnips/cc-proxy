@@ -230,9 +230,19 @@ impl OpenCodeClient {
             self.current_key()
         };
         let api_key = api_key.as_deref();
-        let betas = anthropic_beta
+        let mut betas = anthropic_beta
             .filter(|_| endpoint == EndpointKind::Messages)
             .and_then(upstream_betas);
+        if provider_slug == "anthropic" && endpoint == EndpointKind::Messages {
+            let binding = crate::anthropic::request::THINKING_BINDING_BETA;
+            let betas = betas.get_or_insert_default();
+            if !betas.split(',').any(|beta| beta == binding) {
+                if !betas.is_empty() {
+                    betas.push(',');
+                }
+                betas.push_str(binding);
+            }
+        }
         let url = self.endpoint_url(endpoint);
         let accept = if stream {
             "text/event-stream"
@@ -936,10 +946,16 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(
             seen[0].anthropic_beta,
-            "context-management-2025-06-27,advisor-tool-2026-03-01"
+            format!(
+                "context-management-2025-06-27,advisor-tool-2026-03-01,{}",
+                crate::anthropic::request::THINKING_BINDING_BETA
+            )
         );
-        // Client identity and sign-in betas leave no API feature to enable.
-        assert!(seen[1].anthropic_beta.is_empty());
+        // The proxy adds its binding control even without caller feature betas.
+        assert_eq!(
+            seen[1].anthropic_beta,
+            crate::anthropic::request::THINKING_BINDING_BETA
+        );
         for request in seen.iter() {
             assert_eq!(request.user_agent, USER_AGENT);
             assert!(request.x_opencode_session.is_empty());

@@ -54,12 +54,13 @@ fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::e
     for description in [
         "Print version information",
         "Start the proxy as a background service and send Claude Code through it",
-        "Switch where Claude Code goes: a provider, or `claude` for your own subscription",
+        "Put a provider first, set the order of several, or use `direct` to bypass the proxy",
+        "See the order requests try providers and accounts, turn them on or off, and move them",
         "Switch routing off and stop the background proxy service",
         "Show whether the proxy is running and where Claude Code goes",
         "Restart the background proxy service",
         "Validate the config file and ask a running service to reload it",
-        "Attach a read-only dashboard to a running proxy",
+        "Open accounts, settings and live activity. If the proxy is off, press s to start it",
         "List every provider and where Claude Code goes, or add and remove your own",
         "Sign in to providers, or see who is signed in (login, device, status, logout)",
         "See or choose the model each Claude name uses, and list provider models",
@@ -288,6 +289,17 @@ fn isolated_opencode_env(cmd: &mut Command, temp: &TempDir) {
         .env_remove("OPENCODE_API_KEY");
 }
 
+/// Every saved login file of a provider, joined. Empty when none is saved.
+fn saved_logins(temp: &TempDir, provider: &str) -> String {
+    let dir = temp.path().join("config").join(provider).join("accounts");
+    let Ok(files) = std::fs::read_dir(dir) else {
+        return String::new();
+    };
+    files
+        .filter_map(|file| std::fs::read_to_string(file.ok()?.path()).ok())
+        .collect()
+}
+
 #[test]
 fn opencode_auth_status_reports_config_source() -> Result<(), Box<dyn std::error::Error>> {
     let temp = TempDir::new()?;
@@ -322,8 +334,8 @@ fn opencode_auth_login_stores_key_from_stdin() -> Result<(), Box<dyn std::error:
         .write_stdin("login-key\n")
         .assert()
         .success()
-        .stdout(contains("saved"));
-    let raw = std::fs::read_to_string(temp.path().join("config/config.json"))?;
+        .stdout(contains("Signed in to OpenCode Go as `main`"));
+    let raw = saved_logins(&temp, "opencode");
     assert!(raw.contains("\"apiKey\""));
     assert!(raw.contains("login-key"));
     Ok(())
@@ -339,10 +351,7 @@ fn top_level_login_and_logout_use_the_auth_handlers() -> Result<(), Box<dyn std:
         let mut cmd = Command::cargo_bin("cc-proxy")?;
         isolated_opencode_env(&mut cmd, &temp);
         cmd.args(["logout", "opencode"]).assert().success();
-        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
-            temp.path().join("config/config.json"),
-        )?)?;
-        assert!(config.pointer("/opencode/apiKey").is_none());
+        assert!(!saved_logins(&temp, "opencode").contains("fake-key"));
     }
     Ok(())
 }
@@ -389,6 +398,155 @@ fn saved_accounts_can_be_switched_and_removed_without_signing_in()
     assert!(config.join("accounts").join(format!("{a}.json")).exists());
     run(&["logout", "codex", "--all"]).success();
     run(&["auth", "status", "codex"]).failure().code(1);
+    Ok(())
+}
+
+#[test]
+fn auth_rename_changes_only_the_name() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let config = temp.path().join("config/codex");
+    std::fs::create_dir_all(config.join("accounts"))?;
+    let a = uuid::Uuid::new_v4().to_string();
+    let b = uuid::Uuid::new_v4().to_string();
+    let index = serde_json::json!({"current":"main", "accounts":[
+        {"id":a,"name":"main","identity":"acct-main"},
+        {"id":b,"name":"work","identity":"acct-work"}
+    ]});
+    std::fs::write(config.join("accounts.json"), index.to_string())?;
+    for (id, identity) in [(&a, "acct-main"), (&b, "acct-work")] {
+        std::fs::write(config.join("accounts").join(format!("{id}.json")), serde_json::json!({
+            "access":"do-not-print-me","refresh":"do-not-print-me","expires":4102444800000_u64,"accountId":identity
+        }).to_string())?;
+    }
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.env("XDG_STATE_HOME", temp.path().join("state"));
+        cmd.args(args).assert()
+    };
+    let saved = || -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(config.join("accounts.json")).unwrap())
+            .unwrap()
+    };
+
+    // Without a terminal the new name has to be on the command line.
+    run(&["auth", "rename", "codex", "main"])
+        .failure()
+        .stderr(contains("cc-proxy auth rename codex main <new-name>"));
+    run(&["auth", "rename", "codex"])
+        .failure()
+        .stderr(contains("cc-proxy auth rename codex <account>"))
+        .stderr(contains("main, work"));
+    assert_eq!(saved(), index);
+
+    run(&["auth", "rename", "codex", "main", "Ana@Example.com"])
+        .success()
+        .stdout(contains(
+            "Renamed Codex account `main` to `ana@example.com`",
+        ))
+        .stdout(contains("do-not-print-me").not());
+    let after = saved();
+    // The saved choice follows the account, and its id and login file stay.
+    assert_eq!(after["current"], "ana@example.com");
+    assert_eq!(after["accounts"][0]["id"], a.as_str());
+    assert_eq!(after["accounts"][1]["name"], "work");
+    assert!(config.join("accounts").join(format!("{a}.json")).exists());
+
+    // A name another account has, or one that can't be a name, changes nothing.
+    run(&["auth", "rename", "codex", "work", "ANA@example.com"])
+        .failure()
+        .stderr(contains("already has an account called `ana@example.com`"));
+    run(&["auth", "rename", "codex", "work", "a b"])
+        .failure()
+        .stderr(contains("can't be an account name"));
+    run(&["auth", "rename", "codex", "nope", "x"])
+        .failure()
+        .stderr(contains("No Codex account is called `nope`"));
+    assert_eq!(saved(), after);
+
+    run(&["auth", "use", "codex", "ana@example.com"])
+        .success()
+        .stdout(contains("now uses `ana@example.com`"));
+    Ok(())
+}
+
+#[test]
+fn pool_lists_turns_rows_on_and_off_and_moves_them() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let config = temp.path().join("config");
+    let ids = [
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    ];
+    std::fs::create_dir_all(config.join("codex/accounts"))?;
+    std::fs::write(
+        config.join("codex/accounts.json"),
+        serde_json::json!({"current":"home", "accounts":[
+            {"id":ids[0],"name":"home","identity":"acct-home"},
+            {"id":ids[1],"name":"work","identity":"acct-work"}
+        ]})
+        .to_string(),
+    )?;
+    for (id, identity) in ids.iter().zip(["acct-home", "acct-work"]) {
+        std::fs::write(
+            config.join("codex/accounts").join(format!("{id}.json")),
+            serde_json::json!({
+                "access":"x","refresh":"x","expires":4102444800000_u64,"accountId":identity
+            })
+            .to_string(),
+        )?;
+    }
+    std::fs::write(
+        config.join("config.json"),
+        r#"{"port": 4321, "route": {"on": true, "provider": "codex"}}"#,
+    )?;
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("cc-proxy").unwrap();
+        isolated_opencode_env(&mut cmd, &temp);
+        cmd.env("XDG_STATE_HOME", temp.path().join("state"));
+        cmd.args(args).assert()
+    };
+    let out = |assert: assert_cmd::assert::Assert| {
+        String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+    };
+
+    // The older settings read as rows, and listing writes nothing.
+    let listed = out(run(&["pool"]).success());
+    assert!(listed.find("home").unwrap() < listed.find("work").unwrap());
+    assert!(!std::fs::read_to_string(config.join("config.json"))?.contains("pool"));
+
+    run(&["pool", "off", "codex", "work"])
+        .success()
+        .stdout(contains("Codex `work` is off"));
+    run(&["pool", "move", "codex", "work", "up"])
+        .success()
+        .stdout(contains("now number 1"));
+    run(&["pool", "move", "codex", "up"])
+        .failure()
+        .stderr(contains("Say which one"));
+    run(&["pool", "move", "codex", "work", "sideways"])
+        .failure()
+        .stderr(contains("`up` or `down`"));
+    run(&["pool", "on", "kimi"])
+        .failure()
+        .stderr(contains("cc-proxy login kimi"));
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config.join("config.json"))?)?;
+    assert_eq!(saved["port"], 4321);
+    assert!(saved["route"].get("provider").is_none());
+    let rows: Vec<(&str, bool)> = saved["route"]["pool"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["accountId"].as_str().unwrap(),
+                row["enabled"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(rows, [(ids[1].as_str(), false), (ids[0].as_str(), true)]);
     Ok(())
 }
 
@@ -1020,13 +1178,12 @@ fn custom_provider_add_auth_models_and_remove_round_trip() -> Result<(), Box<dyn
         .write_stdin("or-secret-key\n")
         .assert()
         .success()
-        .stdout(contains("saved"));
+        .stdout(contains("Signed in to openrouter as `main`"));
 
     run(&["auth", "status", "openrouter"])
         .assert()
         .success()
-        .stdout(contains("Format: openai"))
-        .stdout(contains("https://openrouter.ai/api/v1"));
+        .stdout(contains("openrouter `main` (current)"));
 
     run(&["models", "list"])
         .assert()
@@ -1051,12 +1208,12 @@ fn custom_provider_add_auth_models_and_remove_round_trip() -> Result<(), Box<dyn
         .write_stdin("sk-ant-test\n")
         .assert()
         .success()
-        .stdout(contains("Anthropic API key saved"));
+        .stdout(contains("Signed in to Anthropic as `main`"));
 
     run(&["auth", "status", "anthropic"])
         .assert()
         .success()
-        .stdout(contains("https://api.anthropic.com"));
+        .stdout(contains("Anthropic `main` (current)"));
 
     Ok(())
 }

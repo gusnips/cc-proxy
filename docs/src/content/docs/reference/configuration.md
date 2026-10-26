@@ -17,8 +17,10 @@ These settings configure the proxy process. Claude Code client settings such as 
   "autoReviewModel": "gpt-5.6-terra",
   "route": {
     "on": true,
-    "provider": "codex",
-    "fallback": ["antigravity"],
+    "pool": [
+      { "provider": "codex", "accountId": "0b1c8c44-2f6e-4d0e-9a51-6e0a7b6f2c11", "enabled": true },
+      { "provider": "antigravity", "accountId": "5d2e90a1-81c4-4b73-bb0e-2f3a9c64d7e8", "enabled": true }
+    ],
     "tiers": { "codex": { "haiku": "gpt-6-luna" } }
   },
   "codex": {
@@ -110,8 +112,8 @@ balance is too low", or a spent quota with no clock), cc-proxy moves the request
 to the next saved account and sits the spent one out. It tries that account
 again 30 minutes later, because a top-up is not visible to cc-proxy. That try is
 a recheck, never a claimed reset. After you add credit, run
-`cc-proxy auth use <provider> <account>` (or choose Use account for new requests
-in the monitor) to try it at once. A failed recheck costs one quick error that
+`cc-proxy auth use <provider> <account>` (or choose Use now on it in the monitor)
+to try it at once. A failed recheck costs one quick error that
 the next account absorbs in the same request. A timeout, a bad key or a short
 rate limit without a reset time never sits an account out.
 
@@ -146,38 +148,57 @@ cc-proxy config set auth.hourlyPing true
 ```
 
 At the start of every hour (`XX:00`), cc-proxy sends a one-token request using
-the smallest tier model to every saved account, not only the current one, of
-the provider Claude Code routes to and its fallbacks. Only plans with a rolling
+the smallest tier model to every account that is turned on in the request
+pool, not only the one in use. Rows that are turned off are not pinged. Only plans with a rolling
 window get it: Claude, Codex, Kimi, Antigravity, OpenCode Go and GLM. A key that
 pays per token (Anthropic, Gemini, OpenCode Zen, a custom provider) would be
 charged for every ping, and a monthly plan (Cursor, Copilot) has no window to
-start, so those are left alone. An account that is waiting on a limit or is out
-of credit is skipped. With routing off there is nothing to ping.
+start, so those are left alone. A saved wait never stops a ping: a window that
+ends at the top of the hour is still counted as waiting for a moment, so the
+provider decides. An account that is still limited answers `429`, and cc-proxy
+saves that wait again. Free Claude accounts are skipped. With routing off there
+is nothing to ping.
 
-## Provider fallback
+## Request pool
 
-`route.fallback` lists providers to try, in order, when every saved account of
-the routed provider is waiting:
+`route.pool` is one list of rows in the order requests try them. A row is a
+saved account (`accountId` is its id), or a whole provider that holds one
+credential, such as an API key from the environment (no `accountId`). Rows from
+different providers mix freely. A row with `"enabled": false` stays in the list
+and is never picked. Change the list with `cc-proxy pool`, `cc-proxy use` or
+the monitor, not by hand: the ids belong to your saved logins.
 
-```sh
-cc-proxy use codex antigravity gemini
+```json
+"route": {
+  "on": true,
+  "pool": [
+    { "provider": "codex", "accountId": "6f1c0a52-7d2e-4a47-9a35-0c1f3f0b9d11", "enabled": true },
+    { "provider": "claude", "accountId": "b3a8f6d4-1c77-4f0e-8d6a-5e2b9a7c4410", "enabled": true },
+    { "provider": "gemini", "enabled": false }
+  ]
+}
 ```
 
-writes `"provider": "codex"` and `"fallback": ["antigravity", "gemini"]`.
-Each request starts on the routed provider again, so the chain returns to it as
-soon as it frees up. A fallback provider without an account for the requested
-tier is skipped. Leave the array out, or run `cc-proxy use codex --no-fallback`,
-to turn the chain off. `cc-proxy use kimi` on its own keeps the chain: Kimi
-moves to the front and Codex becomes its first fallback.
+turns those three providers on, in that order, and turns the others off. A
+request takes the first row that is on and ready. A chat that already started
+keeps its row while that row can serve it, so the provider's prompt cache is
+reused; a row above it that frees up only takes new chats. When a row hits a
+limit that names a reset (or its balance is spent), the chat moves down the
+list. A row without a model for the requested tier is skipped.
 
-When every provider in the chain is spent, the proxy answers one 429 that names
-the provider freeing up first and when. The response carries the
+Older config files that have `route.provider` and `route.fallback` still work.
+They are read as rows, with each provider's saved account first. The first time
+cc-proxy saves the pool, it writes `route.pool` and removes those two keys.
+Reading the config never writes it.
+
+When every row is waiting, the proxy answers one 429 that names the provider
+freeing up first and when. The response carries the
 `anthropic-ratelimit-unified-*` headers, so Claude Code shows "You've hit your
 limit · resets at ..." and resumes the turn when that time arrives instead of
 treating it as a retryable error. When the first one to come back is an account
 out of credit, there is no reset to show: the answer has no headers and Claude
-Code stops. A provider whose accounts are all out of credit is skipped like any
-other spent provider.
+Code stops. A row whose account is out of credit is skipped like any other
+waiting row.
 
 Rotation never replays output after a stream starts. Codex reasoning signatures
 name the saved login that created them, so they remain usable after a proxy

@@ -9,7 +9,7 @@ Open the monitor:
 cc-proxy open
 ```
 
-`cc-proxy monitor` still works. It is another name for the same command.
+`cc-proxy monitor` and `cc-proxy show` also work. They are other names for the same command.
 
 If the proxy is stopped, the monitor still opens. It says "Proxy off" and shows
 your saved accounts. Press `s` to start the proxy. It uses the provider you
@@ -21,43 +21,56 @@ terminal.
 
 ## Accounts
 
-Accounts opens first. It shows where Claude Code goes, your fallback order and
-saved logins grouped by provider, in that order: the primary provider, then each
-fallback, then your other connected providers, then providers you have not set up.
-Claude subscription follows the same order. `[primary]` marks the provider Claude Code uses.
-A bullet (`●`) and a bold name mark the saved account choice, not an active
-request, so you can find it at a glance. The one that serves new requests now,
-the choice of the primary provider, is in teal; the choice of any other provider
-is in white. The primary provider's name is bold teal too. When auto-rotate
-moves the saved account, the cursor moves with it, unless you had moved it
-somewhere else. With auto-rotate on, a new
-request skips accounts still waiting. When every account has a confirmed wait,
-`[first reset]` marks the earliest reset. The saved choice changes when a request
-actually switches accounts, not while the proxy is idle.
+Accounts opens first. It is one list, in the order requests try it. A row is a
+saved account, written `Provider / name`, or a provider that holds one key and
+is written by its name. Accounts of different providers can sit in any order,
+for example a Claude account, a Codex account, then another Claude account.
+Providers you have not set up wait below the list, tagged `not set up`.
+
+New chats use the first row that is ready. A chat stays on its account until it
+hits a limit, so moving a row or turning it off changes new chats, not the ones
+you are in. With auto-rotate on, a row that is waiting is skipped. Without it,
+the first row that is on answers every request. When every row that is on has a
+confirmed wait, `[first reset]` marks the earliest reset.
+
+The line under the header says who answered the newest request, for example
+`Serving: Claude subscription / contato@example.com`. That row has a teal `●` and
+a bold teal name, so you can see where requests really go. Before the first
+request, the mark is on the first row that is on. The cursor moves with the row
+that answers, unless you had moved it somewhere else. A row that is off keeps its
+place, shows its name dim and ends with `off`.
 
 Use Up and Down to choose a row, then Enter to see its actions. Choose an action
 with the arrows and press Enter to run it. Escape goes back without making a
 change. Wide terminals show the list and details side by side. Narrow terminals
 put details below the list.
 
-- Use provider sends Claude Code to that provider. If the provider isn't signed
-  in, or a Claude name has no model yet, the monitor asks right there with the
-  same prompts the commands use, then returns to your row. Otherwise it just
-  saves and says so. Windows already open follow within a few seconds.
-- Use account changes new requests for that provider. It does not change
-  where Claude Code goes. Requests already running keep their account.
+- Use provider sends Claude Code to that provider and moves its rows to the top
+  of the list. If the provider isn't signed in, or a Claude name has no model
+  yet, the monitor asks right there with the same prompts the commands use, then
+  returns to your row. Otherwise it just saves and says so. Windows already open
+  follow within a few seconds.
+- Use now puts an account first in the list and turns it on, so new chats use
+  it. It does not change where Claude Code goes. Chats already running keep
+  their account.
+- Move up and Move down change where a row stands. A row at the top has no
+  Move up, and a row at the bottom has no Move down. The list updates at once.
+- Disable turns a row off. It stays in the list and keeps its place, and new
+  chats skip it. Enable turns it back on.
 - Sign in saves a login. You can add another account or sign in to a saved
   account again. It asks for a browser, a code or a key on the monitor's own
   screen, and the monitor comes back when you are done. Adding a login does not
   change the provider or current account.
-- Fallback adds a signed-in provider to the end of the fallback order, removes
-  it or moves it earlier. When you choose another provider as primary, it moves
-  to the front and the one you had before becomes the first fallback. The rest
-  of the order stays.
+- Rename account opens a field under the actions. It starts with the old name,
+  or with the sign-in's email when the account is only called `main` or
+  `account-2`. Type the new name and press Enter to save it, or Escape to keep
+  the old one. Every key goes to the field, including `q`. A name that can't be
+  used stays in the field with the reason beside it. The sign-in, the wait
+  timers and the saved choice stay with the account. It also works for API keys.
 - Remove saved account deletes one saved login from this computer. Choosing it
   opens one more line that names the account and says what is deleted. Enter on
-  that line deletes it, and Escape keeps it. If it was the current account, the
-  first one left takes over. To use it again, sign in again.
+  that line deletes it, and Escape keeps it. The row leaves the list. To use it
+  again, sign in again.
 - Disable proxy routing is the last row. It sends Claude Code back to its
   original settings and login. The proxy keeps running, so you can switch back
   here. It does not pick a saved account.
@@ -80,10 +93,9 @@ list. Escape clears the search first, then goes back to Accounts.
 Auto-rotate is off by default. A provider must confirm a limit and a reset time,
 or say the credit is spent, before the proxy switches. An account out of credit
 shows `out of credit` and when cc-proxy tries it again (a recheck every 30
-minutes, not a reset). Choose Use account for new requests after you add credit
-to try it at once. If every saved account is spent, it tries the fallback
-providers in order. Rotation applies to Messages requests before output
-starts, not every API.
+minutes, not a reset). Choose Use now after you add credit to try it at once.
+When a row is spent, the next row that is on answers. Rotation applies to
+Messages requests before output starts, not every API.
 
 ### Usage and wait timers
 
@@ -132,6 +144,20 @@ name of the account they actually used, even after you switch accounts.
 Up and Down cross between sessions and recent requests at the ends of their
 lists. `j` and `k` stay within the current list. Enter opens details; Escape
 returns. Columns adapt to the terminal width.
+
+### Tokens and cost
+
+Session and request details show the tokens used and a cost. Totals count from
+the moment the proxy started and reset when it restarts.
+
+- The cost is an estimate at the provider's public API prices. It is not what a
+  subscription charges you, and it leaves out tool and search fees.
+- A model with no price in cc-proxy shows its tokens and `no price for this model`,
+  never `$0.00`. A total that leaves out such requests ends with `(partial)`.
+- `Input` counts everything sent, including tokens read from cache and written to
+  cache. Counting tokens (`count_tokens`) is not use, so it is left out.
+- When a request moves to another row, its tokens and cost go to the row that
+  answered.
 
 ## Keys
 

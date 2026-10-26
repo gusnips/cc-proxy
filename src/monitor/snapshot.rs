@@ -3,6 +3,7 @@
 use super::{
     ActiveRequest, CompletedRequest, EndpointKind, MonitorState, RequestStatus, SessionSummary,
     Throughput,
+    accounting::{AccountUsage, UsageTotals},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -76,6 +77,8 @@ pub struct MonitorSnapshot {
     pub sessions: Vec<SessionSnapshot>,
     pub active: Vec<ActiveSnapshot>,
     pub recent: Vec<CompletedSnapshot>,
+    #[serde(default)]
+    pub account_usage: Vec<AccountUsage>,
 }
 
 impl MonitorSnapshot {
@@ -89,6 +92,7 @@ impl MonitorSnapshot {
             sessions: Vec::new(),
             active: Vec::new(),
             recent: Vec::new(),
+            account_usage: Vec::new(),
         }
     }
 }
@@ -102,6 +106,7 @@ impl From<MonitorState> for MonitorSnapshot {
             sessions: state.sessions.into_iter().map(Into::into).collect(),
             active: state.active.into_iter().map(Into::into).collect(),
             recent: state.recent.into_iter().map(Into::into).collect(),
+            account_usage: state.account_usage,
         }
     }
 }
@@ -113,6 +118,8 @@ pub struct ActiveSnapshot {
     pub session_seq: Option<u64>,
     pub project: Option<String>,
     pub provider: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
     #[serde(default)]
     pub account: Option<String>,
     pub model: Option<String>,
@@ -127,6 +134,8 @@ pub struct ActiveSnapshot {
     pub stream_chunks: u64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub usage: UsageTotals,
     pub error: Option<String>,
     pub traffic_capture_path: Option<PathBuf>,
     elapsed: Duration,
@@ -152,6 +161,7 @@ impl From<ActiveRequest> for ActiveSnapshot {
             session_seq: value.session_seq,
             project: value.project,
             provider: value.provider,
+            account_id: value.account_id,
             account: value.account,
             model: value.model,
             effort: value.effort,
@@ -163,8 +173,9 @@ impl From<ActiveRequest> for ActiveSnapshot {
             status: value.status,
             streamed_bytes: value.streamed_bytes,
             stream_chunks: value.stream_chunks,
-            input_tokens: value.input_tokens,
-            output_tokens: value.output_tokens,
+            input_tokens: value.usage.input_or(value.input_tokens),
+            output_tokens: value.usage.output_or(value.output_tokens),
+            usage: value.usage,
             error: value.error,
             traffic_capture_path: value.traffic_capture_path,
             elapsed,
@@ -180,6 +191,8 @@ pub struct CompletedSnapshot {
     pub project: Option<String>,
     pub provider: Option<String>,
     #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
     pub account: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -193,6 +206,8 @@ pub struct CompletedSnapshot {
     pub stream_chunks: u64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub usage: UsageTotals,
     pub error: Option<String>,
     pub traffic_capture_path: Option<PathBuf>,
     pub finished_at: SystemTime,
@@ -216,6 +231,7 @@ impl From<CompletedRequest> for CompletedSnapshot {
             session_seq: value.session_seq,
             project: value.project,
             provider: value.provider,
+            account_id: value.account_id,
             account: value.account,
             model: value.model,
             effort: value.effort,
@@ -227,8 +243,9 @@ impl From<CompletedRequest> for CompletedSnapshot {
             status: value.status,
             streamed_bytes: value.streamed_bytes,
             stream_chunks: value.stream_chunks,
-            input_tokens: value.input_tokens,
-            output_tokens: value.output_tokens,
+            input_tokens: value.usage.input_or(value.input_tokens),
+            output_tokens: value.usage.output_or(value.output_tokens),
+            usage: value.usage,
             error: value.error,
             traffic_capture_path: value.traffic_capture_path,
             finished_at: value.finished_at,
@@ -253,6 +270,8 @@ pub struct SessionSnapshot {
     pub last_seen: SystemTime,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub usage: UsageTotals,
     pub output_token_samples: Vec<(SystemTime, u64)>,
     pub generation_duration: Duration,
     pub last_status: String,
@@ -281,6 +300,7 @@ impl From<SessionSummary> for SessionSnapshot {
             last_seen: value.last_seen,
             input_tokens: value.input_tokens,
             output_tokens: value.output_tokens,
+            usage: value.usage,
             output_token_samples: value.output_token_samples,
             generation_duration: value.generation_duration,
             last_status: value.last_status,
@@ -311,12 +331,12 @@ mod tests {
             Some(1),
             EndpointKind::Messages,
         );
-        monitor.account_selected("first", "home");
+        monitor.account_selected("first", "home-id", "home");
         assert_eq!(
             monitor.snapshot().active[0].account.as_deref(),
             Some("home")
         );
-        monitor.account_selected("first", "work");
+        monitor.account_selected("first", "work-id", "work");
         monitor.request_completed("first", 200, None, None);
         monitor.request_started(
             "second",
@@ -324,14 +344,34 @@ mod tests {
             Some(2),
             EndpointKind::Messages,
         );
-        monitor.account_selected("second", "home");
+        monitor.account_selected("second", "home-id", "home");
         let snapshot: MonitorSnapshot = monitor.snapshot().into();
         assert_eq!(snapshot.recent[0].account.as_deref(), Some("work"));
+        assert_eq!(snapshot.recent[0].account_id.as_deref(), Some("work-id"));
         assert_eq!(snapshot.active[0].account.as_deref(), Some("home"));
+        assert_eq!(snapshot.active[0].account_id.as_deref(), Some("home-id"));
         let encoded = serde_json::to_string(&snapshot).unwrap();
         let decoded: MonitorSnapshot = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, snapshot);
         assert_eq!(decoded.sessions[0].account.as_deref(), Some("home"));
+    }
+
+    #[test]
+    fn a_fallback_provider_replaces_the_first_one_and_its_account() {
+        let monitor = MonitorHandle::default();
+        monitor.request_started("r", None, None, EndpointKind::Messages);
+        monitor.provider_selected("r", "codex", "gpt-6.1-sol", None);
+        monitor.account_selected("r", "codex-id", "account-5");
+        monitor.provider_switched("r", "claude", "claude-opus-5-5");
+        let switched = monitor.snapshot();
+        assert_eq!(switched.active[0].provider.as_deref(), Some("claude"));
+        assert_eq!(switched.active[0].model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(switched.active[0].account, None);
+        monitor.account_selected("r", "claude-id", "contato@openwings.com.br");
+        monitor.request_completed("r", 200, None, None);
+        let done: MonitorSnapshot = monitor.snapshot().into();
+        assert_eq!(done.recent[0].provider.as_deref(), Some("claude"));
+        assert_eq!(done.recent[0].account_id.as_deref(), Some("claude-id"));
     }
 
     #[test]

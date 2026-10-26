@@ -57,6 +57,15 @@ pub enum AuthCommand {
         /// Account to use. Leave it out to pick from a list
         account: Option<String>,
     },
+    /// Give a saved account or API key a new name
+    Rename {
+        /// Provider whose account to rename. Leave it out to pick from a list
+        provider: Option<String>,
+        /// Account to rename. Leave it out to pick from a list
+        account: Option<String>,
+        /// New name. Leave it out to edit the suggested name
+        new_name: Option<String>,
+    },
     /// Sign in using a device code
     Device {
         /// Provider to sign in to. Leave it out to pick from a list
@@ -214,12 +223,6 @@ impl ProviderError {
                     Some(until_ms),
                     None,
                 ));
-            response
-                .extensions_mut()
-                .insert(crate::rotation::ExhaustedAt {
-                    until_ms,
-                    spent: false,
-                });
         }
         let headers = response.headers_mut();
         if let Some(retry_after) = self
@@ -343,7 +346,7 @@ impl RequestContext {
     pub(crate) fn select_account(&mut self, account: &crate::accounts::Account) {
         self.account = Some(account.id.clone());
         if let Some(monitor) = &self.monitor {
-            monitor.account_selected(&self.req_id, &account.name);
+            monitor.account_selected(&self.req_id, &account.id, &account.name);
         }
         crate::logging::create_logger("auth").info(
             "account_selected",

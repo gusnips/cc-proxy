@@ -3,6 +3,17 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.6 (2026-10-26)
+
+- Requests now use one list of providers and accounts, in the order you choose. Before, there was a main provider and fallbacks. A Claude account, a Codex account and a second Claude account can sit in any order. Each row is on or off. A new chat takes the first row that is on and not waiting on a limit. A chat stays on its account until that account hits a limit, is turned off or is removed, so the provider's prompt cache keeps working. A row above that frees up only takes new chats. Run `cc-proxy pool` to see the list, `pool on` and `pool off` to switch rows, and `pool move` to reorder. The monitor's Accounts page does the same with Move up, Move down, Enable and Disable. `cc-proxy use <provider>` moves a provider to the top, and `use --only` turns the rest off (it replaces `--no-fallback`). `cc-proxy auth use <provider> <account>` turns that account on and puts it first, like Use now in the monitor. Providers you sign in to later start turned off.
+- The chat-to-account memory is saved in `chats.json` in the state folder. After a restart or an update, open chats stay on their account and keep their cache.
+- The Accounts page highlights the provider and the account that is serving requests, with a line that names them. Before, it showed the one you had saved as primary, even when Codex was spent and Claude was answering. The logs name the provider that answered, not the first one tried.
+- Fix the hourly ping. It now reaches every account that can serve, including ones that were waiting on a limit, so the 5-hour window starts for all of them without switching accounts by hand.
+- Rename an account with `cc-proxy auth rename` or from the Accounts page. The suggested name is the email, when the name is `main` or `account-N` and the email is known. This works for API keys too.
+- The monitor shows tokens and an estimated cost for each account since the proxy started, and for each session and request. The cost is an estimate from public prices and is labeled as one. A model with no known price shows no dollars. Totals start from zero after a restart.
+- Fix the repeated "You've hit your limit" countdown when switching from a Claude subscription to Claude API. A short API rate limit now stays a temporary 429, not a claimed subscription reset. Fix the separate thinking-signature 400 on the same switch: Anthropic drops reasoning that belongs to the other request format, while valid reasoning, text and tool calls stay. With thinking disabled or set to `between_tools`, prior reasoning is left out because those modes cannot use the selective check.
+- `cc-proxy show` is another name for `cc-proxy open`.
+
 ## v0.4.5 (2026-10-26)
 
 - Fix `400 Invalid signature in thinking block` after a fallback from Codex to your Claude subscription. Codex, Kimi and OpenCode sign their thinking blocks in a way Anthropic can't check, and the chat history carried those blocks into the Claude request. cc-proxy now leaves them out of requests to Claude and to Anthropic API keys. Signatures that Anthropic made stay. Retry the same chat after updating.

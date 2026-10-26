@@ -63,6 +63,14 @@ It holds no tokens. `auth status` reads it without contacting a provider.
 last good usage lookup: the remaining percent and reset time of each window. The
 monitor shows them, with a warning, when a later lookup fails. It holds no tokens.
 
+`chats.json` in the same folder remembers which provider and account each Claude
+Code chat is on: the chat's session ID, the provider, the account ID and the time
+of its last request. A restart or an update reads it, so a running chat stays on
+its account and the provider's prompt cache keeps working. A chat is forgotten
+after a day without a request, and at most 2,048 are kept. It holds no tokens.
+Stop the proxy before deleting this file to forget the saved choices. A running
+proxy keeps its loaded copy in memory.
+
 OpenCode Go is the exception: it reads its API key from
 `CCP_OPENCODE_API_KEY`, `OPENCODE_API_KEY`, or `opencode.apiKey` in
 `config.json` and does not create a provider auth store.

@@ -107,7 +107,10 @@ impl ClaudeProvider {
             if let Some(traffic) = &ctx.traffic {
                 traffic.write_json("020-upstream-request", &wire);
             }
-            let mut betas = vec![auth::OAUTH_BETA.to_string()];
+            let mut betas = vec![
+                auth::OAUTH_BETA.to_string(),
+                crate::anthropic::request::THINKING_BINDING_BETA.to_string(),
+            ];
             if let Some(caller) = &body.anthropic_beta {
                 for beta in caller.split(',').map(str::trim).filter(|beta| {
                     !beta.is_empty()
@@ -415,6 +418,12 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .contains("context-management-2025-06-27")
+        );
+        assert!(
+            headers["anthropic-beta"]
+                .to_str()
+                .unwrap()
+                .contains(crate::anthropic::request::THINKING_BINDING_BETA)
         );
         assert_eq!(body["tools"][0]["name"], "custom_Read");
         assert_eq!(body["model"], "claude-sonnet-5-5");
