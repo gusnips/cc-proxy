@@ -372,10 +372,10 @@ fn parse_chat_messages(value: Option<&Value>) -> Result<(Vec<Message>, Vec<Strin
                     &format!("{param}.content"),
                 )?);
             }
-            "user" => out.push(Message {
-                role: "user".to_string(),
-                content: parse_content(object.get("content"), &format!("{param}.content"), true)?,
-            }),
+            "user" => out.push(Message::new(
+                "user",
+                parse_content(object.get("content"), &format!("{param}.content"), true)?,
+            )),
             "assistant" => {
                 let mut blocks = Vec::new();
                 if let Some(reasoning) = object
@@ -402,10 +402,7 @@ fn parse_chat_messages(value: Option<&Value>) -> Result<(Vec<Message>, Vec<Strin
                         Some(format!("{param}.content")),
                     ));
                 }
-                out.push(Message {
-                    role: "assistant".to_string(),
-                    content: Value::Array(blocks),
-                });
+                out.push(Message::new("assistant", Value::Array(blocks)));
             }
             "tool" => {
                 let id = required_string(object, "tool_call_id", &format!("{param}.tool_call_id"))?;
@@ -463,10 +460,7 @@ fn parse_responses_input(
             ));
         }
         return Ok((
-            vec![Message {
-                role: "user".to_string(),
-                content: Value::String(text.to_string()),
-            }],
+            vec![Message::new("user", Value::String(text.to_string()))],
             system,
         ));
     }
@@ -494,10 +488,7 @@ fn parse_responses_input(
                 )?;
                 match role.as_str() {
                     "system" | "developer" => system.push(blocks_text(&content)),
-                    "user" | "assistant" => out.push(Message {
-                        role,
-                        content: Value::Array(content),
-                    }),
+                    "user" | "assistant" => out.push(Message::new(role, Value::Array(content))),
                     _ => {
                         return Err(OpenAiError::invalid(
                             format!("Unsupported input message role: '{role}'"),
@@ -533,10 +524,10 @@ fn parse_responses_input(
                 let name = required_string(object, "name", &format!("{param}.name"))?;
                 let input =
                     parse_arguments(object.get("arguments"), &format!("{param}.arguments"))?;
-                out.push(Message {
-                    role: "assistant".to_string(),
-                    content: json!([{"type":"tool_use", "id":id, "name":name, "input":input}]),
-                });
+                out.push(Message::new(
+                    "assistant",
+                    json!([{"type":"tool_use", "id":id, "name":name, "input":input}]),
+                ));
             }
             "function_call_output" => {
                 reject_nested_fields(
@@ -1028,10 +1019,7 @@ fn push_tool_result(messages: &mut Vec<Message>, result: Value) {
             .expect("checked tool result array")
             .push(result);
     } else {
-        messages.push(Message {
-            role: "user".to_string(),
-            content: Value::Array(vec![result]),
-        });
+        messages.push(Message::new("user", Value::Array(vec![result])));
     }
 }
 

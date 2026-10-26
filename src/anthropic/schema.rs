@@ -24,6 +24,20 @@ pub struct MessagesRequest {
 pub struct Message {
     pub role: String,
     pub content: serde_json::Value,
+    /// Keep message controls such as `output_config` and `clear_at` when
+    /// forwarding to Anthropic. An effort-only system message has no content.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Message {
+    pub fn new(role: impl Into<String>, content: serde_json::Value) -> Self {
+        Self {
+            role: role.into(),
+            content,
+            extra: serde_json::Map::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
