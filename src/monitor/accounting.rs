@@ -223,7 +223,9 @@ impl UsageObservation {
                 .or_else(|| value.pointer("/prompt_tokens_details/cached_tokens"))
                 .or_else(|| value.get("cached_tokens"))
                 .and_then(Value::as_u64),
-            cache_write_tokens: None,
+            cache_write_tokens: value
+                .pointer("/input_tokens_details/cache_write_tokens")
+                .and_then(Value::as_u64),
             standard_tier: standard_tier(value),
             ..Self::default()
         }
@@ -536,6 +538,19 @@ mod tests {
             (100, 10, 70)
         );
         assert!((usage.estimated_cost_usd.unwrap() - 0.0002425).abs() < 1e-10);
+        // Codex reports cache writes beside the reads, both inside the input.
+        let codex = UsageObservation::openai(
+            &json!({"input_tokens": 100, "output_tokens": 10, "input_tokens_details": {"cached_tokens": 40, "cache_write_tokens": 50}}),
+        )
+        .totals(Some("gpt-5.4"), true);
+        assert_eq!(
+            (
+                codex.input_tokens,
+                codex.cache_read_tokens,
+                codex.cache_write_tokens
+            ),
+            (100, 40, 50)
+        );
     }
 
     #[test]
