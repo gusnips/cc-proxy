@@ -102,6 +102,16 @@ pub fn activate(provider: &str, base_url: &str, chain: Chain) -> Result<()> {
     Ok(())
 }
 
+/// Send Claude Code back through the proxy at `base_url`, with the pool as it
+/// is. For routing that was turned off with the proxy still running.
+pub fn resume(base_url: &str) -> Result<()> {
+    // The settings file can refuse, so it goes first, as in `activate`.
+    claude_settings::claim(base_url)?;
+    config_keys::write_value("route.on", serde_json::Value::Bool(true))?;
+    refresh_model_labels();
+    Ok(())
+}
+
 /// Update names only while both the route and the settings ownership are active.
 /// Observed IDs keep an existing Claude session's native model capabilities intact.
 pub fn sync_model_labels(

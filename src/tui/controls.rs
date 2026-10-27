@@ -14,6 +14,8 @@ pub(super) enum Action {
     /// Starts the proxy from a monitor opened while it was off.
     StartProxy,
     DisableRouting,
+    /// Sends Claude Code through the proxy again, with the pool as it is.
+    EnableRouting,
     /// Moves a row up (negative) or down (positive) in the pool.
     MoveRow {
         provider: String,
@@ -74,6 +76,11 @@ impl Action {
                             .into(),
                     ),
                 }
+            }
+            Self::EnableRouting => {
+                route::preflight()?;
+                route::resume(&daemon::client_url(&config::bind_address(), config::port()))?;
+                Ok("Saved. Claude Code goes through the proxy again. Open windows follow within a few seconds.".into())
             }
             Self::DisableRouting => {
                 route::preflight()?;

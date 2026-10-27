@@ -253,7 +253,7 @@ pub fn move_by(provider: &str, account_id: Option<&str>, offset: isize) -> Resul
     edit(|rows| shift(rows, provider, account_id, offset))
 }
 
-/// Put one account first and turn it on, as the monitor's Use now does. On
+/// Put one account first and turn it on, as `cc-proxy auth use` does. On
 /// first, then to the top: a request in between sees it on, never first and off.
 pub fn use_now(provider: &str, account_id: &str) -> Result<()> {
     set_enabled(provider, Some(account_id), true)?;

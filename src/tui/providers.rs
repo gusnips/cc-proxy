@@ -882,7 +882,14 @@ impl ProvidersPanel {
 
     fn actions(&self) -> Vec<(String, Action)> {
         if self.selected == Entry::Direct {
-            return vec![("Disable proxy routing".into(), Action::DisableRouting)];
+            return vec![if self.route.target().is_some() {
+                ("Disable proxy routing".into(), Action::DisableRouting)
+            } else {
+                (
+                    "Send Claude Code through the proxy".into(),
+                    Action::EnableRouting,
+                )
+            }];
         }
         let Some(row) = self.selected_provider() else {
             return Vec::new();
@@ -1064,6 +1071,10 @@ impl ProvidersPanel {
         match action {
             Action::StartProxy => {}
             Action::DisableRouting => self.route.on = false,
+            Action::EnableRouting => {
+                self.route.on = true;
+                self.route_from_pool();
+            }
             Action::MoveRow { .. } | Action::SetEnabled { .. } => self.apply_pool_action(action),
             Action::RemoveAccount { provider, id } => self.forget_account(provider, id),
             Action::RenameAccount { provider, id, name } => {
@@ -1089,14 +1100,11 @@ impl ProvidersPanel {
     fn entry_item(&self, entry: &Entry, width: u16) -> ListItem<'static> {
         let selected = entry == &self.selected;
         let Some((row, account)) = self.row_parts(entry) else {
-            let text = format!(
-                "Disable proxy routing{}",
-                if self.route.target().is_none() {
-                    " [in use]"
-                } else {
-                    ""
-                }
-            );
+            let text = if self.route.target().is_none() {
+                "Proxy routing is off [in use]"
+            } else {
+                "Disable proxy routing"
+            };
             return ListItem::new(Line::from(Span::styled(
                 text,
                 Style::default().fg(if selected { TEAL } else { WHITE }),
@@ -1168,12 +1176,22 @@ impl ProvidersPanel {
         let mut text = Vec::new();
         match &self.selected {
             Entry::Direct => {
-                text.push(
-                    "Restore Claude Code's original settings and login, without the proxy.".into(),
-                );
-                text.push(
-                    "The proxy keeps running. You can switch back to a provider here.".into(),
-                );
+                if self.route.target().is_some() {
+                    text.push(
+                        "Restore Claude Code's original settings and login, without the proxy."
+                            .into(),
+                    );
+                    text.push(
+                        "The proxy keeps running. You can send Claude Code through it again from here."
+                            .into(),
+                    );
+                } else {
+                    text.push("Claude Code uses its own settings and login now.".into());
+                    text.push(
+                        "Press Enter to send it through the proxy again. The list keeps its order."
+                            .into(),
+                    );
+                }
             }
             _ => {
                 if let Some(row) = self.selected_provider() {
@@ -2777,6 +2795,7 @@ mod tests {
         }
         // Going back to Claude Code's own login never asks anything.
         assert!(!Action::DisableRouting.needs_terminal());
+        assert!(!Action::EnableRouting.needs_terminal());
         // Signing in always does: a browser, a code, a key.
         assert!(
             Action::SignIn {
@@ -3321,9 +3340,18 @@ mod tests {
         panel.preview_action(&Action::DisableRouting);
         assert!(panel.route.target().is_none());
         assert_eq!(labels(&panel), order);
+        // With routing off, the same row sends Claude Code through the proxy again.
+        assert_eq!(panel.actions()[0].1, Action::EnableRouting);
+        panel.preview_action(&Action::EnableRouting);
+        assert_eq!(panel.route.target(), Some("codex"));
+        assert_eq!(labels(&panel), order);
+        panel.preview_action(&Action::DisableRouting);
         let text = render(&mut panel, 160, 35);
-        assert!(text.contains("Disable proxy routing [in use]"), "{text}");
-        assert!(text.contains("original settings and login"), "{text}");
+        assert!(text.contains("Proxy routing is off [in use]"), "{text}");
+        assert!(
+            text.contains("uses its own settings and login now"),
+            "{text}"
+        );
         panel.press(KeyCode::Home);
         assert_eq!(
             panel.selected,

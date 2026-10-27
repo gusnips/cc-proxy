@@ -68,8 +68,10 @@ put details below the list.
   that line deletes it, and Escape keeps it. The row leaves the list. To use it
   again, sign in again.
 - Disable proxy routing is the last row. It sends Claude Code back to its
-  original settings and login. The proxy keeps running, so you can switch back
-  here. It does not pick a saved account.
+  original settings and login. The proxy keeps running. While routing is off,
+  the row says `Proxy routing is off`, and its action, Send Claude Code through
+  the proxy, turns routing back on with the list as it is. It does not pick a
+  saved account.
 - Claude is a normal provider with its own saved accounts, usage and
   rotation, and requests go through the proxy.
 
