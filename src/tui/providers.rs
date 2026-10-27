@@ -82,48 +82,55 @@ impl AccountRow {
     }
 
     fn usage_summary(&self, now: u64) -> Line<'static> {
-        let mut summary = self.usage.as_ref().map_or_else(
-            || "checking...".into(),
-            |usage| usage.compact_line(jiff::Timestamp::now()),
-        );
-        let reset_is_shown = match &self.usage {
-            Some(MonitorUsage::Reported(windows)) => windows.iter().any(|window| {
-                window.remaining_percent == 0.0
-                    && window.resets_at_ms.is_some_and(|reset| reset > now as i64)
-            }),
-            _ => false,
-        };
-        if let Some(until) = self.waiting_until(now)
-            && (self.spent || !reset_is_shown)
-        {
-            let replaces = match &self.usage {
-                None | Some(MonitorUsage::Unavailable(_)) => true,
-                // "out of credit" says more than "not reported".
-                Some(MonitorUsage::NotReported(_)) => self.spent,
-                Some(MonitorUsage::Reported(_)) => false,
-            };
-            if replaces {
-                summary = Line::default();
-            } else {
-                summary.spans.push(Span::raw(" · "));
-            }
-            let left = ui::duration(Duration::from_millis(until - now));
-            if self.spent {
-                summary.spans.extend([
+        let timestamp = jiff::Timestamp::now();
+        if let Some(until) = self.waiting_until(now) {
+            let ms_left = until.saturating_sub(now);
+            let mut spans = if self.spent {
+                let left = ui::duration(Duration::from_millis(ms_left));
+                vec![
                     Span::styled(
                         "out of credit",
                         Style::default().fg(ui::remaining_color(0.0)),
                     ),
                     Span::raw(format!(" · tries again in {left}")),
-                ]);
+                ]
             } else {
-                summary.spans.extend([
+                let left = if ms_left >= 3_600_000 {
+                    crate::usage::format_time_left(((ms_left + 999) / 1000) as i64)
+                } else {
+                    ui::duration(Duration::from_millis(ms_left))
+                };
+                vec![
                     Span::styled("waiting", Style::default().fg(YELLOW)),
                     Span::raw(format!(" · {left} left")),
-                ]);
+                ]
+            };
+            match &self.usage {
+                Some(usage @ MonitorUsage::Reported(windows)) if !windows.is_empty() => {
+                    spans.push(Span::raw(" · "));
+                    spans.extend(usage.windows_line(timestamp).spans);
+                }
+                Some(MonitorUsage::NotReported(_)) if !self.spent => {
+                    spans.push(Span::raw(" · not reported"));
+                }
+                _ => {}
             }
+            return Line::from(spans);
         }
-        summary
+        match &self.usage {
+            None => "checking...".into(),
+            Some(usage @ MonitorUsage::Reported(windows))
+                if !windows.is_empty() && windows.iter().all(|w| w.remaining_percent > 0.0) =>
+            {
+                let mut spans = vec![
+                    Span::styled("ready", Style::default().fg(GREEN)),
+                    Span::raw(" · "),
+                ];
+                spans.extend(usage.compact_line(timestamp).spans);
+                Line::from(spans)
+            }
+            Some(usage) => usage.compact_line(timestamp),
+        }
     }
 }
 
@@ -3361,10 +3368,14 @@ mod tests {
     fn a_wait_timer_never_invents_zero_quota() {
         let mut account = demo_rows().remove(0).accounts.remove(1);
         let now = crate::rotation::now_ms();
+        assert_eq!(
+            account.usage_summary(now).to_string(),
+            "ready · 5h 58% · week 88%"
+        );
         account.waits = vec![(None, now + 60_000)];
         assert_eq!(
             account.usage_summary(now).to_string(),
-            "5h 58% · week 88% · waiting · 1m00s left"
+            "waiting · 1m00s left · 5h 58% · week 88%"
         );
         account.usage = None;
         assert_eq!(
@@ -3373,6 +3384,62 @@ mod tests {
         );
         account.waits = vec![(Some("one-model".into()), now + 60_000)];
         assert_eq!(account.usage_summary(now).to_string(), "checking...");
+    }
+
+    #[test]
+    fn ready_and_waiting_rows_lead_with_status_and_effective_unblock_time() {
+        let now = crate::rotation::now_ms();
+        let mut rows = demo_rows();
+        let usage = HashMap::from([
+            (
+                ("codex".into(), "demo-home".into()),
+                MonitorUsage::Reported(vec![
+                    UsageWindow {
+                        label: "5h",
+                        remaining_percent: 100.0,
+                        resets_at_ms: Some(now as i64 + 2 * 3_600_000),
+                    },
+                    UsageWindow {
+                        label: "week",
+                        remaining_percent: 0.0,
+                        resets_at_ms: Some(now as i64 + 24 * 3_600_000),
+                    },
+                ]),
+            ),
+            (
+                ("codex".into(), "demo-work".into()),
+                MonitorUsage::Reported(vec![
+                    UsageWindow {
+                        label: "5h",
+                        remaining_percent: 0.0,
+                        resets_at_ms: Some(now as i64 + 2 * 3_600_000),
+                    },
+                    UsageWindow {
+                        label: "week",
+                        remaining_percent: 0.0,
+                        resets_at_ms: Some(now as i64 + 75 * 3_600_000),
+                    },
+                ]),
+            ),
+        ]);
+        apply_account_usage(&mut rows, &usage);
+        // 5h is 100% but weekly is 0%: the row leads with waiting and the weekly unblock time.
+        let home_line = rows[0].accounts[0].usage_summary(now);
+        assert_eq!(home_line.spans[0].style.fg, Some(YELLOW));
+        assert_eq!(
+            home_line.to_string(),
+            "waiting · 1d left · 5h 100% · week 0%"
+        );
+        // Both windows at 0%: the row shows the longer 3d 3h unblock time once at the start.
+        let work_line = rows[0].accounts[1].usage_summary(now);
+        assert_eq!(
+            work_line.to_string(),
+            "waiting · 3d 3h left · 5h 0% · week 0%"
+        );
+        // A ready account leads with green `ready`.
+        let kimi_line = demo_rows()[1].accounts[0].usage_summary(now);
+        assert_eq!(kimi_line.spans[0].style.fg, Some(GREEN));
+        assert_eq!(kimi_line.to_string(), "ready · 5h 72%");
     }
 
     #[test]
@@ -3489,7 +3556,11 @@ mod tests {
         codex.accounts[1].waits = vec![(None, now + 1_800_000)];
         codex.accounts[1].spent = true;
         let summary = codex.accounts[1].usage_summary(now).to_string();
-        assert!(summary.starts_with("5h 58% · week 88% · out of credit · tries again in"));
+        assert!(
+            summary.starts_with("out of credit · tries again in"),
+            "{summary}"
+        );
+        assert!(summary.ends_with(" · 5h 58% · week 88%"), "{summary}");
 
         // One account out of credit and one with a real reset: the real one is first.
         codex.accounts[0].waits = vec![(None, now + 3_600_000)];

@@ -448,6 +448,16 @@ impl MonitorUsage {
     }
 
     pub fn compact_line(&self, now: Timestamp) -> Line<'static> {
+        self.summary_line(now, true)
+    }
+
+    /// Window percentages without per-window reset countdowns, for rows that
+    /// already lead with the account's wait timer.
+    pub fn windows_line(&self, now: Timestamp) -> Line<'static> {
+        self.summary_line(now, false)
+    }
+
+    fn summary_line(&self, now: Timestamp, with_reset_timers: bool) -> Line<'static> {
         use ratatui::{style::Style, text::Span};
 
         let windows = match self {
@@ -475,7 +485,8 @@ impl MonitorUsage {
                 format!("{:.0}%", window.remaining_percent),
                 Style::default().fg(window.color(windows)),
             ));
-            if window.remaining_percent == 0.0
+            if with_reset_timers
+                && window.remaining_percent == 0.0
                 && let Some(reset) = window.resets_at_ms
             {
                 spans.push(Span::raw(format!(
@@ -1386,7 +1397,7 @@ pub(crate) fn format_reset(reset: Timestamp, now: Timestamp, tz: &TimeZone) -> S
 }
 
 /// The two largest units, rounded up to the minute: "5d 3h", "2h 10m", "4m".
-fn format_time_left(seconds: i64) -> String {
+pub(crate) fn format_time_left(seconds: i64) -> String {
     let minutes = (seconds + 59) / 60;
     let (days, hours, minutes) = (minutes / 1440, minutes % 1440 / 60, minutes % 60);
     match (days, hours, minutes) {
