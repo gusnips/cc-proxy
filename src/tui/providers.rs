@@ -1,7 +1,7 @@
 //! Local saved accounts and usage. Network lookups run only on the panel's worker.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -213,7 +213,19 @@ struct Serving {
     provider: String,
     account_id: Option<String>,
     account: Option<String>,
-    active: bool,
+    model: Option<String>,
+}
+
+impl Serving {
+    fn matches(&self, entry: &Entry) -> bool {
+        match entry {
+            Entry::Account(provider, id) => {
+                &self.provider == provider && self.account_id.as_ref() == Some(id)
+            }
+            Entry::Provider(provider) => &self.provider == provider && self.account_id.is_none(),
+            Entry::Direct => false,
+        }
+    }
 }
 
 /// A new name being typed for one saved account. It lives in the details area
@@ -236,8 +248,9 @@ pub(super) struct ProvidersPanel {
     pool: Vec<PoolEntry>,
     route: config::Route,
     auto_rotate: bool,
-    /// Last request that reached generation, not the route's first choice.
-    serving: Option<Serving>,
+    /// Every request that reached generation, across all chats.
+    active: Vec<Serving>,
+    last_used: Option<Serving>,
     /// What each saved account used since the proxy started, by provider and
     /// immutable account id, so a rename never splits it.
     spend: HashMap<(String, String), UsageTotals>,
@@ -260,7 +273,8 @@ impl ProvidersPanel {
             pool: Vec::new(),
             route: config::Route::default(),
             auto_rotate: false,
-            serving: None,
+            active: Vec::new(),
+            last_used: None,
             spend: HashMap::new(),
             loaded_at: None,
             pending: None,
@@ -330,21 +344,15 @@ impl ProvidersPanel {
             }
         }
         let first_load = self.rows.is_empty();
-        let followed = self.primary_entry();
         self.rows = rows;
         self.pool = pool;
         if first_load {
             self.selected = self
-                .primary_entry()
+                .pool
+                .iter()
+                .find(|row| row.enabled)
+                .map(entry_of)
                 .unwrap_or_else(|| self.entries()[0].clone());
-        } else if self.menu.is_none()
-            && followed.as_ref() == Some(&self.selected)
-            && let Some(now) = self.primary_entry()
-        {
-            // Auto-rotate moved the saved account while the cursor sat on it,
-            // so the cursor goes along. A cursor the person moved somewhere
-            // else stays where it is.
-            self.selected = now;
         }
     }
 
@@ -364,71 +372,42 @@ impl ProvidersPanel {
                 },
             )
             .collect();
-        let before = self.primary_entry();
-        self.serving = snapshot
+        self.active = snapshot
             .active
             .iter()
-            .filter(|request| request.endpoint != EndpointKind::CountTokens)
-            .filter_map(|request| {
-                Some((
-                    request.generation_started_at?,
-                    Serving {
-                        provider: request.provider.clone()?,
-                        account_id: request.account_id.clone(),
-                        account: request.account.clone(),
-                        active: true,
-                    },
-                ))
+            .filter(|request| {
+                request.endpoint != EndpointKind::CountTokens
+                    && request.generation_started_at.is_some()
             })
-            .chain(snapshot.recent.iter().filter_map(|request| {
-                if request.endpoint == EndpointKind::CountTokens
-                    || request.status != RequestStatus::Completed
-                {
-                    return None;
-                }
-                Some((
-                    request.generation_started_at.unwrap_or(request.finished_at),
-                    Serving {
-                        provider: request.provider.clone()?,
-                        account_id: request.account_id.clone(),
-                        account: request.account.clone(),
-                        active: false,
-                    },
-                ))
-            }))
-            .max_by_key(|(at, _)| *at)
-            .map(|(_, serving)| serving);
-        if self.menu.is_none()
-            && before.as_ref() == Some(&self.selected)
-            && let Some(now) = self.primary_entry()
-        {
-            self.selected = now;
-        }
+            .filter_map(|request| {
+                Some(Serving {
+                    provider: request.provider.clone()?,
+                    account_id: request.account_id.clone(),
+                    account: request.account.clone(),
+                    model: request.model.clone(),
+                })
+            })
+            .collect();
+        self.last_used = snapshot
+            .recent
+            .iter()
+            .filter(|request| {
+                request.endpoint != EndpointKind::CountTokens
+                    && request.status == RequestStatus::Completed
+                    && request.provider.is_some()
+            })
+            .max_by_key(|request| request.finished_at)
+            .map(|request| Serving {
+                provider: request.provider.clone().unwrap(),
+                account_id: request.account_id.clone(),
+                account: request.account.clone(),
+                model: request.model.clone(),
+            });
     }
 
     pub fn retry(&mut self) {
         self.loaded_at = None;
         self.refresh();
-    }
-
-    /// The row that answered the newest request. Before any request, the first
-    /// row that is on: that is where the next new chat goes.
-    fn primary_entry(&self) -> Option<Entry> {
-        let row = match &self.serving {
-            Some(serving) => self
-                .pool
-                .iter()
-                .find(|row| {
-                    row.provider == serving.provider && row.account_id == serving.account_id
-                })
-                .or_else(|| {
-                    self.pool
-                        .iter()
-                        .find(|row| row.provider == serving.provider)
-                })?,
-            None => self.pool.iter().find(|row| row.enabled)?,
-        };
-        Some(entry_of(row))
     }
 
     /// Where the cursor goes when its row is gone: another row of the same
@@ -449,10 +428,26 @@ impl ProvidersPanel {
             .clone()
     }
 
-    /// Who answered the newest request, in words, so the teal in the list
-    /// is never the only sign.
+    /// Activity across all windows, not the most recent request's route.
     fn serving_line(&self) -> Line<'static> {
-        let Some(serving) = &self.serving else {
+        if !self.active.is_empty() {
+            let accounts = self
+                .active
+                .iter()
+                .map(|request| (&request.provider, &request.account_id))
+                .collect::<HashSet<_>>()
+                .len();
+            return Line::styled(
+                format!(
+                    " Serving: {} request{} on {accounts} account{}. ● active",
+                    self.active.len(),
+                    if self.active.len() == 1 { "" } else { "s" },
+                    if accounts == 1 { "" } else { "s" },
+                ),
+                Style::default().fg(TEAL),
+            );
+        }
+        let Some(serving) = &self.last_used else {
             return Line::styled(
                 " No request served yet in this run.",
                 Style::default().fg(DIM_WHITE),
@@ -465,22 +460,44 @@ impl ProvidersPanel {
             .unwrap_or_default();
         Line::styled(
             format!(
-                " {}: {}{account}",
-                if serving.active {
-                    "Serving"
-                } else {
-                    "Last used"
-                },
+                " ○ Last used: {}{account}",
                 ui::provider_name(&serving.provider)
             ),
-            Style::default().fg(TEAL),
+            Style::default().fg(DIM_WHITE),
         )
     }
 
-    /// Whether this row answered the newest request. Before any request it is
-    /// the first row that is on, which is what the next new chat will use.
-    fn serves(&self, entry: &Entry) -> bool {
-        self.primary_entry().as_ref() == Some(entry)
+    fn active_count(&self, entry: &Entry) -> usize {
+        self.active
+            .iter()
+            .filter(|request| request.matches(entry))
+            .count()
+    }
+
+    fn was_last_used(&self, entry: &Entry) -> bool {
+        self.active.is_empty()
+            && self
+                .last_used
+                .as_ref()
+                .is_some_and(|last| last.matches(entry))
+    }
+
+    fn activity_lines(&self, entry: &Entry) -> Vec<Line<'static>> {
+        let mut models = BTreeMap::new();
+        for request in self.active.iter().filter(|request| request.matches(entry)) {
+            *models
+                .entry(request.model.as_deref().unwrap_or("model not reported"))
+                .or_insert(0) += 1;
+        }
+        models
+            .into_iter()
+            .map(|(model, count)| {
+                Line::styled(
+                    format!("● {model}: {count} active"),
+                    Style::default().fg(TEAL),
+                )
+            })
+            .collect()
     }
 
     /// What this account used since the proxy started, if it served anything.
@@ -818,31 +835,13 @@ impl ProvidersPanel {
 
     fn actions(&self) -> Vec<(String, Action)> {
         if self.selected == Entry::Direct {
-            return vec![(
-                "Disable proxy routing".into(),
-                Action::UseProvider("direct".into()),
-            )];
+            return vec![("Disable proxy routing".into(), Action::DisableRouting)];
         }
         let Some(row) = self.selected_provider() else {
             return Vec::new();
         };
         let account = self.selected_account();
-        let use_provider = (
-            "Use provider for Claude Code".to_string(),
-            Action::UseProvider(row.id.clone()),
-        );
         let mut actions = Vec::new();
-        match account {
-            Some(account) if row.pinned.is_none() => actions.push((
-                "Use now".into(),
-                Action::UseAccount {
-                    provider: row.id.clone(),
-                    id: account.id.clone(),
-                },
-            )),
-            Some(_) => {}
-            None => actions.push(use_provider.clone()),
-        }
         // A row in the pool can move and be turned off. A provider that is not
         // set up is not in it.
         if let Some((at, place)) = self.pool_row(&self.selected) {
@@ -866,9 +865,6 @@ impl ProvidersPanel {
                     enabled: !place.enabled,
                 },
             ));
-        }
-        if account.is_some() {
-            actions.push(use_provider);
         }
         actions.push((
             if account.is_some() {
@@ -969,10 +965,6 @@ impl ProvidersPanel {
     /// The next read confirms it.
     pub fn apply_pool_action(&mut self, action: &Action) {
         match action {
-            Action::UseAccount { provider, id } => {
-                self.set_row_enabled(provider, Some(id), true);
-                self.move_row(provider, Some(id), isize::MIN);
-            }
             Action::MoveRow {
                 provider,
                 account,
@@ -1023,37 +1015,10 @@ impl ProvidersPanel {
         self.route.fallback = names;
     }
 
-    /// Its rows go to the top in their order, and turn on when none is on.
-    fn promote_provider_rows(&mut self, provider: &str) {
-        let (mut rows, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pool)
-            .into_iter()
-            .partition(|row| row.provider == provider);
-        if !rows.iter().any(|row| row.enabled) {
-            rows.iter_mut().for_each(|row| row.enabled = true);
-        }
-        self.pool = rows.into_iter().chain(rest).collect();
-    }
-
     pub fn preview_action(&mut self, action: &Action) {
         match action {
             Action::StartProxy => {}
-            Action::UseProvider(id) => {
-                if id == "direct" {
-                    self.route.on = false;
-                } else {
-                    self.promote_provider_rows(id);
-                    self.route.on = true;
-                    self.route_from_pool();
-                }
-            }
-            Action::UseAccount { provider, id } => {
-                if let Some(row) = self.rows.iter_mut().find(|row| &row.id == provider) {
-                    for account in &mut row.accounts {
-                        account.current = &account.id == id;
-                    }
-                }
-                self.apply_pool_action(action);
-            }
+            Action::DisableRouting => self.route.on = false,
             Action::MoveRow { .. } | Action::SetEnabled { .. } => self.apply_pool_action(action),
             Action::RemoveAccount { provider, id } => self.forget_account(provider, id),
             Action::RenameAccount { provider, id, name } => {
@@ -1094,7 +1059,8 @@ impl ProvidersPanel {
         };
         let now = crate::rotation::now_ms();
         let place = self.pool_row(entry).map(|(_, place)| place);
-        let serving = self.serves(entry);
+        let active = self.active_count(entry);
+        let last_used = self.was_last_used(entry);
         let first_reset = self.auto_rotate
             && self
                 .first_reset(now)
@@ -1114,57 +1080,25 @@ impl ProvidersPanel {
             // Signed in with a key in config.json but no saved login: not a row yet.
             None => Some("not in the list"),
         };
-        let tags = row_tags(&account, first_reset, off);
-        let tags_width: usize = tags.iter().map(Span::width).sum();
-        let marker = row_marker(serving);
-        let name_style = row_name_style(serving, selected, off.is_none());
-        let name_width = usize::from(width).saturating_sub(4 + summary.width() + tags_width);
-        if name_width < 8 {
-            let name_width = usize::from(width).saturating_sub(2 + tags_width);
-            let summaries = match &account.usage {
-                Some(MonitorUsage::Reported(windows))
-                    if summary.width() + 4 > usize::from(width) =>
-                {
-                    windows
-                        .iter()
-                        .map(|window| {
-                            MonitorUsage::Reported(vec![window.clone()])
-                                .compact_line(jiff::Timestamp::now())
-                        })
-                        .collect()
-                }
-                _ => vec![summary],
-            };
-            let mut title = vec![
-                marker,
-                Span::styled(super::ellipsize(&label, name_width), name_style),
-            ];
-            title.extend(tags);
-            let mut lines = vec![Line::from(title)];
-            lines.extend(
-                summaries
-                    .into_iter()
-                    .filter(|summary| summary.width() > 0)
-                    .map(|summary| {
-                        Line::from(
-                            std::iter::once(Span::raw("    "))
-                                .chain(summary.spans)
-                                .collect::<Vec<_>>(),
-                        )
-                    }),
-            );
-            return ListItem::new(lines);
+        let mut info = vec![Span::raw("  ")];
+        if active > 0 {
+            info.push(Span::styled(
+                format!("{active} active · "),
+                Style::default().fg(TEAL),
+            ));
         }
-        let mut spans = vec![
-            marker,
-            Span::styled(super::ellipsize(&label, name_width), name_style),
-        ];
-        if summary.width() > 0 {
-            spans.push(Span::raw("  "));
-        }
-        spans.extend(summary.spans);
-        spans.extend(tags);
-        ListItem::new(Line::from(spans))
+        info.extend(summary.spans);
+        info.extend(row_tags(&account, first_reset, off));
+        ListItem::new(vec![
+            Line::from(vec![
+                row_marker(active > 0, last_used),
+                Span::styled(
+                    super::ellipsize(&label, usize::from(width).saturating_sub(2)),
+                    row_name_style(active > 0, selected, off.is_none()),
+                ),
+            ]),
+            Line::from(info),
+        ])
     }
 
     /// Where the selected row stands in the list, and what that means.
@@ -1208,18 +1142,13 @@ impl ProvidersPanel {
                         text.push(error.clone().into());
                     }
                     if let Some(account) = self.selected_account() {
-                        text.push(
-                            format!(
-                                "{}{}",
-                                if self.serves(&self.selected) {
-                                    "● "
-                                } else {
-                                    ""
-                                },
-                                account.name
-                            )
-                            .into(),
-                        );
+                        text.push(Line::from(vec![
+                            row_marker(
+                                self.active_count(&self.selected) > 0,
+                                self.was_last_used(&self.selected),
+                            ),
+                            Span::raw(account.name.clone()),
+                        ]));
                         text.extend(account.usage.as_ref().map_or_else(
                             || vec!["Checking usage...".into()],
                             |usage| {
@@ -1232,7 +1161,7 @@ impl ProvidersPanel {
                                 if model.is_none() && account.spent {
                                     text.push(Line::styled(
                                         format!(
-                                            "Out of credit. cc-proxy tries this account again in {}. After you add credit, choose Use now to try it now.",
+                                            "Out of credit. cc-proxy tries this account again in {}. After you add credit, cc-proxy retries it at that time.",
                                             ui::duration(Duration::from_millis(until - now))
                                         ),
                                         Style::default().fg(ui::remaining_color(0.0)),
@@ -1275,7 +1204,7 @@ impl ProvidersPanel {
                         }
                         text.push("".into());
                         text.push(
-                            "Use now puts this row first. Move up and Move down change the order. A chat stays on its account until it hits a limit."
+                            "Move up and Move down change the order. Enable and Disable control which rows new chats can use. A chat keeps its account until it hits a limit."
                                 .into(),
                         );
                     } else {
@@ -1290,7 +1219,7 @@ impl ProvidersPanel {
                         if row.state == AuthState::Missing {
                             text.push("Press Enter, then Sign in to save a login.".into());
                         } else {
-                            text.push("Use provider sends Claude Code here. Open windows follow within a few seconds.".into());
+                            text.push("Press Enter to move this row or turn it on or off.".into());
                         }
                     }
                     let usage_error = self
@@ -1311,7 +1240,7 @@ impl ProvidersPanel {
                     }
                     if self.all_out_of_credit(crate::rotation::now_ms()) {
                         text.push(Line::styled(
-                            "Every row that is on is out of credit. Add credit to one, then choose it and Use now.",
+                            "Every row that is on is out of credit. Add credit to one, or enable another account.",
                             Style::default().fg(ui::remaining_color(0.0)),
                         ));
                     }
@@ -1335,13 +1264,7 @@ impl ProvidersPanel {
                         ));
                         text.push("The next request rechecks each account's limits.".into());
                     }
-                    if row.pinned.is_none() && self.serves(&self.selected) {
-                        text.push(if self.auto_rotate {
-                            "The ● marks the row that answered the newest request. A row that is waiting is skipped."
-                        } else {
-                            "The ● marks the row that answered the newest request. Auto-rotate is off, so the first row answers."
-                        }.into());
-                    }
+                    text.extend(self.activity_lines(&self.selected));
                 }
             }
         }
@@ -1563,11 +1486,13 @@ fn render_rename(frame: &mut ratatui::Frame<'_>, area: Rect, draft: &RenameDraft
     ));
 }
 
-/// Two columns before a row's name. The row that answered the newest request
-/// gets a teal bullet, so it shows from across the list.
-fn row_marker(serving: bool) -> Span<'static> {
-    if serving {
+/// Every account generating a reply gets a teal bullet. When all are idle,
+/// a hollow circle marks the last account used.
+fn row_marker(active: bool, last_used: bool) -> Span<'static> {
+    if active {
         Span::styled("● ", Style::default().fg(TEAL).add_modifier(Modifier::BOLD))
+    } else if last_used {
+        Span::styled("○ ", Style::default().fg(DIM_WHITE))
     } else {
         Span::raw("  ")
     }
@@ -2262,20 +2187,21 @@ mod tests {
         let mut panel = ProvidersPanel::new(Mode::Demo);
         panel.selected = Entry::Account("codex".into(), "demo-home".into());
         assert_eq!(panel.press(KeyCode::Enter), None);
-        assert!(render(&mut panel, 110, 25).contains("Use now"));
+        assert!(render(&mut panel, 110, 25).contains("Move up"));
         assert!(panel.close_menu());
-        assert!(!panel.rows[0].accounts[0].current);
         panel.press(KeyCode::Enter);
         let action = panel.press(KeyCode::Enter).unwrap();
         assert_eq!(
             action,
-            Action::UseAccount {
+            Action::MoveRow {
                 provider: "codex".into(),
-                id: "demo-home".into()
+                account: Some("demo-home".into()),
+                offset: -1,
             }
         );
         panel.preview_action(&action);
-        assert!(panel.rows[0].accounts[0].current);
+        // Reordering does not change the saved login.
+        assert!(!panel.rows[0].accounts[0].current);
         // The row is first in the list now, and routing still goes to Codex.
         assert_eq!(panel.pool[0].account_id.as_deref(), Some("demo-home"));
         assert_eq!(panel.route.target(), Some("codex"));
@@ -2356,40 +2282,18 @@ mod tests {
     }
 
     #[test]
-    fn the_provider_and_account_that_answered_are_highlighted_and_followed() {
+    fn the_account_answering_is_highlighted_without_moving_the_cursor() {
         let mut panel = ProvidersPanel::new(Mode::Demo);
-        // The cursor sits on the first row.
-        panel.selected = Entry::Account("codex".into(), "demo-work".into());
-        // Codex gave up and Kimi answered: that is who is serving now.
+        let selected = Entry::Account("codex".into(), "demo-work".into());
+        panel.selected = selected.clone();
         panel.observe(&served("kimi", "demo-kimi", EndpointKind::Messages));
-        assert_eq!(
-            panel.selected,
-            Entry::Account("kimi".into(), "demo-kimi".into())
-        );
+        assert_eq!(panel.selected, selected);
         let text = render(&mut panel, 160, 30);
-        assert!(text.contains("Serving: Kimi / name"), "{text}");
-        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
-        terminal
-            .draw(|frame| panel.render(frame, frame.area()))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let at = |needle: &str| {
-            (0..30)
-                .find_map(|y| {
-                    let row = (0..160)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>();
-                    row.find(needle)
-                        .map(|x| (row[..x].chars().count() as u16, y))
-                })
-                .unwrap_or_else(|| panic!("no {needle}"))
-        };
-        // Codex is still first in the list, but only Kimi's row is teal.
-        let (x, y) = at("● Kimi / personal");
-        assert_eq!(buffer[(x, y)].fg, TEAL);
-        let (x, y) = at("Codex / work");
-        assert_ne!(buffer[(x, y)].fg, TEAL);
-        assert_eq!(buffer[(x - 2, y)].symbol(), " ", "no bullet on Codex");
+        assert!(text.contains("Serving: 1 request on 1 account"), "{text}");
+        assert!(text.contains("● Kimi / personal"), "{text}");
+        assert!(!text.contains("● Codex / work"), "{text}");
+        panel.selected = Entry::Account("kimi".into(), "demo-kimi".into());
+        assert!(render(&mut panel, 160, 30).contains("● model: 1 active"));
     }
 
     #[test]
@@ -2404,8 +2308,80 @@ mod tests {
         // A local token count is not a request any provider answered.
         let mut panel = ProvidersPanel::new(Mode::Demo);
         panel.observe(&served("kimi", "demo-kimi", EndpointKind::CountTokens));
-        assert!(panel.serving.is_none());
+        assert!(panel.active.is_empty());
+        assert!(panel.last_used.is_none());
         assert!(render(&mut panel, 160, 30).contains("No request served yet in this run."));
+    }
+
+    #[test]
+    fn concurrent_accounts_stay_marked_when_another_request_finishes() {
+        let monitor = crate::monitor::MonitorHandle::default();
+        for (id, provider, account, model) in [
+            ("a", "codex", "demo-work", "gpt-test"),
+            ("b", "kimi", "demo-kimi", "kimi-test"),
+            ("c", "codex", "demo-work", "other-test"),
+        ] {
+            monitor.request_started(id, Some(id.into()), Some(1), EndpointKind::Messages);
+            monitor.provider_selected(id, provider, model, None);
+            monitor.account_selected(id, account, "name");
+            monitor.generation_started(id);
+        }
+        monitor.stream_progress("a", 10, 1, None, Some(2));
+        monitor.request_started("count", None, None, EndpointKind::CountTokens);
+        monitor.provider_selected("count", "codex", "gpt-test", None);
+        monitor.account_selected("count", "demo-home", "home");
+        monitor.generation_started("count");
+        monitor.request_completed("c", 200, None, None);
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.observe(&monitor.snapshot().into());
+        let text = render(&mut panel, 160, 30);
+        for expected in [
+            "Serving: 2 requests on 2 accounts",
+            "● Codex / work",
+            "● Kimi / personal",
+        ] {
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+        assert!(!text.contains("● Codex / home"), "{text}");
+        assert_eq!(
+            panel.active_count(&Entry::Account("codex".into(), "demo-work".into())),
+            1
+        );
+        monitor.request_completed("a", 200, None, None);
+        monitor.request_completed("b", 200, None, None);
+        panel.observe(&monitor.snapshot().into());
+        let text = render(&mut panel, 160, 30);
+        assert!(text.contains("○ Kimi / personal"), "{text}");
+        assert!(!text.contains("● Codex / work"), "{text}");
+        assert!(text.contains("Last used: Kimi / name"), "{text}");
+    }
+
+    #[test]
+    fn an_unknown_account_never_highlights_another_account_of_the_same_provider() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.observe(&served("codex", "removed-account", EndpointKind::Messages));
+        let text = render(&mut panel, 160, 30);
+        assert!(!text.contains("● Codex /"), "{text}");
+    }
+
+    #[test]
+    fn each_account_gets_two_lines_with_room_for_its_name() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.rows[0].accounts[1].name = "work@example.com".into();
+        for (width, height) in [(160, 30), (80, 24), (40, 24)] {
+            let text = render(&mut panel, width, height);
+            let lines: Vec<_> = text.lines().collect();
+            let at = lines
+                .iter()
+                .position(|line| line.contains("Codex / work@example.com"))
+                .unwrap();
+            assert!(!lines[at].contains("58%"), "{text}");
+            assert!(lines[at + 1].contains("5h 58%"), "{text}");
+            assert!(
+                !text.contains("● Codex /"),
+                "no account is active yet: {text}"
+            );
+        }
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -2576,6 +2552,7 @@ mod tests {
     fn the_row_serving_requests_stands_out_from_across_the_list() {
         let mut panel = ProvidersPanel::new(Mode::Demo);
         panel.set_row_enabled("kimi", Some("demo-kimi"), false);
+        panel.observe(&served("codex", "demo-work", EndpointKind::Messages));
         let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
         terminal
             .draw(|frame| panel.render(frame, frame.area()))
@@ -2592,8 +2569,7 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("no {needle}"))
         };
-        // Before any request, the first row that is on is where the next chat
-        // goes: a bullet and a bold teal name, with no tag saying the same.
+        // Only an account that reached generation gets a bullet and bold teal name.
         let (x, y) = find("● Codex / work");
         assert_eq!(buffer[(x, y)].fg, TEAL);
         assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
@@ -2606,8 +2582,8 @@ mod tests {
         // A row that is off stays in its place, dim, and says so in words.
         let (kimi_x, kimi_y) = find("Kimi / personal");
         assert_eq!(buffer[(kimi_x, kimi_y)].fg, DIM_WHITE);
-        let row = (0..160)
-            .map(|x| buffer[(x, kimi_y)].symbol())
+        let row = (0..64)
+            .map(|x| buffer[(x, kimi_y + 1)].symbol())
             .collect::<String>();
         assert!(row.contains(" off"), "{row}");
         // The old order tags are gone: the list itself is the order.
@@ -2627,10 +2603,12 @@ mod tests {
             .draw(|frame| panel.render(frame, frame.area()))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let list_row = (0..64).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        let list_row = (0..64)
+            .map(|x| buffer[(x, y + 1)].symbol())
+            .collect::<String>();
         let at = list_row.find('*').unwrap();
         assert_eq!(
-            buffer[(list_row[..at].chars().count() as u16, y)].fg,
+            buffer[(list_row[..at].chars().count() as u16, y + 1)].fg,
             YELLOW
         );
         assert!(!list_row.contains("refresh failed"), "{list_row}");
@@ -2655,24 +2633,7 @@ mod tests {
     }
 
     #[test]
-    fn choosing_a_provider_moves_its_rows_to_the_top_and_the_rest_follow() {
-        let mut panel = ProvidersPanel::new(Mode::Demo);
-        panel.preview_action(&Action::UseProvider("kimi".into()));
-        let order: Vec<String> = panel
-            .entries()
-            .iter()
-            .map(|entry| panel.label_of(entry))
-            .collect();
-        assert_eq!(
-            order[..3],
-            ["Kimi / personal", "Codex / work", "Codex / home"]
-        );
-        assert_eq!(panel.route.provider.as_deref(), Some("kimi"));
-        assert_eq!(panel.route.fallback, ["codex"]);
-    }
-
-    #[test]
-    fn the_cursor_follows_the_first_row_only_while_it_sits_on_it() {
+    fn refresh_keeps_the_cursor_on_its_account_when_the_order_changes() {
         let mut panel = ProvidersPanel::new(Mode::Demo);
         panel.route = config::Route {
             on: true,
@@ -2687,13 +2648,12 @@ mod tests {
                 .sort_by_key(|row| row.account_id.as_deref() != Some(first));
             loaded
         };
-        let home = Entry::Account("codex".into(), "demo-home".into());
         let work = Entry::Account("codex".into(), "demo-work".into());
         let kimi = Entry::Account("kimi".into(), "demo-kimi".into());
 
         panel.selected = work.clone();
         panel.take_rows(first_is("demo-home"));
-        assert_eq!(panel.selected, home);
+        assert_eq!(panel.selected, work);
 
         // Somewhere else, or inside a menu, the cursor stays put.
         panel.selected = kimi.clone();
@@ -2708,7 +2668,6 @@ mod tests {
     #[test]
     fn only_actions_that_may_ask_a_question_leave_the_monitor() {
         let account = |action: fn(String, String) -> Action| action("codex".into(), "id".into());
-        assert!(!account(|provider, id| Action::UseAccount { provider, id }).needs_terminal());
         assert!(!account(|provider, id| Action::RemoveAccount { provider, id }).needs_terminal());
         for action in [
             Action::MoveRow {
@@ -2725,7 +2684,7 @@ mod tests {
             assert!(!action.needs_terminal());
         }
         // Going back to Claude Code's own login never asks anything.
-        assert!(!Action::UseProvider("direct".into()).needs_terminal());
+        assert!(!Action::DisableRouting.needs_terminal());
         // Signing in always does: a browser, a code, a key.
         assert!(
             Action::SignIn {
@@ -2762,7 +2721,11 @@ mod tests {
         // The first row has nothing above it, the last nothing below it.
         panel.selected = Entry::Account("codex".into(), "demo-work".into());
         let first = labels(&panel);
-        assert!(first.iter().any(|l| l == "Use now"));
+        assert!(
+            !first
+                .iter()
+                .any(|l| l == "Use now" || l == "Use provider for Claude Code")
+        );
         assert!(first.iter().any(|l| l == "Move down"));
         assert!(first.iter().any(|l| l == "Disable"));
         assert!(!first.iter().any(|l| l == "Move up"));
@@ -2775,14 +2738,6 @@ mod tests {
         assert!(labels(&panel).iter().any(|l| l == "Enable"));
         // The old fallback actions are gone for every row.
         assert!(!labels(&panel).iter().any(|l| l.contains("fallback")));
-        panel.rows[0].pinned = Some("CODEX_TOKEN".into());
-        panel.selected = Entry::Account("codex".into(), "demo-home".into());
-        assert!(
-            !panel
-                .actions()
-                .iter()
-                .any(|(_, action)| matches!(action, Action::UseAccount { .. }))
-        );
     }
 
     #[test]
@@ -2962,9 +2917,9 @@ mod tests {
         for _ in 0..8 {
             panel.press(KeyCode::PageDown);
         }
-        assert!(render(&mut panel, 40, 13).contains("newest request"));
+        assert!(render(&mut panel, 40, 13).contains("Enable and Disable"));
         panel.press(KeyCode::Enter);
-        assert!(render(&mut panel, 40, 13).contains("Use now"));
+        assert!(render(&mut panel, 40, 13).contains("Move down"));
     }
 
     #[test]
@@ -3066,7 +3021,7 @@ mod tests {
         // Wide enough that the sentence does not wrap inside the details panel.
         let wide = render(&mut panel, 400, 30);
         assert!(wide.contains("Out of credit. cc-proxy tries this account again in"));
-        assert!(wide.contains("choose Use now to try it now"));
+        assert!(wide.contains("After you add credit, cc-proxy retries it at that time"));
         assert!(!wide.contains("At its limit"), "{wide}");
 
         // Kimi's row is on and fine, so the list as a whole is not out of credit.
@@ -3226,7 +3181,7 @@ mod tests {
     }
 
     #[test]
-    fn accounts_of_different_providers_mix_in_one_list_and_use_provider_leads_it() {
+    fn accounts_of_different_providers_mix_in_one_list() {
         let mut panel = ProvidersPanel::new(Mode::Demo);
         let mut claude = panel.rows[0].clone();
         claude.id = "claude".into();
@@ -3251,8 +3206,8 @@ mod tests {
                 "Codex / work",
                 "Codex / home",
                 "Kimi / personal",
-                "Claude subscription / home",
-                "Claude subscription / work"
+                "Claude / home",
+                "Claude / work"
             ]
         );
         // One Claude account between the Codex ones: the list is not grouped.
@@ -3261,31 +3216,26 @@ mod tests {
             labels(&panel)[..4],
             [
                 "Codex / work",
-                "Claude subscription / work",
+                "Claude / work",
                 "Codex / home",
                 "Kimi / personal"
             ]
         );
         panel.selected = Entry::Account("claude".into(), "demo-work".into());
         assert!(render(&mut panel, 160, 35).contains("5h 58% left"));
-        panel.preview_action(&Action::UseProvider("claude".into()));
-        assert_eq!(panel.route.target(), Some("claude"));
-        assert_eq!(
-            labels(&panel)[..2],
-            ["Claude subscription / work", "Claude subscription / home"]
-        );
+        let order = labels(&panel);
         panel.selected = Entry::Direct;
-        assert_eq!(panel.actions()[0].1, Action::UseProvider("direct".into()));
-        panel.preview_action(&Action::UseProvider("direct".into()));
+        assert_eq!(panel.actions()[0].1, Action::DisableRouting);
+        panel.preview_action(&Action::DisableRouting);
         assert!(panel.route.target().is_none());
-        assert_eq!(panel.route.provider.as_deref(), Some("claude"));
+        assert_eq!(labels(&panel), order);
         let text = render(&mut panel, 160, 35);
         assert!(text.contains("Disable proxy routing [in use]"), "{text}");
         assert!(text.contains("original settings and login"), "{text}");
         panel.press(KeyCode::Home);
         assert_eq!(
             panel.selected,
-            Entry::Account("claude".into(), "demo-work".into())
+            Entry::Account("codex".into(), "demo-work".into())
         );
         panel.press(KeyCode::End);
         assert_eq!(panel.selected, Entry::Direct);
@@ -3313,7 +3263,7 @@ mod tests {
     }
 
     #[test]
-    fn move_and_enable_change_the_list_at_once_and_use_now_leads_it() {
+    fn move_and_enable_change_the_list_at_once_without_switching_logins() {
         let mut panel = ProvidersPanel::new(Mode::Demo);
         let order = |panel: &ProvidersPanel| {
             panel
@@ -3363,20 +3313,20 @@ mod tests {
         assert!(!panel.pool[2].enabled);
         assert_eq!(panel.route.fallback, Vec::<String>::new());
 
-        // Use now: on, and first. A row that was off comes back at the top.
-        let use_now = panel
+        // Enabling the row keeps its place and does not change the order.
+        let enable = panel
             .actions()
             .into_iter()
-            .find(|(label, _)| label == "Use now")
+            .find(|(label, _)| label == "Enable")
             .unwrap()
             .1;
-        panel.preview_action(&use_now);
+        panel.preview_action(&enable);
         assert_eq!(
             order(&panel),
-            ["Kimi / personal", "Codex / home", "Codex / work"]
+            ["Codex / home", "Codex / work", "Kimi / personal"]
         );
-        assert!(panel.pool[0].enabled);
-        assert_eq!(panel.route.target(), Some("kimi"));
+        assert!(panel.pool[2].enabled);
+        assert_eq!(panel.route.target(), Some("codex"));
         assert!(render(&mut panel, 120, 25).contains("Demo only"));
     }
 
@@ -3430,7 +3380,7 @@ mod tests {
             .into_iter()
             .map(|(label, _)| label)
             .collect();
-        assert!(labels.contains(&"Use provider for Claude Code".to_string()));
+        assert!(!labels.contains(&"Use provider for Claude Code".to_string()));
         assert!(labels.contains(&"Move up".to_string()));
         assert!(!labels.contains(&"Move down".to_string()));
         assert!(

@@ -654,7 +654,7 @@ fn run_account_action(
     if asks {
         pause_for_questions()?;
     }
-    let result = action.run(&app.listen_url);
+    let result = action.run();
     if asks {
         // Always restore the monitor, including a cancelled sign-in.
         resume_after_questions(terminal)?;
@@ -2202,7 +2202,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ("u / d", "scroll account details"),
         ("r", "refresh accounts and usage"),
         ("s", "start the proxy when it is off"),
-        ("●", "the row that answered the newest request"),
+        ("● / ○", "active accounts / last used when idle"),
         ("*", "last refresh failed; values may be old"),
         (
             "Esc",

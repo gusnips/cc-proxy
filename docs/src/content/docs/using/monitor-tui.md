@@ -33,26 +33,22 @@ you are in. With auto-rotate on, a row that is waiting is skipped. Without it,
 the first row that is on answers every request. When every row that is on has a
 confirmed wait, `[first reset]` marks the earliest reset.
 
-The line under the header says who answered the newest request, for example
-`Serving: Claude subscription / contato@example.com`. That row has a teal `●` and
-a bold teal name, so you can see where requests really go. Before the first
-request, the mark is on the first row that is on. The cursor moves with the row
-that answers, unless you had moved it somewhere else. A row that is off keeps its
-place, shows its name dim and ends with `off`.
+The name takes the first line of each account row. Usage, wait times and state
+sit on the next line, so long account names do not compete with quota numbers.
+`Claude` means a Claude plan. `Anthropic` means an API key.
+
+A teal `●` marks every account serving requests now. The second line says how
+many requests it has, and Details lists their models. The header counts active
+requests across all windows. When no requests are running, a dim `○` marks the
+last account used. No mark appears before the first request. Traffic never
+moves your cursor. An account that is off stays in place and says `off` on its
+second line.
 
 Use Up and Down to choose a row, then Enter to see its actions. Choose an action
 with the arrows and press Enter to run it. Escape goes back without making a
 change. Wide terminals show the list and details side by side. Narrow terminals
 put details below the list.
 
-- Use provider sends Claude Code to that provider and moves its rows to the top
-  of the list. If the provider isn't signed in, or a Claude name has no model
-  yet, the monitor asks right there with the same prompts the commands use, then
-  returns to your row. Otherwise it just saves and says so. Windows already open
-  follow within a few seconds.
-- Use now puts an account first in the list and turns it on, so new chats use
-  it. It does not change where Claude Code goes. Chats already running keep
-  their account.
 - Move up and Move down change where a row stands. A row at the top has no
   Move up, and a row at the bottom has no Move down. The list updates at once.
 - Disable turns a row off. It stays in the list and keeps its place, and new
@@ -74,7 +70,7 @@ put details below the list.
 - Disable proxy routing is the last row. It sends Claude Code back to its
   original settings and login. The proxy keeps running, so you can switch back
   here. It does not pick a saved account.
-- Claude subscription is a normal provider with its own saved accounts, usage and
+- Claude is a normal provider with its own saved accounts, usage and
   rotation, and requests go through the proxy.
 
 Changes say what was saved and apply without a restart. A failed action stays
@@ -93,7 +89,7 @@ list. Escape clears the search first, then goes back to Accounts.
 Auto-rotate is off by default. A provider must confirm a limit and a reset time,
 or say the credit is spent, before the proxy switches. An account out of credit
 shows `out of credit` and when cc-proxy tries it again (a recheck every 30
-minutes, not a reset). Choose Use now after you add credit to try it at once.
+minutes, not a reset). After you add credit, cc-proxy retries at that time.
 When a row is spent, the next row that is on answers. Rotation applies to
 Messages requests before output starts, not every API.
 

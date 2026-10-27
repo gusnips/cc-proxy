@@ -1,6 +1,6 @@
 //! Account actions reuse the same stores and sign-in flow as the CLI.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::{
     accounts::{Account, Accounts},
@@ -13,12 +13,7 @@ use crate::{
 pub(super) enum Action {
     /// Starts the proxy from a monitor opened while it was off.
     StartProxy,
-    UseProvider(String),
-    /// Puts a saved account first in the pool and turns it on, so new chats use it.
-    UseAccount {
-        provider: String,
-        id: String,
-    },
+    DisableRouting,
     /// Moves a row up (negative) or down (positive) in the pool.
     MoveRow {
         provider: String,
@@ -52,18 +47,10 @@ impl Action {
     /// Whether the action may ask a question or open a browser. Only these hand
     /// the screen over; the rest run behind the monitor and answer on its footer.
     pub fn needs_terminal(&self) -> bool {
-        match self {
-            Self::StartProxy | Self::SignIn { .. } => true,
-            Self::UseProvider(provider) => start_flow::will_ask(provider),
-            Self::UseAccount { .. }
-            | Self::MoveRow { .. }
-            | Self::SetEnabled { .. }
-            | Self::RemoveAccount { .. }
-            | Self::RenameAccount { .. } => false,
-        }
+        matches!(self, Self::StartProxy | Self::SignIn { .. })
     }
 
-    pub fn run(&self, base_url: &str) -> Result<String> {
+    pub fn run(&self) -> Result<String> {
         match self {
             Self::StartProxy => {
                 route::preflight()?;
@@ -88,51 +75,10 @@ impl Action {
                     ),
                 }
             }
-            Self::UseProvider(provider) => {
+            Self::DisableRouting => {
                 route::preflight()?;
-                match start_flow::pick(Some(provider))? {
-                    start_flow::Pick::Provider(provider) => {
-                        route::activate(provider, base_url, route::Chain::Keep)?;
-                        Ok(format!(
-                            "Saved. Claude Code uses {} through the proxy. Open windows follow within a few seconds.",
-                            ui::provider_name(provider)
-                        ))
-                    }
-                    start_flow::Pick::Direct => {
-                        route::deactivate()?;
-                        Ok("Saved. Claude Code uses its original settings and login, without the proxy. The proxy keeps running.".into())
-                    }
-                }
-            }
-            Self::UseAccount { provider, id } => {
-                let registry = Registry::new();
-                let handler = registry
-                    .provider(provider)
-                    .context("This provider was removed. Press r to refresh.")?;
-                let support = handler
-                    .cli()
-                    .accounts()
-                    .context("This provider does not support saved accounts.")?;
-                if let Some(var) = support.pinned_credentials() {
-                    bail!(
-                        "${var} supplies the login. Unset it in the proxy service before choosing a saved account."
-                    );
-                }
-                let accounts = Accounts::open(provider, support)?;
-                let account = saved_account(&accounts, id)?;
-                crate::rotation::switch_account(
-                    provider,
-                    &accounts,
-                    &crate::rotation::Cooldowns::new(),
-                    &account,
-                    crate::rotation::Switch::Chosen(support),
-                )?;
-                pool::use_now(provider, id)?;
-                Ok(format!(
-                    "Saved. {} / {} is first in the list now. New chats use it. Chats already running keep their account.",
-                    ui::provider_name(provider),
-                    account.name
-                ))
+                route::deactivate()?;
+                Ok("Saved. Claude Code uses its original settings and login, without the proxy. The proxy keeps running.".into())
             }
             Self::MoveRow {
                 provider,
@@ -231,7 +177,7 @@ impl Action {
                     cli.login()?;
                 }
                 Ok(format!(
-                    "Saved the {} login. Choose Use provider to send Claude Code there.",
+                    "Saved the {} login. Enable its row to let new chats use it.",
                     ui::provider_name(provider)
                 ))
             }

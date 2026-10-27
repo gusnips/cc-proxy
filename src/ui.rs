@@ -51,7 +51,7 @@ pub fn provider_name(provider: &str) -> &str {
         "cursor" => "Cursor",
         "kimi" => "Kimi",
         "grok" => "Grok",
-        "claude" => "Claude subscription",
+        "claude" => "Claude",
         "anthropic" => "Anthropic",
         "gemini" => "Gemini",
         "antigravity" => "Antigravity",
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn claude_subscription_is_distinct_from_direct_bypass() {
-        assert_eq!(provider_name("claude"), "Claude subscription");
+        assert_eq!(provider_name("claude"), "Claude");
         assert_eq!(provider_name("anthropic"), "Anthropic");
         assert_eq!(provider_color("claude"), provider_color("anthropic"));
     }
