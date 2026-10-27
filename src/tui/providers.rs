@@ -96,7 +96,7 @@ impl AccountRow {
                 ]
             } else {
                 let left = if ms_left >= 3_600_000 {
-                    crate::usage::format_time_left(((ms_left + 999) / 1000) as i64)
+                    crate::usage::format_time_left(ms_left.div_ceil(1000) as i64)
                 } else {
                     ui::duration(Duration::from_millis(ms_left))
                 };
