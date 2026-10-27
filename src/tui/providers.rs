@@ -2,7 +2,8 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -239,6 +240,8 @@ struct RenameDraft {
     suggested: bool,
     /// Why the last save failed. The typed name stays, so it can be fixed.
     error: Option<String>,
+    /// The name was sent and the answer has not come yet.
+    saving: bool,
 }
 
 pub(super) struct ProvidersPanel {
@@ -256,6 +259,10 @@ pub(super) struct ProvidersPanel {
     spend: HashMap<(String, String), UsageTotals>,
     loaded_at: Option<Instant>,
     pending: Option<mpsc::Receiver<Loaded>>,
+    /// The pending read also fetches usage.
+    pending_usage: bool,
+    /// Set while a worker is still fetching usage, even when nothing waits for it.
+    usage_busy: Arc<AtomicBool>,
     selected: Entry,
     list: ListState,
     menu: Option<Vec<(String, Action)>>,
@@ -278,6 +285,8 @@ impl ProvidersPanel {
             spend: HashMap::new(),
             loaded_at: None,
             pending: None,
+            pending_usage: false,
+            usage_busy: Arc::new(AtomicBool::new(false)),
             selected: Entry::Direct,
             list: ListState::default(),
             menu: None,
@@ -320,7 +329,9 @@ impl ProvidersPanel {
                 return;
             }
             self.pending = None;
-            self.loaded_at = Some(Instant::now());
+            if self.pending_usage {
+                self.loaded_at = Some(Instant::now());
+            }
             if !self.entries().contains(&self.selected) {
                 self.selected = self.nearest_entry();
                 self.menu = None;
@@ -329,10 +340,34 @@ impl ProvidersPanel {
         if self
             .loaded_at
             .is_none_or(|loaded| loaded.elapsed() >= REFRESH_AFTER)
+            && !self.usage_busy.load(Ordering::SeqCst)
         {
-            let (send, receive) = mpsc::channel();
-            std::thread::spawn(move || load(&send));
-            self.pending = Some(receive);
+            self.spawn_load(true);
+        }
+    }
+
+    /// Starts a worker that reads the saved accounts and the order, and, when
+    /// `with_usage`, their usage. A dropped receiver does not stop a worker, so
+    /// `usage_busy` keeps a second usage read from starting beside it.
+    fn spawn_load(&mut self, with_usage: bool) {
+        let (send, receive) = mpsc::channel();
+        let busy = with_usage.then(|| {
+            self.usage_busy.store(true, Ordering::SeqCst);
+            BusyGuard(self.usage_busy.clone())
+        });
+        std::thread::spawn(move || {
+            load(&send, with_usage);
+            drop(busy);
+        });
+        self.pending = Some(receive);
+        self.pending_usage = with_usage;
+    }
+
+    /// Reads the saved accounts and the order again after a change, not their
+    /// usage: a rename or a reorder has no new numbers to fetch.
+    fn reload_saved(&mut self) {
+        if self.mode == Mode::Local {
+            self.spawn_load(false);
         }
     }
 
@@ -724,6 +759,7 @@ impl ProvidersPanel {
             input: InputLine::new(&started_with),
             suggested: account.suggested_name.is_some(),
             error: None,
+            saving: false,
         });
         self.menu = None;
         self.notice = None;
@@ -734,6 +770,17 @@ impl ProvidersPanel {
     fn refuse_name(&mut self, reason: String) {
         if let Some(draft) = &mut self.rename {
             draft.error = Some(reason);
+            draft.saving = false;
+        }
+    }
+
+    /// Says at once that a change is being saved, while it runs behind the
+    /// monitor. The action list or the name field stays open until the answer.
+    pub fn show_saving(&mut self) {
+        self.notice = Some(("Saving...".into(), false));
+        if let Some(draft) = &mut self.rename {
+            draft.saving = true;
+            draft.error = None;
         }
     }
 
@@ -906,9 +953,7 @@ impl ProvidersPanel {
                 self.notice = Some((message, false));
                 self.menu = None;
                 self.rename = None;
-                // Drop an old read so it cannot replace the result of this action.
-                self.pending = None;
-                self.retry();
+                self.reload_saved();
             }
             // A name that was refused stays in its field, with the reason beside it.
             Err(error) if self.rename.is_some() => self.refuse_name(format!("{error:#}")),
@@ -1338,7 +1383,7 @@ impl ProvidersPanel {
         frame.render_stateful_widget(
             List::new(items)
                 .block(panel(
-                    if self.pending.is_some() {
+                    if self.pending.is_some() || self.usage_busy.load(Ordering::SeqCst) {
                         "Request order · refreshing"
                     } else {
                         "Request order"
@@ -1454,6 +1499,10 @@ fn render_rename(frame: &mut ratatui::Frame<'_>, area: Rect, draft: &RenameDraft
         ]),
         Line::raw(""),
     ];
+    if draft.saving {
+        lines.push(Line::styled("Saving...", Style::default().fg(TEAL)));
+        lines.push(Line::raw(""));
+    }
     if let Some(error) = &draft.error {
         lines.push(Line::styled(error.clone(), Style::default().fg(YELLOW)));
         lines.push(Line::styled(
@@ -1587,7 +1636,16 @@ fn account_rows(
     }).collect()
 }
 
-fn load(send: &mpsc::Sender<Loaded>) {
+/// Clears `usage_busy` when the usage worker ends, even if it panics.
+struct BusyGuard(Arc<AtomicBool>);
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+fn load(send: &mpsc::Sender<Loaded>, with_usage: bool) {
     let registry = Registry::new();
     let mut rows: Vec<ProviderRow> = crate::route::routable_providers(&registry)
         .into_iter()
@@ -1645,7 +1703,7 @@ fn load(send: &mpsc::Sender<Loaded>) {
         rows: rows.clone(),
         pool: pool.clone(),
     };
-    if send.send(first).is_err() {
+    if send.send(first).is_err() || !with_usage {
         return;
     }
     for (id, headline) in crate::usage::headlines() {
@@ -2478,6 +2536,40 @@ mod tests {
             panel.selected,
             Entry::Account("codex".into(), "demo-home".into())
         );
+    }
+
+    #[test]
+    fn a_change_that_is_saving_says_so_and_keeps_its_field_until_the_answer() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.selected = Entry::Account("codex".into(), "demo-home".into());
+        start_rename(&mut panel);
+        panel.show_saving();
+        assert!(panel.renaming());
+        assert!(render(&mut panel, 120, 25).contains("Saving..."));
+        panel.finish_action(Err(anyhow::anyhow!(
+            "Codex already has an account called `spare`. Pick another name."
+        )));
+        let refused = render(&mut panel, 120, 25);
+        assert!(refused.contains("already has an account"), "{refused}");
+        assert!(!refused.contains("Saving..."), "{refused}");
+
+        // An action in the list shows it too, and the list stays open.
+        panel.close_menu();
+        panel.press(KeyCode::Enter);
+        panel.show_saving();
+        assert!(panel.menu_open());
+        assert!(render(&mut panel, 120, 25).contains("Saving..."));
+    }
+
+    #[test]
+    fn a_usage_read_that_is_still_running_is_never_started_a_second_time() {
+        let mut panel = ProvidersPanel::new(Mode::Local);
+        panel.usage_busy.store(true, Ordering::SeqCst);
+        panel.refresh();
+        panel.retry();
+        assert!(panel.pending.is_none());
+        // The title keeps saying so, even though nothing waits for the answer.
+        assert!(render(&mut panel, 120, 25).contains("refreshing"));
     }
 
     #[test]

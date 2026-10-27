@@ -24,7 +24,7 @@ use crate::accounts::{Account, Accounts};
 use crate::anthropic::{MessagesRequest, json_error};
 use crate::config::{PoolEntry, Route};
 use crate::provider::{AuthState, Provider, RequestContext};
-use crate::registry::{Registry, anthropic_model_family};
+use crate::registry::{Registry, anthropic_model_family, normalize_incoming_model};
 use crate::request_identity::ConversationIdentity;
 
 /// One row that can serve this request: who answers, and with which model.
@@ -113,6 +113,11 @@ impl Saved {
 /// enabled rows, and answers as before when it has none: asking for a model by
 /// name is a choice of provider. With no row at all (nothing is signed in) the
 /// provider the server chose answers, so the person reads its own sign-in help.
+///
+/// Claude Code's `[1m]` suffix asks for the long context window and does not
+/// change the model. Read with it, `claude-opus-4-8[1m]` would look like one
+/// provider's own model, and a chat warm on a fallback would go back to the
+/// first provider. So the names are read without it here and in `plan_rows`.
 fn pool_rows(
     registry: &Registry,
     route: &Route,
@@ -123,7 +128,7 @@ fn pool_rows(
         return None;
     }
     let mut rows = crate::pool::active(route, registry);
-    if anthropic_model_family(requested).is_none() {
+    if anthropic_model_family(&normalize_incoming_model(requested)).is_none() {
         rows.retain(|row| row.provider == primary);
     }
     (!rows.is_empty()).then_some(rows)
@@ -140,12 +145,13 @@ fn plan_rows(
     rows: Vec<PoolEntry>,
     saved: &mut HashMap<String, Saved>,
 ) -> (Vec<Plan>, Option<String>) {
-    let tiered = anthropic_model_family(requested).is_some();
+    let requested = normalize_incoming_model(requested);
+    let tiered = anthropic_model_family(&requested).is_some();
     let mut plans = Vec::new();
     let mut refusal = None;
     for row in rows {
         let (provider, model) = if tiered {
-            match crate::tiers::resolve_for(registry, route, &row.provider, requested) {
+            match crate::tiers::resolve_for(registry, route, &row.provider, &requested) {
                 Ok(model) => match registry.provider_for_model(&model) {
                     Some(provider) if provider.name() == row.provider => (provider, model),
                     _ => continue,
@@ -177,6 +183,23 @@ fn plan_rows(
         }
     }
     (plans, refusal)
+}
+
+/// The key a request's chat is remembered under, and the main chat's key when
+/// the request is a helper agent's. The main chat and its helper agents share
+/// one session header, so each helper gets a key of its own: it starts where the
+/// main chat is, and whatever it does never moves the main chat. A request with
+/// no valid identity is not remembered, so a malformed header cannot take over
+/// a real chat's place.
+fn chat_keys(identity: Option<&ConversationIdentity>) -> (Option<String>, Option<String>) {
+    match identity {
+        None => (None, None),
+        Some(ConversationIdentity::Main(session)) => (Some(session.clone()), None),
+        Some(agent @ ConversationIdentity::Agent(session, _)) => (
+            Some(agent.search_session_id().into_owned()),
+            Some(session.clone()),
+        ),
+    }
 }
 
 /// The chat's own row when it can serve, else the first row that is ready.
@@ -281,8 +304,10 @@ impl Pool<'_> {
         }
 
         let log = crate::logging::create_logger("auth");
-        let chat = context.session_id.clone();
-        let remembered = chat.as_deref().and_then(place_of);
+        let (chat, root) = chat_keys(identity.as_ref());
+        let own = chat.as_deref().and_then(place_of);
+        let root_place = root.as_deref().and_then(place_of);
+        let remembered = own.clone().or_else(|| root_place.clone());
         let mut tried: HashSet<usize> = HashSet::new();
         let mut last_response = None;
         let mut waited = false;
@@ -372,7 +397,10 @@ impl Pool<'_> {
                     let kept = remembered.as_ref().is_some_and(|place| {
                         enabled.contains(place) && !plans.iter().any(|p| &p.place() == place)
                     });
-                    if !kept {
+                    // A helper agent that stays where the main chat is needs
+                    // no place of its own.
+                    let follows_root = own.is_none() && root_place.as_ref() == Some(&plan.place());
+                    if !kept && !follows_root {
                         remember(chat, plan.place());
                     }
                 }
@@ -660,6 +688,19 @@ mod tests {
             requested: &str,
             monitor: Option<MonitorHandle>,
         ) -> Response {
+            let identity = chat.map(|chat| ConversationIdentity::Main(chat.to_string()));
+            self.ask_as(rows, identity, auto, requested, monitor).await
+        }
+
+        /// A request from this conversation: the main chat or a helper agent.
+        async fn ask_as(
+            &self,
+            rows: &[PoolEntry],
+            identity: Option<ConversationIdentity>,
+            auto: bool,
+            requested: &str,
+            monitor: Option<MonitorHandle>,
+        ) -> Response {
             let saved = [
                 (
                     "claude".to_string(),
@@ -699,14 +740,14 @@ mod tests {
             .unwrap();
             let context = RequestContext {
                 req_id: "pool-test".into(),
-                session_id: chat.map(str::to_string),
+                session_id: None,
                 session_seq: None,
                 provider: first,
                 account: None,
                 traffic: None,
                 monitor,
             };
-            pool.drive(rows.to_vec(), body, context, None).await
+            pool.drive(rows.to_vec(), body, context, identity).await
         }
 
         fn served(&self) -> Vec<Place> {
@@ -810,6 +851,84 @@ mod tests {
         // The chat is still on Codex for its next `opus` request.
         let back = world.ask(&mixed(), Some("chat-d")).await;
         assert_eq!(text(back).await, format!("codex:{CODEX_ONE}"));
+    }
+
+    #[tokio::test]
+    async fn a_helper_agent_never_moves_the_main_chat() {
+        let world = world();
+        let main = || Some(ConversationIdentity::Main("chat-main".into()));
+        let helper = |agent: &str| {
+            Some(ConversationIdentity::Agent(
+                "chat-main".into(),
+                agent.into(),
+            ))
+        };
+        let started = world
+            .ask_as(&mixed(), main(), true, "claude-opus-4-8", None)
+            .await;
+        assert_eq!(text(started).await, format!("claude:{CLAUDE_PRO}"));
+        world.served();
+
+        // A helper that asks for a Codex model uses Codex only: that is its own
+        // choice, and the main chat stays on Claude with its warm cache.
+        let codex_only = vec![row("codex", Some(CODEX_ONE))];
+        let child = world
+            .ask_as(
+                &codex_only,
+                helper("agent-1"),
+                true,
+                "claude-opus-4-8",
+                None,
+            )
+            .await;
+        assert_eq!(text(child).await, format!("codex:{CODEX_ONE}"));
+        world.served();
+        let again = world
+            .ask_as(&mixed(), main(), true, "claude-opus-4-8", None)
+            .await;
+        assert_eq!(text(again).await, format!("claude:{CLAUDE_PRO}"));
+        world.served();
+
+        // A new helper starts where the main chat is, and keeps no place of its own.
+        let fresh = world
+            .ask_as(&mixed(), helper("agent-2"), true, "claude-opus-4-8", None)
+            .await;
+        assert_eq!(text(fresh).await, format!("claude:{CLAUDE_PRO}"));
+        assert!(
+            place_of(
+                &ConversationIdentity::Agent("chat-main".into(), "agent-2".into())
+                    .search_session_id()
+            )
+            .is_none()
+        );
+        // The helper that left the main chat's place stays where it went.
+        world.served();
+        let stay = world
+            .ask_as(&mixed(), helper("agent-1"), true, "claude-opus-4-8", None)
+            .await;
+        assert_eq!(text(stay).await, format!("codex:{CODEX_ONE}"));
+    }
+
+    #[tokio::test]
+    async fn the_long_context_suffix_does_not_pull_a_chat_off_its_fallback() {
+        let world = world();
+        world.limit("claude", Some(CLAUDE_PRO));
+        let started = world.ask(&mixed(), Some("chat-1m")).await;
+        assert_eq!(text(started).await, format!("codex:{CODEX_ONE}"));
+        world.served();
+        world.recover("claude", CLAUDE_PRO);
+        // `[1m]` is the same Claude name: every row stays open and the chat
+        // stays on Codex, as it does without the suffix.
+        let same = world
+            .ask_with(&mixed(), Some("chat-1m"), true, "claude-opus-4-8[1m]", None)
+            .await;
+        assert_eq!(text(same).await, format!("codex:{CODEX_ONE}"));
+        let mut route = world.route.clone();
+        route.pool = Some(vec![row("claude", None), row("codex", None)]);
+        assert_eq!(
+            pool_rows(&world.registry, &route, "claude", "claude-opus-4-8[1m]"),
+            pool_rows(&world.registry, &route, "claude", "claude-opus-4-8")
+        );
     }
 
     #[tokio::test]
