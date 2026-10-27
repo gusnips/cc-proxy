@@ -19,7 +19,7 @@ use ratatui::{
     widgets::{List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use super::{Applied, CONFIG_KEYS, ConfigKey, ConfigKind};
+use super::{Applied, CONFIG_KEYS, ConfigKey};
 use crate::ui::{DIM, DIM_WHITE, GREEN, RED, TEAL, WHITE, YELLOW};
 
 /// The real file for the command and monitor, or an isolated map for demos and tests.
@@ -124,6 +124,19 @@ impl SettingsPanel {
     pub fn reload(&mut self) {
         self.screen.reload();
     }
+
+    /// Preview a boolean setting in the demo store without writing any file.
+    pub fn set_demo_bool(&mut self, path: &str, value: bool) {
+        if let SettingsStore::Demo(root) = &self.screen.store {
+            let _ = super::set_dotted(&mut root.borrow_mut(), path, serde_json::Value::Bool(value));
+            self.screen.reload();
+        }
+    }
+
+    pub fn bool_value(&self, path: &str) -> Option<bool> {
+        let root = self.screen.file.as_ref().ok()?;
+        super::get_dotted(root, path)?.as_bool()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -131,6 +144,7 @@ enum Row {
     Setting(&'static ConfigKey),
     /// A map or a whole file: opens config.json in your editor, at `key`.
     File {
+        label: &'static str,
         name: &'static str,
         key: Option<&'static str>,
         blurb: &'static str,
@@ -139,11 +153,13 @@ enum Row {
 
 const FILE_ROWS: [Row; 2] = [
     Row::File {
+        label: "Custom providers",
         name: "providers",
         key: Some("providers"),
         blurb: "providers you added with `cc-proxy provider add`",
     },
     Row::File {
+        label: "All settings file",
         name: "config.json",
         key: None,
         blurb: "the whole file, for anything not listed here",
@@ -151,6 +167,13 @@ const FILE_ROWS: [Row; 2] = [
 ];
 
 impl Row {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Setting(key) => key.label,
+            Self::File { label, .. } => label,
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Self::Setting(key) => key.path,
@@ -218,7 +241,7 @@ impl<S: Store> Screen<S> {
             .collect();
         let search = rows
             .iter()
-            .map(|row| format!("{} {}", row.name(), row.blurb()))
+            .map(|row| format!("{} {} {}", row.label(), row.name(), row.blurb()))
             .collect();
         let mut screen = Self {
             store,
@@ -355,11 +378,7 @@ impl<S: Store> Screen<S> {
                 SettingsOutcome::Stay
             }
             Some(Row::Setting(key)) => {
-                // A secret starts empty: what is saved is never shown again.
-                let initial = match key.kind {
-                    ConfigKind::Secret => String::new(),
-                    _ => self.current_text(key).unwrap_or_default(),
-                };
+                let initial = self.current_text(key).unwrap_or_default();
                 let chars: Vec<char> = initial.chars().collect();
                 self.draft = Some(Draft {
                     key,
@@ -520,15 +539,25 @@ impl<S: Store> Screen<S> {
                 list,
             );
         } else {
-            let name_width = self
+            let label_width = self
                 .rows
                 .iter()
-                .map(|row| row.name().chars().count())
+                .map(|row| row.label().chars().count())
                 .max()
                 .unwrap_or(0);
+            let show_key = list.width >= 76;
+            let name_width = if show_key {
+                self.rows
+                    .iter()
+                    .map(|row| row.name().chars().count())
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                0
+            };
             let items: Vec<ListItem> = visible
                 .iter()
-                .map(|&index| self.item(index, name_width))
+                .map(|&index| self.item(index, label_width, name_width))
                 .collect();
             self.list
                 .select(visible.iter().position(|row| *row == self.selected));
@@ -538,9 +567,11 @@ impl<S: Store> Screen<S> {
                 && list.width > 0
                 && list.height > 0
             {
-                // The field sits where the value was: marker, name, two spaces.
+                // The field sits where the value was: marker, label, optional key, two spaces.
                 let row = at.saturating_sub(self.list.offset());
-                let offset = (4 + name_width + draft.cursor).min(usize::from(u16::MAX)) as u16;
+                let key_cols = if name_width > 0 { 2 + name_width } else { 0 };
+                let offset =
+                    (4 + label_width + key_cols + draft.cursor).min(usize::from(u16::MAX)) as u16;
                 frame.set_cursor_position((
                     list.x.saturating_add(offset).min(list.right() - 1),
                     list.y.saturating_add(row as u16).min(list.bottom() - 1),
@@ -551,7 +582,11 @@ impl<S: Store> Screen<S> {
         if visible.contains(&self.selected)
             && let Some(row) = self.rows.get(self.selected)
         {
-            let mut lines = vec![Line::styled(row.blurb(), Style::default().fg(DIM_WHITE))];
+            let mut lines = vec![Line::from(vec![
+                Span::styled(row.name(), Style::default().fg(TEAL)),
+                Span::styled(" · ", Style::default().fg(DIM)),
+                Span::styled(row.blurb(), Style::default().fg(DIM_WHITE)),
+            ])];
             if let Row::Setting(_) = row {
                 lines.push(Line::styled(
                     format!("Now: {}", self.value_text(row)),
@@ -569,13 +604,13 @@ impl<S: Store> Screen<S> {
     }
 
     /// One row of the list. While a value is typed, the field takes its place.
-    fn item(&self, index: usize, name_width: usize) -> ListItem<'static> {
+    fn item(&self, index: usize, label_width: usize, name_width: usize) -> ListItem<'static> {
         let row = &self.rows[index];
         let selected = index == self.selected;
-        let name = format!("{:<name_width$}", row.name());
+        let label = format!("{:<label_width$}", row.label());
         let marker = if selected { "❯ " } else { "  " };
         let marker_style = Style::default().fg(TEAL).add_modifier(Modifier::BOLD);
-        let name_style = if selected {
+        let label_style = if selected {
             marker_style
         } else {
             Style::default().fg(WHITE)
@@ -583,11 +618,7 @@ impl<S: Store> Screen<S> {
 
         let value = match &self.draft {
             Some(draft) if selected => {
-                let shown: String = if draft.key.kind == ConfigKind::Secret {
-                    "•".repeat(draft.chars.len())
-                } else {
-                    draft.chars.iter().collect()
-                };
+                let shown: String = draft.chars.iter().collect();
                 Span::styled(
                     shown,
                     Style::default()
@@ -606,12 +637,20 @@ impl<S: Store> Screen<S> {
                 Span::styled(text, Style::default().fg(DIM_WHITE))
             }
         };
-        ListItem::new(Line::from(vec![
+        let mut spans = vec![
             Span::styled(marker, marker_style),
-            Span::styled(name, name_style),
-            Span::raw("  "),
-            value,
-        ]))
+            Span::styled(label, label_style),
+        ];
+        if name_width > 0 {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!("{:<name_width$}", row.name()),
+                Style::default().fg(DIM),
+            ));
+        }
+        spans.push(Span::raw("  "));
+        spans.push(value);
+        ListItem::new(Line::from(spans))
     }
 
     fn status_line(&self) -> Line<'static> {
@@ -874,27 +913,23 @@ mod tests {
     }
 
     #[test]
-    fn a_secret_starts_empty_and_is_never_drawn() {
-        let file = Memory::with(serde_json::json!({"opencode": {"apiKey": "old-secret"}}));
+    fn rows_show_human_labels_dotted_keys_and_descriptions() {
+        let file = Memory::with(serde_json::json!({}));
         let mut screen = Screen::new(&file);
-        go_to(&mut screen, "opencode.apiKey");
 
-        let list = drawn(&mut screen, 80, 24);
-        assert!(list.contains("set (config.json)"));
-        assert!(!list.contains("old-secret"));
+        let list = drawn(&mut screen, 100, 24);
+        assert!(list.contains("❯ Auto-rotate accounts"));
+        assert!(list.contains("auth.autoRotate"));
+        assert!(list.contains("Pause new requests"));
+        assert!(list.contains("auth.pauseRequests"));
+        assert!(list.contains("Wait for account reset"));
+        assert!(list.contains("auth.waitForReset"));
+        assert!(list.contains("switch saved accounts when one reaches a limit"));
 
-        press(&mut screen, KeyCode::Enter);
-        assert!(screen.draft.as_ref().unwrap().chars.is_empty());
-        type_text(&mut screen, "sk-123");
-        let field = drawn(&mut screen, 80, 24);
-        assert!(field.contains("••••••"));
-        assert!(!field.contains("sk-123"));
-
-        press(&mut screen, KeyCode::Enter);
-        assert_eq!(file.0.borrow()["opencode"]["apiKey"], "sk-123");
-        let after = drawn(&mut screen, 80, 24);
-        assert!(after.contains("Saved opencode.apiKey."));
-        assert!(!after.contains("sk-123"));
+        // Searching by the human label finds the setting too.
+        type_text(&mut screen, "Pause new");
+        assert_eq!(screen.visible().len(), 1);
+        assert_eq!(screen.rows[screen.selected].name(), "auth.pauseRequests");
     }
 
     #[test]
@@ -983,13 +1018,15 @@ mod tests {
 
         let wide = drawn(&mut screen, 80, 24);
         assert!(wide.contains("Settings"));
-        assert!(wide.contains("❯ auth.autoRotate"));
+        assert!(wide.contains("❯ Auto-rotate accounts"));
+        assert!(wide.contains("auth.autoRotate"));
         assert!(wide.contains("type to search"));
         assert!(wide.contains("Esc close"));
 
         go_to(&mut screen, "port");
         let small = drawn(&mut screen, 40, 8);
-        assert!(small.contains("❯ port"));
+        assert!(small.contains("❯ Listener port"));
+        assert!(small.contains("port"));
         assert!(small.contains("Esc close"));
         // The way out stays visible in every mode.
         type_text(&mut screen, "po");
@@ -1001,9 +1038,13 @@ mod tests {
 
         // Far down a short list, the selected row is still on screen.
         go_to(&mut screen, "config.json");
-        assert!(drawn(&mut screen, 60, 10).contains("❯ config.json"));
+        let at_file = drawn(&mut screen, 60, 10);
+        assert!(at_file.contains("❯ All settings file"));
+        assert!(at_file.contains("config.json"));
         go_to(&mut screen, "port");
-        assert!(drawn(&mut screen, 60, 10).contains("❯ port"));
+        let at_port = drawn(&mut screen, 60, 10);
+        assert!(at_port.contains("❯ Listener port"));
+        assert!(at_port.contains("port"));
     }
 
     #[test]
@@ -1075,8 +1116,8 @@ mod tests {
         // A fresh demo has its own store, never the real saved settings.
         let fresh = SettingsPanel::new(true);
         assert_eq!(fresh.screen.file.as_ref().unwrap(), &serde_json::json!({}));
-        let secret = super::super::find_key("opencode.apiKey").unwrap();
-        assert_eq!(panel.screen.value_text(&Row::Setting(secret)), "unset");
+        let unset_key = super::super::find_key("codex.baseUrl").unwrap();
+        assert_eq!(panel.screen.value_text(&Row::Setting(unset_key)), "unset");
 
         go_to(&mut panel.screen, "providers");
         assert_eq!(

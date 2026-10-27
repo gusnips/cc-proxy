@@ -9,7 +9,7 @@ use super::read_rewrite::sanitize_read_args;
 use super::reasoning_signature::{PendingReasoning, encode_reasoning_signature};
 use super::reducer::{
     CodexRateLimits, CodexUsage, STOP_END_TURN, STOP_TOOL_USE, map_codex_usage_to_anthropic,
-    parse_codex_rate_limits,
+    parse_codex_rate_limits, parse_codex_usage,
 };
 
 const BUFFERED_READ_REPAIR_TRAILING_WHITESPACE_BYTES: usize = 1_024;
@@ -1361,26 +1361,6 @@ fn output_index(payload: &serde_json::Value) -> usize {
         .get("output_index")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize
-}
-
-fn parse_codex_usage(response: &serde_json::Value) -> CodexUsage {
-    let usage = match response.get("usage") {
-        Some(u) => u,
-        None => return CodexUsage::default(),
-    };
-    CodexUsage {
-        input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
-        output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
-        input_tokens_details_cached: usage
-            .get("input_tokens_details")
-            .and_then(|d| d.get("cached_tokens"))
-            .and_then(|v| v.as_u64()),
-        output_tokens_details_reasoning: usage
-            .get("output_tokens_details")
-            .and_then(|d| d.get("reasoning_tokens"))
-            .and_then(|v| v.as_u64()),
-        rate_limits: None,
-    }
 }
 
 pub(crate) fn repair_whitespace_stalled_read_args(

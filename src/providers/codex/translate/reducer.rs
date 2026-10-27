@@ -53,6 +53,7 @@ pub struct CodexUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub input_tokens_details_cached: Option<u64>,
+    pub input_tokens_details_cache_write: Option<u64>,
     pub output_tokens_details_reasoning: Option<u64>,
     /// Latest `codex.rate_limits` snapshot seen on the stream that produced
     /// this usage. Codex sends it as its own event before any usage exists,
@@ -966,7 +967,7 @@ fn describe_open_blocks(
     out
 }
 
-fn parse_codex_usage(response: &serde_json::Value) -> CodexUsage {
+pub(super) fn parse_codex_usage(response: &serde_json::Value) -> CodexUsage {
     let usage = match response.get("usage") {
         Some(u) => u,
         None => return CodexUsage::default(),
@@ -977,6 +978,10 @@ fn parse_codex_usage(response: &serde_json::Value) -> CodexUsage {
         input_tokens_details_cached: usage
             .get("input_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64()),
+        input_tokens_details_cache_write: usage
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cache_write_tokens"))
             .and_then(|v| v.as_u64()),
         output_tokens_details_reasoning: usage
             .get("output_tokens_details")
@@ -1099,13 +1104,14 @@ pub fn map_codex_usage_to_anthropic(
         None => return AnthropicUsage::default(),
     };
     let cached = usage.input_tokens_details_cached.unwrap_or(0);
+    let written = usage.input_tokens_details_cache_write.unwrap_or(0);
     let total_input = usage.input_tokens.unwrap_or(0);
-    let input_tokens = total_input.saturating_sub(cached);
+    let input_tokens = total_input.saturating_sub(cached).saturating_sub(written);
 
     let mut result = AnthropicUsage {
         input_tokens,
         output_tokens: usage.output_tokens.unwrap_or(0),
-        cache_creation_input_tokens: 0,
+        cache_creation_input_tokens: written,
         cache_read_input_tokens: cached,
         server_tool_use: None,
         output_tokens_details: usage
@@ -1715,6 +1721,7 @@ mod tests {
             input_tokens: Some(100),
             output_tokens: Some(50),
             input_tokens_details_cached: Some(20),
+            input_tokens_details_cache_write: None,
             output_tokens_details_reasoning: None,
             rate_limits: None,
         };
@@ -1722,8 +1729,27 @@ mod tests {
         assert_eq!(mapped.input_tokens, 80);
         assert_eq!(mapped.output_tokens, 50);
         assert_eq!(mapped.cache_read_input_tokens, 20);
+        assert_eq!(mapped.cache_creation_input_tokens, 0);
         assert!(mapped.output_tokens_details.is_none());
         assert!(mapped.codex_rate_limits.is_none());
+    }
+
+    #[test]
+    fn map_usage_reports_cache_writes_out_of_fresh_input() {
+        let response = json!({"usage": {
+            "input_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 40, "cache_write_tokens": 50},
+            "output_tokens": 10
+        }});
+        let mapped = map_codex_usage_to_anthropic(&Some(parse_codex_usage(&response)), None);
+        assert_eq!(
+            (
+                mapped.input_tokens,
+                mapped.cache_read_input_tokens,
+                mapped.cache_creation_input_tokens
+            ),
+            (10, 40, 50)
+        );
     }
 
     #[test]
@@ -1732,6 +1758,7 @@ mod tests {
             input_tokens: Some(100),
             output_tokens: Some(50),
             input_tokens_details_cached: None,
+            input_tokens_details_cache_write: None,
             output_tokens_details_reasoning: Some(30),
             rate_limits: Some(Box::new(CodexRateLimits {
                 plan_type: Some("prolite".into()),

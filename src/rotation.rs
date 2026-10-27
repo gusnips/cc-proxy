@@ -293,11 +293,67 @@ fn retry_deadline(response: &Response, now: u64) -> Option<Sitout> {
     }
 }
 
-/// Longest one request waits for the first cooling account instead of
+/// Longest one request waits for the first cooling account by default instead of
 /// answering 429. Short resets ride out inside the request so the agent turn
-/// keeps going; anything longer surfaces as a 429 with the earliest reset,
-/// which the client retries on its own.
+/// keeps going; anything longer surfaces as a 429 unless `auth.waitForReset`
+/// asks cc-proxy to hold until the reset time.
 const MAX_ROTATION_WAIT_MS: u64 = 120_000;
+const PAUSE_POLL_MS: u64 = 200;
+const RESET_WAIT_SLICE_MS: u64 = 500;
+
+/// Holds a request before it starts an upstream call while `auth.pauseRequests`
+/// is on. Active replies keep streaming; only new upstream work waits here.
+pub(crate) async fn wait_while_paused(
+    req_id: &str,
+    monitor: Option<&crate::monitor::MonitorHandle>,
+) {
+    wait_while_paused_with(
+        req_id,
+        monitor,
+        crate::config::auth_pause_requests,
+        std::time::Duration::from_millis(PAUSE_POLL_MS),
+    )
+    .await;
+}
+
+pub(crate) async fn wait_while_paused_with(
+    req_id: &str,
+    monitor: Option<&crate::monitor::MonitorHandle>,
+    is_paused: impl Fn() -> bool,
+    poll: std::time::Duration,
+) {
+    if !is_paused() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    if let Some(monitor) = monitor {
+        monitor.request_held(req_id, None);
+    }
+    let log = crate::logging::create_logger("auth");
+    log.info(
+        "request_paused",
+        Some(serde_json::Map::from_iter([(
+            "reqId".into(),
+            serde_json::json!(req_id),
+        )])),
+    );
+    while is_paused() {
+        tokio::time::sleep(poll).await;
+    }
+    if let Some(monitor) = monitor {
+        monitor.request_released(req_id);
+    }
+    log.info(
+        "request_resumed",
+        Some(serde_json::Map::from_iter([
+            ("reqId".into(), serde_json::json!(req_id)),
+            (
+                "waitMs".into(),
+                serde_json::json!(started.elapsed().as_millis() as u64),
+            ),
+        ])),
+    );
+}
 
 /// Current account first, then the saved order. Every account gets at most one
 /// provider call per request, even if a very short cooldown expires meanwhile.
@@ -337,7 +393,7 @@ fn first_release(
 ) -> Option<u64> {
     list.iter()
         .filter_map(|a| {
-            cooldowns
+            let governing = cooldowns
                 .iter()
                 .filter(|c| {
                     c.provider == provider
@@ -345,8 +401,8 @@ fn first_release(
                         && c.model.as_deref().is_none_or(|m| m == model)
                         && c.until_ms > now
                 })
-                .map(|c| c.until_ms)
-                .max()
+                .max_by_key(|c| c.until_ms)?;
+            (!governing.spent).then_some(governing.until_ms)
         })
         .min()
 }
@@ -717,6 +773,7 @@ async fn execute_with(
     let mut waited = false;
     let model = body.model.as_deref().unwrap_or_default();
     loop {
+        wait_while_paused(&context.req_id, context.monitor.as_ref()).await;
         let selection = (|| -> Result<_> {
             let list = servable(provider.cli().accounts(), accounts, accounts.list()?);
             let Some(current) = accounts.current()? else {
@@ -752,40 +809,107 @@ async fn execute_with(
         };
         let Some(next) = next else {
             // Nothing ready: hold the request until the first account frees
-            // up (once per request, bounded), so the turn continues on it
-            // instead of dying on a 429.
-            if !waited {
-                let now = now_ms();
-                if let Some(until) = first_release(&list, &snapshot, provider.name(), model, now)
-                    && until > now
-                {
-                    let wait = until - now;
-                    if wait <= MAX_ROTATION_WAIT_MS {
-                        waited = true;
-                        crate::logging::create_logger("auth").info(
-                            "account_wait",
-                            Some(serde_json::Map::from_iter([
-                                ("provider".into(), serde_json::json!(provider.name())),
-                                ("waitMs".into(), serde_json::json!(wait)),
-                                ("reqId".into(), serde_json::json!(&context.req_id)),
-                            ])),
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
-                        let fresh = match cooldowns.read() {
-                            Ok(entries) => entries,
-                            Err(error) => return storage_error(error),
-                        };
-                        let now = now_ms();
-                        tried.retain(|id| {
-                            fresh.iter().any(|c| {
-                                c.provider == provider.name()
-                                    && c.account == *id
-                                    && c.model.as_deref().is_none_or(|m| m == model)
-                                    && c.until_ms > now
-                            })
-                        });
-                        continue;
+            // up (bounded by default, or until reset when `auth.waitForReset`
+            // is on), so the turn continues on it instead of dying on a 429.
+            let hold_until_reset = crate::config::auth_wait_for_reset();
+            if let Some(mut until) = first_release(&list, &snapshot, provider.name(), model, now)
+                && until > now
+                && ((!waited && until - now <= MAX_ROTATION_WAIT_MS) || hold_until_reset)
+            {
+                let short_wait = !waited && until - now <= MAX_ROTATION_WAIT_MS;
+                waited = true;
+                crate::logging::create_logger("auth").info(
+                    "account_wait",
+                    Some(serde_json::Map::from_iter([
+                        ("provider".into(), serde_json::json!(provider.name())),
+                        ("waitMs".into(), serde_json::json!(until - now)),
+                        ("reqId".into(), serde_json::json!(&context.req_id)),
+                    ])),
+                );
+                if let Some(monitor) = context.monitor.as_ref() {
+                    monitor.request_held(&context.req_id, Some(until));
+                }
+                loop {
+                    let now = now_ms();
+                    if now >= until {
+                        break;
                     }
+                    if !short_wait && !crate::config::auth_wait_for_reset() {
+                        break;
+                    }
+                    let slice = (until - now).clamp(1, RESET_WAIT_SLICE_MS);
+                    tokio::time::sleep(std::time::Duration::from_millis(slice)).await;
+                    let fresh = match cooldowns.read() {
+                        Ok(entries) => entries,
+                        Err(error) => {
+                            if let Some(monitor) = context.monitor.as_ref() {
+                                monitor.request_released(&context.req_id);
+                            }
+                            return storage_error(error);
+                        }
+                    };
+                    let now = now_ms();
+                    tried.retain(|id| {
+                        fresh.iter().any(|c| {
+                            c.provider == provider.name()
+                                && c.account == *id
+                                && c.model.as_deref().is_none_or(|m| m == model)
+                                && c.until_ms > now
+                        })
+                    });
+                    if eligible(
+                        &list,
+                        &current.id,
+                        &tried,
+                        &fresh,
+                        provider.name(),
+                        model,
+                        now,
+                    )
+                    .is_some()
+                    {
+                        break;
+                    }
+                    let Some(next_until) =
+                        first_release(&list, &fresh, provider.name(), model, now)
+                    else {
+                        break;
+                    };
+                    if next_until != until {
+                        until = next_until;
+                        if let Some(monitor) = context.monitor.as_ref() {
+                            monitor.request_held(&context.req_id, Some(until));
+                        }
+                    }
+                }
+                if let Some(monitor) = context.monitor.as_ref() {
+                    monitor.request_released(&context.req_id);
+                }
+                let fresh = match cooldowns.read() {
+                    Ok(entries) => entries,
+                    Err(error) => return storage_error(error),
+                };
+                let now = now_ms();
+                tried.retain(|id| {
+                    fresh.iter().any(|c| {
+                        c.provider == provider.name()
+                            && c.account == *id
+                            && c.model.as_deref().is_none_or(|m| m == model)
+                            && c.until_ms > now
+                    })
+                });
+                if eligible(
+                    &list,
+                    &current.id,
+                    &tried,
+                    &fresh,
+                    provider.name(),
+                    model,
+                    now,
+                )
+                .is_some()
+                {
+                    continue;
                 }
             }
             return all_limited(&list, &snapshot, provider.name(), model, now)

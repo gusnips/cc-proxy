@@ -16,6 +16,10 @@ pub(super) enum Action {
     DisableRouting,
     /// Sends Claude Code through the proxy again, with the pool as it is.
     EnableRouting,
+    /// Holds new generations until resumed, or lets held ones go.
+    SetPauseRequests(bool),
+    /// Holds streamed Messages requests when every enabled account waits on a confirmed reset.
+    SetWaitForReset(bool),
     /// Saves the pool in its new order after moving a row.
     SavePool {
         provider: String,
@@ -87,6 +91,32 @@ impl Action {
                 route::preflight()?;
                 route::deactivate()?;
                 Ok("Saved. Claude Code uses its original settings and login, without the proxy. The proxy keeps running.".into())
+            }
+            Self::SetPauseRequests(paused) => {
+                crate::config_keys::write_value(
+                    "auth.pauseRequests",
+                    serde_json::Value::Bool(*paused),
+                )?;
+                Ok(if *paused {
+                    "Saved. New requests pause before they start. Running replies finish. Press p to resume. This stays on until you resume.".into()
+                } else {
+                    "Saved. Resumed. Held and new requests run now.".into()
+                })
+            }
+            Self::SetWaitForReset(wait) => {
+                crate::config_keys::write_value(
+                    "auth.waitForReset",
+                    serde_json::Value::Bool(*wait),
+                )?;
+                Ok(if *wait {
+                    if config::auth_auto_rotate() {
+                        "Saved. Auto-wait for reset is on. When every enabled account waits on a confirmed reset, streamed Messages requests hold until the earliest reset.".into()
+                    } else {
+                        "Saved. Auto-wait for reset is on. Turn on Auto-rotate accounts (3 Settings) too so streamed Messages requests wait when every enabled account hits a confirmed reset.".into()
+                    }
+                } else {
+                    "Saved. Auto-wait for reset is off. When every enabled account is waiting, requests stop with 429 at once.".into()
+                })
             }
             Self::SavePool {
                 provider,

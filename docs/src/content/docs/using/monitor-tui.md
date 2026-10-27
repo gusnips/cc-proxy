@@ -88,11 +88,16 @@ until it reconnects.
 ## Settings
 
 Press `3` for settings. It is the same list as `cc-proxy config`, with
-auto-rotate first. Use Up and Down to move, Left and Right to change a yes or
-no, and Enter to type a value. Left and Right never change tab, so use Tab,
-Shift-Tab or `1` to `3` to leave. Changes save at once and apply to new requests,
-except the port and address, which need `cc-proxy restart`. Type to search the
-list. Escape clears the search first, then goes back to Accounts.
+auto-rotate, pause and wait-for-reset first. Each row shows a plain name (and
+its dotted key on wide screens), and the bottom detail area shows the dotted
+key, what it does and its current value. Use Up and Down to move, Left and Right
+to change a yes or no, and Enter to type a value. Left and Right never change
+tab, so use Tab, Shift-Tab or `1` to `3` to leave. Changes save at once and
+apply to new requests, except the port and address, which need
+`cc-proxy restart`. Press `/` (or type directly in `cc-proxy config`) to search
+by name, key or description. Escape clears the search first, then goes back to
+Accounts. API keys are managed as saved accounts (`cc-proxy auth login`), not in
+Settings.
 
 Auto-rotate is off by default. A provider must confirm a limit and a reset time,
 or say the credit is spent, before the proxy switches. An account out of credit
@@ -100,6 +105,26 @@ shows `out of credit` and when cc-proxy tries it again (a recheck every 30
 minutes, not a reset). After you add credit, cc-proxy retries at that time.
 When a row is spent, the next row that is on answers. Rotation applies to
 Messages requests before output starts, not every API.
+
+### Pause and wait for reset
+
+Press `p` on any tab (outside a text field, menu or overlay) to pause or resume
+new requests (`auth.pauseRequests`). While paused, new generations hold before
+they start, replies already streaming finish normally, and local `count_tokens`,
+health, usage and configuration stay usable. The header on every tab shows
+`Paused · 0 requests queued · p resume` when idle or `Paused · N requests waiting · p resume`
+when requests are held. Held requests do not mark an account with `●`.
+
+Press `w` on any tab to toggle `auth.waitForReset`. When both `auth.autoRotate`
+and `auth.waitForReset` are on and every enabled account in the pool is waiting
+on a provider-confirmed reset time, streamed Messages requests hold in the proxy
+until the earliest reset instead of failing immediately with 429. The header and
+Accounts summary show how many requests are waiting and the countdown to the
+next reset, and note that the reset time is a recheck rather than guaranteed
+availability. If a provider did not report a reset time or every account is out
+of credit, requests do not wait. Both `auth.pauseRequests` and
+`auth.waitForReset` are saved in `config.json`, so they stay in effect if you
+close the monitor or restart the proxy until you change them back.
 
 ### Usage and wait timers
 
@@ -167,9 +192,11 @@ the moment the proxy started and reset when it restarts.
 
 | Key                    | Action                                                       |
 | ---------------------- | ------------------------------------------------------------ |
-| `1`, `p`               | Open Accounts                                                |
+| `1`                    | Open Accounts                                                |
 | `2`                    | Open Activity                                                |
 | `3`                    | Open Settings                                                |
+| `p`                    | Pause or resume new requests (`auth.pauseRequests`)          |
+| `w`                    | Toggle waiting for account reset (`auth.waitForReset`)       |
 | `Tab`, `Shift-Tab`     | Change tab                                                   |
 | `→`                    | Open actions or details, or change a choice in Settings      |
 | `←`                    | Go back one step, or change a choice in Settings             |

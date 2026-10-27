@@ -570,16 +570,17 @@ fn config_set_get_list_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(contains("18080"))
         .stdout(contains("codex.fullLane"));
 
-    // Secrets never print.
-    run(&["config", "set", "opencode.apiKey", "shh"]).success();
-    let mut cmd = Command::cargo_bin("cc-proxy")?;
-    isolated_opencode_env(&mut cmd, &temp);
-    let assert = cmd
-        .args(["config", "get", "opencode.apiKey"])
-        .assert()
-        .success();
-    let out = String::from_utf8(assert.get_output().stdout.clone())?;
-    assert!(out.contains("set") && !out.contains("shh"));
+    // API keys belong to `auth login`, not `config set`.
+    run(&["config", "set", "opencode.apiKey", "shh"]).failure();
+    run(&["config", "set", "anthropic.apiKey", "shh"]).failure();
+    run(&["config", "set", "auth.pauseRequests", "true"]).success();
+    run(&["config", "get", "auth.pauseRequests"])
+        .success()
+        .stdout(contains("true"));
+    run(&["config", "set", "auth.waitForReset", "true"]).success();
+    run(&["config", "get", "auth.waitForReset"])
+        .success()
+        .stdout(contains("true"));
 
     run(&["config", "set", "port", "abc"]).failure();
     run(&["config", "set", "aliasProvider", "codex"]).failure();

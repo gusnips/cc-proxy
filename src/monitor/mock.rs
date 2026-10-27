@@ -392,6 +392,8 @@ fn mock_state_for_tick(
     MonitorState {
         started_at,
         uptime: now.duration_since(started_at).unwrap_or_default(),
+        requests_paused: false,
+        wait_for_reset: false,
         sessions,
         active,
         recent: recent.into_iter().collect(),
@@ -702,6 +704,7 @@ fn active_request(
         generation_finished_at: None,
         generation_duration: None,
         status,
+        wait_until_ms: None,
         streamed_bytes: 0,
         stream_chunks: 0,
         input_tokens: None,

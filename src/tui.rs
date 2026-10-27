@@ -171,6 +171,7 @@ fn run_monitor_loop(
         connected: true,
         proxy_off: false,
         saving: None,
+        hold: HoldOverrides::default(),
         tick: 0,
         phase: MonitorPhase::Running,
         shutdown: config.shutdown,
@@ -206,8 +207,11 @@ fn run_monitor_events(
         app.clamp_selection(state.sessions.len(), state.recent.len());
         app.tick = app.tick.wrapping_add(1);
         finish_saving(app);
+        app.sync_hold_overrides(state);
         if app.page == Page::Accounts {
             app.providers.observe(state);
+            app.providers
+                .set_hold_state(app.requests_paused(state), app.wait_for_reset(state));
             app.providers.refresh();
         }
         terminal.draw(|frame| {
@@ -301,9 +305,27 @@ fn run_monitor_events(
                         app.page = Page::Accounts;
                         run_account_action(terminal, app, state, controls::Action::StartProxy)?;
                     }
-                    KeyCode::Char('1') | KeyCode::Char('p') => app.open_page(Page::Accounts),
+                    KeyCode::Char('1') => app.open_page(Page::Accounts),
                     KeyCode::Char('2') => app.open_page(Page::Activity),
                     KeyCode::Char('3') => app.open_page(Page::Settings),
+                    KeyCode::Char('p') => {
+                        let next = !app.requests_paused(state);
+                        run_account_action(
+                            terminal,
+                            app,
+                            state,
+                            controls::Action::SetPauseRequests(next),
+                        )?;
+                    }
+                    KeyCode::Char('w') => {
+                        let next = !app.wait_for_reset(state);
+                        run_account_action(
+                            terminal,
+                            app,
+                            state,
+                            controls::Action::SetWaitForReset(next),
+                        )?;
+                    }
                     KeyCode::Tab => app.open_page(app.page.next()),
                     KeyCode::BackTab => app.open_page(app.page.previous()),
                     _ if app.page == Page::Settings => {
@@ -387,6 +409,13 @@ enum MonitorPhase {
     ShuttingDown,
 }
 
+#[derive(Clone, Debug, Default)]
+struct HoldOverrides {
+    paused: Option<bool>,
+    wait_for_reset: Option<bool>,
+    notice: Option<(String, bool)>,
+}
+
 struct MonitorApp {
     listen_url: String,
     setup_text: String,
@@ -405,6 +434,7 @@ struct MonitorApp {
     proxy_off: bool,
     /// A change saving behind the monitor, and its answer when it ends.
     saving: Option<mpsc::Receiver<(controls::Action, anyhow::Result<String>)>>,
+    hold: HoldOverrides,
     tick: usize,
     phase: MonitorPhase,
     shutdown: Option<oneshot::Sender<()>>,
@@ -412,7 +442,39 @@ struct MonitorApp {
 }
 
 impl MonitorApp {
+    fn requests_paused(&self, state: &MonitorSnapshot) -> bool {
+        if self.accounts_mode == providers::Mode::Demo
+            && let Some(settings) = &self.settings
+            && let Some(paused) = settings.bool_value("auth.pauseRequests")
+        {
+            return paused;
+        }
+        self.hold.paused.unwrap_or(state.requests_paused)
+    }
+
+    fn wait_for_reset(&self, state: &MonitorSnapshot) -> bool {
+        if self.accounts_mode == providers::Mode::Demo
+            && let Some(settings) = &self.settings
+            && let Some(wait) = settings.bool_value("auth.waitForReset")
+        {
+            return wait;
+        }
+        self.hold.wait_for_reset.unwrap_or(state.wait_for_reset)
+    }
+
+    fn sync_hold_overrides(&mut self, state: &MonitorSnapshot) {
+        if self.accounts_mode != providers::Mode::Demo {
+            if self.hold.paused == Some(state.requests_paused) {
+                self.hold.paused = None;
+            }
+            if self.hold.wait_for_reset == Some(state.wait_for_reset) {
+                self.hold.wait_for_reset = None;
+            }
+        }
+    }
+
     fn open_page(&mut self, page: Page) {
+        self.hold.notice = None;
         if page == Page::Settings
             && self.page != page
             && let Some(settings) = &mut self.settings
@@ -624,9 +686,21 @@ fn run_account_action(
     action: controls::Action,
 ) -> anyhow::Result<()> {
     match app.accounts_mode {
-        providers::Mode::Remote => return Ok(()),
+        providers::Mode::Remote => {
+            if matches!(
+                action,
+                controls::Action::SetPauseRequests(_) | controls::Action::SetWaitForReset(_)
+            ) {
+                app.hold.notice = Some((
+                    "Read-only --url connection. Run cc-proxy open on the proxy computer to pause or change wait settings."
+                        .into(),
+                    true,
+                ));
+            }
+            return Ok(());
+        }
         providers::Mode::Demo => {
-            app.providers.preview_action(&action);
+            preview_app_action(app, &action);
             return Ok(());
         }
         providers::Mode::Local => {}
@@ -638,13 +712,17 @@ fn run_account_action(
         } else {
             "The proxy connection is lost. Wait for it to reconnect before changing accounts or routing"
         };
+        app.hold.notice = Some((format!("{reason}."), true));
         app.providers.finish_action(Err(anyhow::anyhow!(reason)));
         return Ok(());
     }
     if !action.needs_terminal() {
         if matches!(
             action,
-            controls::Action::EnableRouting | controls::Action::DisableRouting
+            controls::Action::EnableRouting
+                | controls::Action::DisableRouting
+                | controls::Action::SetPauseRequests(_)
+                | controls::Action::SetWaitForReset(_)
         ) {
             start_saving(app, action);
         } else {
@@ -674,12 +752,49 @@ fn run_account_action(
     Ok(())
 }
 
+fn preview_app_action(app: &mut MonitorApp, action: &controls::Action) {
+    app.providers.preview_action(action);
+    match action {
+        controls::Action::SetPauseRequests(paused) => {
+            app.hold.paused = Some(*paused);
+            if let Some(settings) = &mut app.settings {
+                settings.set_demo_bool("auth.pauseRequests", *paused);
+            }
+            let message = if *paused {
+                "Demo only: paused new requests. Press p to resume. Nothing on this computer changed."
+            } else {
+                "Demo only: resumed requests. Nothing on this computer changed."
+            };
+            app.hold.notice = Some((message.into(), false));
+        }
+        controls::Action::SetWaitForReset(wait) => {
+            app.hold.wait_for_reset = Some(*wait);
+            if let Some(settings) = &mut app.settings {
+                settings.set_demo_bool("auth.waitForReset", *wait);
+            }
+            let message = if *wait {
+                "Demo only: auto-wait for reset is on. Nothing on this computer changed."
+            } else {
+                "Demo only: auto-wait for reset is off. Nothing on this computer changed."
+            };
+            app.hold.notice = Some((message.into(), false));
+        }
+        _ => {}
+    }
+}
+
 /// Runs a change that never asks a question behind the monitor, so keys, tabs
 /// and live requests keep working while it saves. One change runs at a time:
 /// while one is running, the notice already says "Saving...".
 fn start_saving(app: &mut MonitorApp, action: controls::Action) {
     if app.saving.is_some() {
         return;
+    }
+    if matches!(
+        action,
+        controls::Action::SetPauseRequests(_) | controls::Action::SetWaitForReset(_)
+    ) {
+        app.hold.notice = Some(("Saving...".into(), false));
     }
     app.providers.show_saving();
     let (send, receive) = mpsc::channel();
@@ -703,9 +818,10 @@ fn finish_saving(app: &mut MonitorApp) {
         Err(mpsc::TryRecvError::Empty) => {}
         Err(mpsc::TryRecvError::Disconnected) => {
             app.saving = None;
-            app.providers.finish_action(Err(anyhow::anyhow!(
-                "The change stopped before it finished. Press r to refresh and see what was saved"
-            )));
+            let message =
+                "The change stopped before it finished. Press r to refresh and see what was saved";
+            app.hold.notice = Some((format!("{message}."), true));
+            app.providers.finish_action(Err(anyhow::anyhow!(message)));
         }
     }
 }
@@ -715,7 +831,7 @@ fn finish_account_action(
     action: &controls::Action,
     result: anyhow::Result<String>,
 ) {
-    if result.is_ok() {
+    if let Ok(message) = &result {
         match action {
             controls::Action::RemoveAccount { provider, id } => {
                 app.providers.forget_account(provider, id)
@@ -723,6 +839,20 @@ fn finish_account_action(
             // The row shows its new name at once. The next read confirms it.
             controls::Action::RenameAccount { provider, id, name } => {
                 let _ = app.providers.rename_account(provider, id, name);
+            }
+            controls::Action::SetPauseRequests(paused) => {
+                app.hold.paused = Some(*paused);
+                app.hold.notice = Some((message.clone(), false));
+                if let Some(settings) = &mut app.settings {
+                    settings.reload();
+                }
+            }
+            controls::Action::SetWaitForReset(wait) => {
+                app.hold.wait_for_reset = Some(*wait);
+                app.hold.notice = Some((message.clone(), false));
+                if let Some(settings) = &mut app.settings {
+                    settings.reload();
+                }
             }
             _ => {}
         }
@@ -737,6 +867,21 @@ fn finish_account_action(
         ) {
             app.providers.reload_saved();
         }
+    } else if let Err(error) = &result
+        && matches!(
+            action,
+            controls::Action::SetPauseRequests(_) | controls::Action::SetWaitForReset(_)
+        )
+    {
+        let key = if matches!(action, controls::Action::SetPauseRequests(_)) {
+            "p"
+        } else {
+            "w"
+        };
+        let message = format!(
+            "Couldn't save the change: {error:#}. Press {key} to try again, or 3 for Settings."
+        );
+        app.hold.notice = Some((message, true));
     }
     if *action == controls::Action::StartProxy {
         app.providers.finish_start(result);
@@ -757,9 +902,14 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
     ])
     .areas(area);
     render_header(frame, header, app, state);
-    render_tabs(frame, tabs, app.page);
+    render_tabs(frame, tabs, app, state);
     match app.page {
-        Page::Accounts => app.providers.render(frame, body),
+        Page::Accounts => {
+            app.providers.observe(state);
+            app.providers
+                .set_hold_state(app.requests_paused(state), app.wait_for_reset(state));
+            app.providers.render(frame, body);
+        }
         Page::Activity => render_activity(frame, body, app, state),
         Page::Settings => {
             if let Some(settings) = &mut app.settings {
@@ -775,7 +925,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
             }
         }
     }
-    render_footer(frame, footer, app);
+    render_footer(frame, footer, app, state);
 
     if app.show_setup {
         render_setup_overlay(frame, area, &app.setup_text);
@@ -790,32 +940,181 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
     }
 }
 
-fn render_tabs(frame: &mut ratatui::Frame<'_>, area: Rect, page: Page) {
+struct HoldStatus {
+    paused: bool,
+    wait_for_reset: bool,
+    paused_count: usize,
+    waiting_count: usize,
+    next_reset_left: Option<String>,
+}
+
+impl HoldStatus {
+    fn from_state(app: &MonitorApp, state: &MonitorSnapshot) -> Self {
+        let now_ms = state
+            .snapshot_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_millis() as u64;
+        let paused_count = state
+            .active
+            .iter()
+            .filter(|request| request.status == crate::monitor::RequestStatus::Paused)
+            .count();
+        let waiting_count = state
+            .active
+            .iter()
+            .filter(|request| request.status == crate::monitor::RequestStatus::Waiting)
+            .count();
+        let next_reset_left = state
+            .active
+            .iter()
+            .filter(|request| request.status == crate::monitor::RequestStatus::Waiting)
+            .filter_map(|request| request.wait_until_ms)
+            .min()
+            .filter(|&until| until > now_ms)
+            .map(|until| ui::duration(Duration::from_millis(until - now_ms)));
+        Self {
+            paused: app.requests_paused(state),
+            wait_for_reset: app.wait_for_reset(state),
+            paused_count,
+            waiting_count,
+            next_reset_left,
+        }
+    }
+
+    fn held_count(&self) -> usize {
+        self.paused_count + self.waiting_count
+    }
+
+    fn banner(&self, width: u16) -> Option<String> {
+        let wait_tag = if self.wait_for_reset {
+            "auto-wait on"
+        } else {
+            "auto-wait off"
+        };
+        if self.paused {
+            let held = self.held_count();
+            let queue = match held {
+                0 => "0 requests queued".to_string(),
+                1 => "1 request waiting".to_string(),
+                n => format!("{n} requests waiting"),
+            };
+            return Some(if width >= 72 {
+                format!("Paused · {queue} · {wait_tag} · p resume")
+            } else if held == 0 {
+                "Paused · 0 queued · p resume".to_string()
+            } else {
+                format!("Paused · {held} waiting · p resume")
+            });
+        }
+        if self.waiting_count > 0 {
+            let noun = if self.waiting_count == 1 {
+                "request"
+            } else {
+                "requests"
+            };
+            let reset_note = match &self.next_reset_left {
+                Some(left) => format!("next reset in {left} (rechecks then)"),
+                None => "reset time unknown, rechecking".to_string(),
+            };
+            return Some(if width >= 84 {
+                format!(
+                    "Waiting for reset · {} {noun} waiting · {reset_note} · {wait_tag} · p pause",
+                    self.waiting_count
+                )
+            } else {
+                match &self.next_reset_left {
+                    Some(left) => format!(
+                        "Waiting · {} waiting · reset in {left} · p pause",
+                        self.waiting_count
+                    ),
+                    None => format!(
+                        "Waiting · {} waiting · rechecking · p pause",
+                        self.waiting_count
+                    ),
+                }
+            });
+        }
+        None
+    }
+}
+
+fn render_tabs(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &MonitorApp,
+    state: &MonitorSnapshot,
+) {
+    let page = app.page;
     let tabs = [
         (Page::Accounts, " 1 Accounts "),
         (Page::Activity, " 2 Activity "),
         (Page::Settings, " 3 Settings "),
     ];
-    frame.render_widget(
-        Paragraph::new(Line::from(
-            tabs.into_iter()
-                .map(|(tab, label)| {
-                    Span::styled(
-                        label,
-                        if page == tab {
-                            Style::default()
-                                .fg(TEAL)
-                                .bg(SELECTED_BG)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(DIM_WHITE)
-                        },
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )),
-        area,
+    let left = Line::from(
+        tabs.into_iter()
+            .map(|(tab, label)| {
+                Span::styled(
+                    label,
+                    if page == tab {
+                        Style::default()
+                            .fg(TEAL)
+                            .bg(SELECTED_BG)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(DIM_WHITE)
+                    },
+                )
+            })
+            .collect::<Vec<_>>(),
     );
+    let left_width = left.width() as u16;
+    frame.render_widget(Paragraph::new(left), area);
+
+    let room = area.width.saturating_sub(left_width + 2);
+    if room < 12 {
+        return;
+    }
+    let right = if let Some((notice, problem)) = &app.hold.notice {
+        Line::from(Span::styled(
+            format!(
+                "{} ",
+                ellipsize(notice, usize::from(room).saturating_sub(1))
+            ),
+            Style::default().fg(if *problem { YELLOW } else { GREEN }),
+        ))
+    } else {
+        let hold = HoldStatus::from_state(app, state);
+        let pause_span = if hold.paused {
+            Span::styled(
+                "Paused (p resume)",
+                Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled("p pause", Style::default().fg(DIM_WHITE))
+        };
+        let wait_span = if hold.wait_for_reset {
+            Span::styled("w auto-wait: on ", Style::default().fg(TEAL))
+        } else {
+            Span::styled("w auto-wait: off ", Style::default().fg(DIM))
+        };
+        Line::from(vec![
+            pause_span,
+            Span::styled(" · ", Style::default().fg(DIM)),
+            wait_span,
+        ])
+    };
+    let right_width = (right.width() as u16).min(room);
+    if right_width > 0 {
+        frame.render_widget(
+            Paragraph::new(right).alignment(Alignment::Right),
+            Rect {
+                x: area.x + area.width - right_width,
+                width: right_width,
+                ..area
+            },
+        );
+    }
 }
 
 fn render_activity(
@@ -845,7 +1144,14 @@ fn render_activity(
             state.snapshot_at,
         ),
     }
-    render_active(frame, root[1], &state.active, app.tick);
+    render_active_with_pause(
+        frame,
+        root[1],
+        &state.active,
+        app.tick,
+        app.requests_paused(state),
+        state.snapshot_at,
+    );
     render_recent(
         frame,
         root[2],
@@ -864,7 +1170,34 @@ fn render_header(
     state: &MonitorSnapshot,
 ) {
     let (face, mood) = header_face(app, state);
+    let hold = HoldStatus::from_state(app, state);
+    let banner = (app.phase != MonitorPhase::ShuttingDown && !app.proxy_off && app.connected)
+        .then(|| hold.banner(area.width))
+        .flatten();
     if app.page != Page::Activity {
+        if let Some(banner) = banner {
+            let mut spans = vec![
+                Span::styled(
+                    format!(" {face} cc-proxy "),
+                    Style::default()
+                        .fg(BG)
+                        .bg(mood.color())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {banner}"),
+                    Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+                ),
+            ];
+            if area.width >= 96 {
+                spans.push(Span::styled(
+                    format!("  up {}", ui::duration(state.uptime)),
+                    Style::default().fg(DIM_WHITE),
+                ));
+            }
+            frame.render_widget(Paragraph::new(Line::from(spans)), area);
+            return;
+        }
         let status = if app.phase == MonitorPhase::ShuttingDown {
             "Shutting down"
         } else if app.proxy_off {
@@ -880,6 +1213,11 @@ fn render_header(
         } else {
             "Serving requests"
         };
+        let wait_suffix = if hold.wait_for_reset && !app.proxy_off {
+            "  auto-wait on"
+        } else {
+            ""
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
@@ -894,7 +1232,7 @@ fn render_header(
                         format!("  {status}")
                     } else {
                         format!(
-                            "  {status}  {} active  up {}",
+                            "  {status}  {} active  up {}{wait_suffix}",
                             state.active.len(),
                             ui::duration(state.uptime)
                         )
@@ -908,25 +1246,37 @@ fn render_header(
     }
     let label = Style::default().fg(DIM);
     let value = Style::default().fg(WHITE).add_modifier(Modifier::BOLD);
-    let left = Line::from(vec![
-        Span::styled(
-            format!(" {face} cc-proxy "),
-            Style::default()
-                .fg(BG)
-                .bg(mood.color())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  {}", app.listen_url),
-            Style::default().fg(DIM_WHITE),
-        ),
-        Span::styled("  up ", label),
-        Span::styled(ui::duration(state.uptime), value),
-        Span::styled("  sessions ", label),
-        Span::styled(state.sessions.len().to_string(), value),
-        Span::styled("  active ", label),
-        Span::styled(state.active.len().to_string(), value),
-    ]);
+    let mut left_spans = vec![Span::styled(
+        format!(" {face} cc-proxy "),
+        Style::default()
+            .fg(BG)
+            .bg(mood.color())
+            .add_modifier(Modifier::BOLD),
+    )];
+    if let Some(banner) = &banner {
+        left_spans.push(Span::styled(
+            format!("  {banner}"),
+            Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if banner.is_none() || area.width >= 120 {
+        left_spans.extend([
+            Span::styled(
+                format!("  {}", app.listen_url),
+                Style::default().fg(DIM_WHITE),
+            ),
+            Span::styled("  up ", label),
+            Span::styled(ui::duration(state.uptime), value),
+            Span::styled("  sessions ", label),
+            Span::styled(state.sessions.len().to_string(), value),
+            Span::styled("  active ", label),
+            Span::styled(state.active.len().to_string(), value),
+        ]);
+        if banner.is_none() && hold.wait_for_reset {
+            left_spans.push(Span::styled("  auto-wait on", Style::default().fg(TEAL)));
+        }
+    }
+    let left = Line::from(left_spans);
 
     let samples = state
         .sessions
@@ -984,10 +1334,16 @@ fn header_face(app: &MonitorApp, state: &MonitorSnapshot) -> (&'static str, Mood
                 .duration_since(request.finished_at)
                 .is_ok_and(|age| age < RECENT_ERROR)
     });
+    let waiting = state
+        .active
+        .iter()
+        .any(|request| request.status == crate::monitor::RequestStatus::Waiting);
     if app.phase == MonitorPhase::ShuttingDown || app.proxy_off {
         (Mood::Asleep.face(), Mood::Asleep)
-    } else if !app.connected || recent_error {
+    } else if !app.connected || recent_error || waiting {
         (Mood::Unsure.face(), Mood::Unsure)
+    } else if app.requests_paused(state) {
+        (Mood::Asleep.face(), Mood::Unsure)
     } else if !state.active.is_empty() {
         (["•ω•", "•o•"][app.tick % 2], Mood::Awake)
     } else if app.tick.is_multiple_of(24) {
@@ -1166,7 +1522,7 @@ fn status_color(value: &str) -> Color {
         "compacting" => PURPLE,
         "failed" => RED,
         "upstream" => BLUE,
-        "selected" | "started" => YELLOW,
+        "selected" | "started" | "paused" | "waiting" => YELLOW,
         _ => DIM_WHITE,
     }
 }
@@ -1582,31 +1938,52 @@ fn active_columns(tier: LayoutTier) -> Vec<ColumnSpec<ActiveColumn>> {
     }
 }
 
+#[cfg(test)]
 fn render_active(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     active: &[ActiveSnapshot],
     tick: usize,
 ) {
+    render_active_with_pause(frame, area, active, tick, false, SystemTime::now());
+}
+
+fn render_active_with_pause(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    active: &[ActiveSnapshot],
+    tick: usize,
+    paused: bool,
+    snapshot_at: SystemTime,
+) {
     if active.is_empty() {
-        render_empty_table_state(
-            frame,
-            area,
-            "Active requests",
-            false,
-            "Nothing in flight",
-            "Requests show here while they stream.",
-        );
+        let (message, hint) = if paused {
+            (
+                "Paused · 0 requests queued",
+                "New requests wait here until you press `p` to resume.",
+            )
+        } else {
+            ("Nothing in flight", "Requests show here while they stream.")
+        };
+        render_empty_table_state(frame, area, "Active requests", false, message, hint);
         return;
     }
 
+    let now_ms = snapshot_at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis() as u64;
     let columns = active_columns(LayoutTier::for_outer_width(area.width));
     let widths = column_constraints(&columns);
     let rows = active.iter().map(|request| {
-        let status = if request.status == crate::monitor::RequestStatus::Compacting {
-            format!("{}{}", spinner(tick), request.status.label())
-        } else {
-            format!("{} {}", spinner(tick), request.status.label())
+        let status = match request.status {
+            crate::monitor::RequestStatus::Compacting => {
+                format!("{}{}", spinner(tick), request.status.label())
+            }
+            crate::monitor::RequestStatus::Paused | crate::monitor::RequestStatus::Waiting => {
+                request.status.label().to_string()
+            }
+            _ => format!("{} {}", spinner(tick), request.status.label()),
         };
         let cells = columns
             .iter()
@@ -1639,7 +2016,20 @@ fn render_active(
                     ActiveColumn::Endpoint => muted_cell(request.endpoint.label()),
                     ActiveColumn::Input => number_cell(token_value(request.input_tokens)),
                     ActiveColumn::Output => number_cell(token_value(request.output_tokens)),
-                    ActiveColumn::Rate => rate_cell(request.rate().label()),
+                    ActiveColumn::Rate => {
+                        if request.status == crate::monitor::RequestStatus::Waiting {
+                            let label =
+                                match request.wait_until_ms.filter(|&until| until > now_ms).map(
+                                    |until| ui::duration(Duration::from_millis(until - now_ms)),
+                                ) {
+                                    Some(left) => format!("in {left}"),
+                                    None => "recheck".to_string(),
+                                };
+                            rate_cell(label)
+                        } else {
+                            rate_cell(request.rate().label())
+                        }
+                    }
                     ActiveColumn::Elapsed => number_cell(ui::duration(request.elapsed())),
                 }
             })
@@ -2103,18 +2493,33 @@ fn detail_line<'a>(label: &'static str, value: impl Into<String>, value_color: C
     ])
 }
 
-fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
+fn render_footer(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &MonitorApp,
+    state: &MonitorSnapshot,
+) {
+    let p_hint = if app.requests_paused(state) {
+        "p resume"
+    } else {
+        "p pause"
+    };
+    let w_hint = if app.wait_for_reset(state) {
+        "w auto-wait off"
+    } else {
+        "w auto-wait on"
+    };
     let settings_hint = app
         .settings
         .as_ref()
         .filter(|_| app.page == Page::Settings)
         .map(|settings| {
             let keys = settings.hints(area.width);
-            // While a field or a search is open, `q` and `?` are typed text.
+            // While a field or a search is open, `q`, `p`, `w` and `?` are typed text.
             if settings.captures_input() || area.width < 90 {
                 keys.to_string()
             } else {
-                format!("{keys} · Tab or 1–3 tabs · ? help · q close")
+                format!("{keys} · {p_hint} · {w_hint} · Tab or 1–3 tabs · ? help · q close")
             }
         });
     let hint = if let Some(hint) = settings_hint {
@@ -2126,13 +2531,15 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
     } else if app.page == Page::Accounts && app.providers.menu_open() {
         " Esc back · ↑/↓ choose · Enter run · q close".to_string()
     } else if area.width < 80 {
-        " q close · ↑↓ move · Enter · u/d · ?".to_string()
+        format!(" q close · {p_hint} · ↑↓ move · Enter · ?")
     } else if app.page == Page::Accounts {
-        " Tab or 1–3 tabs · ↑/↓ move · →/Enter actions · u/d details · r refresh · ? help · q close"
-            .to_string()
+        format!(
+            " Tab or 1–3 tabs · {p_hint} · {w_hint} · ↑/↓ move · →/Enter actions · u/d details · r refresh · ? help · q close"
+        )
     } else {
-        " Tab or 1–3 tabs · ↑/↓ move between panes · j/k move in pane · →/Enter details · ←/Esc back · ? help · q close"
-            .to_string()
+        format!(
+            " Tab or 1–3 tabs · {p_hint} · {w_hint} · ↑/↓ move between panes · j/k move in pane · →/Enter details · ←/Esc back · ? help · q close"
+        )
     };
     let hint = if app.is_attached() {
         hint
@@ -2225,7 +2632,7 @@ fn render_shutdown_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, tick: usi
 
 fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: bool) {
     let width = 64.min(area.width);
-    let height = 20.min(area.height);
+    let height = 22.min(area.height);
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -2260,9 +2667,11 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ),
         ("?", "toggle help"),
         ("b", "toggle setup"),
-        ("1 / p", "request order and saved accounts"),
+        ("1", "request order and saved accounts"),
         ("2", "sessions, requests and errors"),
         ("3", "settings, including auto-rotate"),
+        ("p", "pause or resume new requests"),
+        ("w", "toggle wait for account reset"),
         ("Tab / Shift-Tab", "next / previous tab"),
         ("↑ / ↓", "move between rows and activity panes"),
         ("j / k", "move down / up within a pane"),
@@ -3089,6 +3498,7 @@ mod tests {
             connected: true,
             proxy_off: false,
             saving: None,
+            hold: HoldOverrides::default(),
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3124,6 +3534,7 @@ mod tests {
             connected: true,
             proxy_off: false,
             saving: None,
+            hold: HoldOverrides::default(),
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3371,6 +3782,7 @@ mod tests {
             connected: true,
             proxy_off: false,
             saving: None,
+            hold: HoldOverrides::default(),
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3407,6 +3819,7 @@ mod tests {
             connected: true,
             proxy_off: false,
             saving: None,
+            hold: HoldOverrides::default(),
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: Some(shutdown_tx),
@@ -3458,6 +3871,7 @@ mod tests {
             connected: false,
             proxy_off: true,
             saving: None,
+            hold: HoldOverrides::default(),
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3501,6 +3915,7 @@ mod tests {
             connected: true,
             proxy_off: false,
             saving: None,
+            hold: HoldOverrides::default(),
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: Some(shutdown_tx),
@@ -3538,6 +3953,7 @@ mod tests {
             connected: true,
             proxy_off: false,
             saving: None,
+            hold: HoldOverrides::default(),
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3573,6 +3989,7 @@ mod tests {
             connected: true,
             proxy_off: false,
             saving: None,
+            hold: HoldOverrides::default(),
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3605,6 +4022,7 @@ mod tests {
             connected: true,
             proxy_off: false,
             saving: None,
+            hold: HoldOverrides::default(),
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3638,6 +4056,7 @@ mod tests {
             connected: true,
             proxy_off: false,
             saving: None,
+            hold: HoldOverrides::default(),
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3671,6 +4090,7 @@ mod tests {
             connected: true,
             proxy_off: false,
             saving: None,
+            hold: HoldOverrides::default(),
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3685,5 +4105,96 @@ mod tests {
         app.move_up(2, 3, false);
         assert_eq!(app.focus, FocusPane::Recent);
         assert_eq!(app.recent_selected, 0);
+    }
+
+    #[test]
+    fn pause_and_wait_status_is_visible_across_all_tabs_at_wide_and_narrow_sizes() {
+        let mut state: MonitorSnapshot = mock_state().into();
+        let mut app = MonitorApp {
+            listen_url: "mock://tui-demo".to_string(),
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            page: Page::Accounts,
+            accounts_mode: providers::Mode::Demo,
+            providers: ProvidersPanel::new(providers::Mode::Demo),
+            settings: Some(config_keys::SettingsPanel::new(true)),
+            detail: None,
+            focus: FocusPane::Sessions,
+            selected: 0,
+            recent_selected: 0,
+            connected: true,
+            proxy_off: false,
+            saving: None,
+            hold: HoldOverrides::default(),
+            tick: 0,
+            phase: MonitorPhase::Running,
+            shutdown: None,
+            shutdown_complete: None,
+        };
+
+        // Demo preview toggles pause and wait locally without writing files.
+        preview_app_action(&mut app, &controls::Action::SetPauseRequests(true));
+        assert!(app.requests_paused(&state));
+        state.active.clear();
+        for page in [Page::Accounts, Page::Activity, Page::Settings] {
+            app.open_page(page);
+            let wide = buffer_text(&draw(120, 28, |frame| render(frame, &mut app, &state)));
+            assert!(
+                wide.contains("Paused · 0 requests queued · auto-wait off · p resume"),
+                "{page:?} wide:\n{wide}"
+            );
+            let narrow = buffer_text(&draw(56, 20, |frame| render(frame, &mut app, &state)));
+            assert!(
+                narrow.contains("Paused · 0 queued · p resume"),
+                "{page:?} narrow:\n{narrow}"
+            );
+        }
+
+        // Held requests while paused show the waiting count on every tab.
+        let mut full: MonitorSnapshot = mock_state().into();
+        for request in &mut full.active {
+            request.status = crate::monitor::RequestStatus::Paused;
+            request.wait_until_ms = None;
+        }
+        let count = full.active.len();
+        for page in [Page::Accounts, Page::Activity, Page::Settings] {
+            app.open_page(page);
+            let wide = buffer_text(&draw(120, 28, |frame| render(frame, &mut app, &full)));
+            assert!(
+                wide.contains(&format!("Paused · {count} requests waiting")),
+                "{page:?} wide:\n{wide}"
+            );
+        }
+
+        // Resume and enable auto-wait: waiting requests show the countdown and recheck note.
+        preview_app_action(&mut app, &controls::Action::SetPauseRequests(false));
+        preview_app_action(&mut app, &controls::Action::SetWaitForReset(true));
+        assert!(!app.requests_paused(&full));
+        assert!(app.wait_for_reset(&full));
+        let now_ms = full
+            .snapshot_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        for request in &mut full.active {
+            request.status = crate::monitor::RequestStatus::Waiting;
+            request.wait_until_ms = Some(now_ms + 600_000);
+        }
+        for page in [Page::Accounts, Page::Activity, Page::Settings] {
+            app.open_page(page);
+            let wide = buffer_text(&draw(140, 28, |frame| render(frame, &mut app, &full)));
+            assert!(
+                wide.contains(&format!(
+                    "Waiting for reset · {count} requests waiting · next reset in 10m00s (rechecks then)"
+                )),
+                "{page:?} wide:\n{wide}"
+            );
+            let narrow = buffer_text(&draw(64, 20, |frame| render(frame, &mut app, &full)));
+            assert!(
+                narrow.contains(&format!("Waiting · {count} waiting · reset in 10m00s")),
+                "{page:?} narrow:\n{narrow}"
+            );
+        }
     }
 }

@@ -17,8 +17,8 @@ use http::StatusCode;
 
 use super::chats::{Place, assign, place_of, remember};
 use super::{
-    Cooldown, Cooldowns, MAX_ROTATION_WAIT_MS, ServedBy, all_limited, execute, exhausted_response,
-    now_ms, retry_deadline, spent_response, storage_error,
+    Cooldown, Cooldowns, MAX_ROTATION_WAIT_MS, RESET_WAIT_SLICE_MS, ServedBy, all_limited, execute,
+    exhausted_response, now_ms, retry_deadline, spent_response, storage_error, wait_while_paused,
 };
 use crate::accounts::{Account, Accounts};
 use crate::anthropic::{MessagesRequest, json_error};
@@ -259,6 +259,7 @@ fn first_release(plans: &[Plan], snapshot: &[Cooldown], now: u64) -> Option<u64>
     plans
         .iter()
         .filter_map(|plan| plan.wait(snapshot, now))
+        .filter(|wait| !wait.spent)
         .map(|wait| wait.until_ms)
         .min()
 }
@@ -287,6 +288,7 @@ pub(crate) async fn execute_routed(
         primary,
         saved: HashMap::new(),
         auto: crate::config::auth_auto_rotate(),
+        wait_for_reset: None,
         cooldowns: Cooldowns::new(),
     };
     pool.drive(rows, body, context, identity).await
@@ -304,10 +306,17 @@ struct Pool<'a> {
     saved: HashMap<String, Saved>,
     /// `auth.autoRotate`: move on from a row that hits a limit.
     auto: bool,
+    /// `None` reads `auth.waitForReset` live; tests pass `Some` to stay in memory.
+    wait_for_reset: Option<bool>,
     cooldowns: Cooldowns,
 }
 
 impl Pool<'_> {
+    fn hold_until_reset(&self) -> bool {
+        self.wait_for_reset
+            .unwrap_or_else(crate::config::auth_wait_for_reset)
+    }
+
     /// Tries the enabled `rows` in order. See [`execute_routed`].
     async fn drive(
         mut self,
@@ -329,7 +338,7 @@ impl Pool<'_> {
             rows,
             &mut self.saved,
         );
-        let (auto, cooldowns) = (self.auto, &self.cooldowns);
+        let auto = self.auto;
         if plans.is_empty() {
             return json_error(
                 StatusCode::BAD_REQUEST,
@@ -358,9 +367,10 @@ impl Pool<'_> {
         let mut waited = false;
         let mut shown = self.primary.name().to_string();
         loop {
+            wait_while_paused(&context.req_id, context.monitor.as_ref()).await;
             // Without auto-rotate there are no saved waits to honor: the first row answers.
             let snapshot = if auto {
-                match cooldowns.read() {
+                match self.cooldowns.read() {
                     Ok(snapshot) => snapshot,
                     Err(error) => return storage_error(error),
                 }
@@ -370,13 +380,15 @@ impl Pool<'_> {
             let now = now_ms();
             let Some(mut at) = pick(&plans, remembered.as_ref(), &tried, &snapshot, now) else {
                 // Nothing ready: hold the request until the first row frees up
-                // (once per request, bounded), so the turn continues on it
-                // instead of dying on a 429.
+                // (bounded by default, or until reset when `auth.waitForReset`
+                // is on), so the turn continues on it instead of dying on a 429.
+                let hold_until_reset = self.hold_until_reset();
                 if auto
-                    && !waited
-                    && let Some(until) = first_release(&plans, &snapshot, now)
-                    && until - now <= MAX_ROTATION_WAIT_MS
+                    && let Some(mut until) = first_release(&plans, &snapshot, now)
+                    && until > now
+                    && ((!waited && until - now <= MAX_ROTATION_WAIT_MS) || hold_until_reset)
                 {
+                    let short_wait = !waited && until - now <= MAX_ROTATION_WAIT_MS;
                     waited = true;
                     log.info(
                         "account_wait",
@@ -386,14 +398,55 @@ impl Pool<'_> {
                             ("reqId".into(), serde_json::json!(&context.req_id)),
                         ])),
                     );
-                    tokio::time::sleep(Duration::from_millis(until - now)).await;
-                    let fresh = match cooldowns.read() {
+                    if let Some(monitor) = context.monitor.as_ref() {
+                        monitor.request_held(&context.req_id, Some(until));
+                    }
+                    loop {
+                        let now = now_ms();
+                        if now >= until {
+                            break;
+                        }
+                        if !short_wait && !self.hold_until_reset() {
+                            break;
+                        }
+                        let slice = (until - now).clamp(1, RESET_WAIT_SLICE_MS);
+                        tokio::time::sleep(Duration::from_millis(slice)).await;
+                        let fresh = match self.cooldowns.read() {
+                            Ok(entries) => entries,
+                            Err(error) => {
+                                if let Some(monitor) = context.monitor.as_ref() {
+                                    monitor.request_released(&context.req_id);
+                                }
+                                return storage_error(error);
+                            }
+                        };
+                        let now = now_ms();
+                        tried.retain(|at| plans[*at].wait(&fresh, now).is_some());
+                        if pick(&plans, remembered.as_ref(), &tried, &fresh, now).is_some() {
+                            break;
+                        }
+                        let Some(next_until) = first_release(&plans, &fresh, now) else {
+                            break;
+                        };
+                        if next_until != until {
+                            until = next_until;
+                            if let Some(monitor) = context.monitor.as_ref() {
+                                monitor.request_held(&context.req_id, Some(until));
+                            }
+                        }
+                    }
+                    if let Some(monitor) = context.monitor.as_ref() {
+                        monitor.request_released(&context.req_id);
+                    }
+                    let fresh = match self.cooldowns.read() {
                         Ok(entries) => entries,
                         Err(error) => return storage_error(error),
                     };
                     let now = now_ms();
                     tried.retain(|at| plans[*at].wait(&fresh, now).is_some());
-                    continue;
+                    if pick(&plans, remembered.as_ref(), &tried, &fresh, now).is_some() {
+                        continue;
+                    }
                 }
                 return all_limited_pool(&plans, &snapshot, now, &self.saved)
                     .or(last_response)
@@ -459,7 +512,10 @@ impl Pool<'_> {
                 }
                 return response;
             };
-            if let Err(error) = cooldowns.sit_out(provider, plan.wait_id(), &plan.model, &sitout) {
+            if let Err(error) =
+                self.cooldowns
+                    .sit_out(provider, plan.wait_id(), &plan.model, &sitout)
+            {
                 return storage_error(error);
             }
             if sitout.spent {
@@ -777,6 +833,7 @@ mod tests {
                 primary,
                 saved,
                 auto,
+                wait_for_reset: Some(false),
                 cooldowns: Cooldowns {
                     path: self.path.clone(),
                 },
@@ -1250,6 +1307,134 @@ mod tests {
         assert_eq!(
             plans.iter().map(Plan::place).collect::<Vec<_>>(),
             [place("claude", Some(CLAUDE_MAX))]
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_reset_holds_through_a_long_window_and_skips_spent_balances() {
+        let world = world();
+        let monitor = MonitorHandle::default();
+        monitor.request_started("pool-wait", None, None, EndpointKind::Messages);
+        let cooldowns = Cooldowns {
+            path: world.path.clone(),
+        };
+        // A reset 10 minutes out is past the 2-minute default, so wait_for_reset
+        // is what holds the request until the account frees up.
+        let until = now_ms() + 600_000;
+        cooldowns
+            .mark_with("claude", CLAUDE_PRO, None, until, false)
+            .unwrap();
+        let rows = vec![row("claude", Some(CLAUDE_PRO))];
+        let saved = HashMap::from([(
+            "claude".to_string(),
+            Saved {
+                accounts: vec![account(CLAUDE_PRO)],
+                unusable: HashSet::new(),
+            },
+        )]);
+        let primary = world.registry.provider("claude").unwrap();
+        let pool = Pool {
+            registry: &world.registry,
+            route: &world.route,
+            requested: "claude-opus-4-8",
+            primary,
+            saved,
+            auto: true,
+            wait_for_reset: Some(true),
+            cooldowns: Cooldowns {
+                path: world.path.clone(),
+            },
+        };
+        let body =
+            serde_json::from_value(serde_json::json!({"messages": [], "model": "claude/test-1"}))
+                .unwrap();
+        let context = RequestContext {
+            req_id: "pool-wait".into(),
+            session_id: None,
+            session_seq: None,
+            provider: "claude".into(),
+            account: None,
+            traffic: None,
+            monitor: Some(monitor.clone()),
+        };
+        let release_path = world.path.clone();
+        let release_monitor = monitor.clone();
+        let releaser = tokio::spawn(async move {
+            for _ in 0..40 {
+                let state = release_monitor.snapshot();
+                if state
+                    .active
+                    .first()
+                    .is_some_and(|req| req.wait_until_ms == Some(until))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Cooldowns { path: release_path }
+                .clear_account("claude", CLAUDE_PRO)
+                .unwrap();
+        });
+        let response = pool.drive(rows, body, context, None).await;
+        releaser.await.unwrap();
+        assert_eq!(text(response).await, format!("claude:{CLAUDE_PRO}"));
+        assert_eq!(monitor.snapshot().active[0].wait_until_ms, None);
+
+        // A spent balance has no reset time, so wait_for_reset never hangs on it.
+        cooldowns
+            .mark_with("claude", CLAUDE_PRO, None, now_ms() + 60_000, true)
+            .unwrap();
+        assert_eq!(
+            first_release(
+                &[Plan {
+                    row: row("claude", Some(CLAUDE_PRO)),
+                    provider: world.registry.provider("claude").unwrap(),
+                    model: "claude/test-1".into(),
+                }],
+                &cooldowns.read().unwrap(),
+                now_ms()
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_pause_holds_new_requests_and_releases_when_resumed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let monitor = MonitorHandle::default();
+        monitor.request_started("req-pause", None, None, EndpointKind::Messages);
+        let paused = Arc::new(AtomicBool::new(true));
+        let flag = paused.clone();
+        let monitor_clone = monitor.clone();
+        let waiter = tokio::spawn(async move {
+            super::super::wait_while_paused_with(
+                "req-pause",
+                Some(&monitor_clone),
+                move || flag.load(Ordering::SeqCst),
+                Duration::from_millis(5),
+            )
+            .await;
+        });
+        for _ in 0..40 {
+            let state = monitor.snapshot();
+            if state
+                .active
+                .first()
+                .is_some_and(|req| req.status == crate::monitor::RequestStatus::Paused)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            monitor.snapshot().active[0].status,
+            crate::monitor::RequestStatus::Paused
+        );
+        paused.store(false, Ordering::SeqCst);
+        waiter.await.unwrap();
+        assert_eq!(
+            monitor.snapshot().active[0].status,
+            crate::monitor::RequestStatus::Started
         );
     }
 }

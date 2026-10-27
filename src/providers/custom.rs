@@ -728,26 +728,7 @@ impl CliHandlers for CustomCli {
     }
 
     fn login(&self) -> Result<()> {
-        if self.builtin_anthropic {
-            let url = "https://console.anthropic.com/settings/keys";
-            println!("Open {url} to get your Anthropic API key.");
-            let _ = crate::browser::open(url);
-        }
-        println!(
-            "Paste your {} API key (input is hidden) and press Enter:",
-            self.label
-        );
-        let key = crate::prompt::read_hidden_line("API key: ")?;
-        if key.is_empty() {
-            bail!("no API key provided");
-        }
-        let path = if self.builtin_anthropic {
-            config::save_anthropic_api_key(&key)?
-        } else {
-            config::save_custom_provider_api_key(self.name, &key)?
-        };
-        println!("{} API key saved to {}", self.label, path.display());
-        Ok(())
+        crate::auth_cli::AccountCli::open(self.name, self)?.login(&Default::default())
     }
 
     fn device(&self) -> Result<()> {
@@ -790,17 +771,7 @@ impl CliHandlers for CustomCli {
     }
 
     fn logout(&self) -> Result<()> {
-        let cleared = if self.builtin_anthropic {
-            config::clear_anthropic_api_key()?
-        } else {
-            config::clear_custom_provider_api_key(self.name)?
-        };
-        if cleared {
-            println!("{} stored key cleared.", self.label);
-        } else {
-            println!("No stored {} key in config.json.", self.label);
-        }
-        Ok(())
+        crate::auth_cli::AccountCli::open(self.name, self)?.logout(None, false)
     }
 
     fn accounts(&self) -> Option<&dyn AccountSupport> {

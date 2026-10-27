@@ -266,6 +266,12 @@ pub(super) struct ProvidersPanel {
     pool: Vec<PoolEntry>,
     route: config::Route,
     auto_rotate: bool,
+    requests_paused: bool,
+    wait_for_reset: bool,
+    paused_requests: usize,
+    waiting_requests: usize,
+    waiting_until_ms: Option<u64>,
+    snapshot_now_ms: u64,
     /// Every request that reached generation, across all chats.
     active: Vec<Serving>,
     last_used: Option<Serving>,
@@ -296,6 +302,12 @@ impl ProvidersPanel {
             pool: Vec::new(),
             route: config::Route::default(),
             auto_rotate: false,
+            requests_paused: false,
+            wait_for_reset: false,
+            paused_requests: 0,
+            waiting_requests: 0,
+            waiting_until_ms: None,
+            snapshot_now_ms: 0,
             active: Vec::new(),
             last_used: None,
             spend: HashMap::new(),
@@ -415,8 +427,32 @@ impl ProvidersPanel {
     }
 
     /// Follow requests that reached generation. A provider being tried is not
-    /// proof it served anything, and a token-count request is not a generation.
+    /// proof it served anything, a token-count request is not a generation, and
+    /// paused or waiting requests have not started generating.
     pub fn observe(&mut self, snapshot: &MonitorSnapshot) {
+        self.requests_paused = snapshot.requests_paused;
+        self.wait_for_reset = snapshot.wait_for_reset;
+        self.snapshot_now_ms = snapshot
+            .snapshot_at
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.paused_requests = snapshot
+            .active
+            .iter()
+            .filter(|request| request.status == RequestStatus::Paused)
+            .count();
+        self.waiting_requests = snapshot
+            .active
+            .iter()
+            .filter(|request| request.status == RequestStatus::Waiting)
+            .count();
+        self.waiting_until_ms = snapshot
+            .active
+            .iter()
+            .filter(|request| request.status == RequestStatus::Waiting)
+            .filter_map(|request| request.wait_until_ms)
+            .min();
         self.spend = snapshot
             .account_usage
             .iter()
@@ -436,6 +472,10 @@ impl ProvidersPanel {
             .filter(|request| {
                 request.endpoint != EndpointKind::CountTokens
                     && request.generation_started_at.is_some()
+                    && !matches!(
+                        request.status,
+                        RequestStatus::Paused | RequestStatus::Waiting
+                    )
             })
             .filter_map(|request| {
                 Some(Serving {
@@ -463,6 +503,11 @@ impl ProvidersPanel {
             });
     }
 
+    pub fn set_hold_state(&mut self, paused: bool, wait_for_reset: bool) {
+        self.requests_paused = paused;
+        self.wait_for_reset = wait_for_reset;
+    }
+
     pub fn retry(&mut self) {
         self.loaded_at = None;
         self.refresh();
@@ -488,6 +533,49 @@ impl ProvidersPanel {
 
     /// Activity across all windows, not the most recent request's route.
     fn serving_line(&self) -> Line<'static> {
+        let now = if self.snapshot_now_ms > 0 {
+            self.snapshot_now_ms
+        } else {
+            crate::rotation::now_ms()
+        };
+        if self.requests_paused {
+            let held = self.paused_requests + self.waiting_requests;
+            let queue = match held {
+                0 => "0 requests queued".to_string(),
+                1 => "1 request waiting".to_string(),
+                n => format!("{n} requests waiting"),
+            };
+            let wait_mode = if self.wait_for_reset {
+                "auto-wait on"
+            } else {
+                "auto-wait off"
+            };
+            return Line::styled(
+                format!(" Paused · {queue} · {wait_mode} · p resume"),
+                Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+            );
+        }
+        if self.waiting_requests > 0 {
+            let noun = if self.waiting_requests == 1 {
+                "request"
+            } else {
+                "requests"
+            };
+            let reset_note = match self.waiting_until_ms.filter(|&until| until > now) {
+                Some(until) => format!(
+                    "next reset in {} (rechecks then)",
+                    ui::duration(Duration::from_millis(until - now))
+                ),
+                None => "reset time unknown, rechecking".to_string(),
+            };
+            return Line::styled(
+                format!(
+                    " Waiting for reset · {} {noun} waiting · {reset_note} · p pause",
+                    self.waiting_requests
+                ),
+                Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+            );
+        }
         if !self.active.is_empty() {
             let accounts = self
                 .active
@@ -505,7 +593,6 @@ impl ProvidersPanel {
                 Style::default().fg(TEAL),
             );
         }
-        let now = crate::rotation::now_ms();
         let next_reset = self
             .auto_rotate
             .then(|| self.first_reset(now))
@@ -1208,6 +1295,12 @@ impl ProvidersPanel {
                 self.route.on = true;
                 self.route_from_pool();
             }
+            Action::SetPauseRequests(paused) => {
+                self.requests_paused = *paused;
+            }
+            Action::SetWaitForReset(wait) => {
+                self.wait_for_reset = *wait;
+            }
             Action::SavePool { .. } | Action::SetEnabled { .. } => {
                 self.apply_pool_action(action);
                 self.moving = None;
@@ -1461,7 +1554,11 @@ impl ProvidersPanel {
                             ),
                             Style::default().fg(YELLOW),
                         ));
-                        text.push("The next request rechecks each account's limits.".into());
+                        text.push(if self.wait_for_reset {
+                            "With auto-wait on, streamed Messages requests wait here and recheck at the reset time (not guaranteed availability).".into()
+                        } else {
+                            "The next request rechecks each account's limits. Press w to hold streamed Messages requests until reset.".into()
+                        });
                     }
                     text.extend(self.activity_lines(&self.selected));
                 }
@@ -1497,6 +1594,8 @@ impl ProvidersPanel {
             " Routing is off. Claude Code uses its own login."
         } else if !self.auto_rotate {
             " Auto-rotate is off, so the first row that is on answers every request."
+        } else if self.wait_for_reset {
+            " New chats share the first provider's ready accounts. Auto-wait holds streamed Messages requests until the earliest confirmed reset."
         } else {
             " New chats share the first provider's ready accounts. A chat stays on its account until it hits a limit."
         };
@@ -3768,5 +3867,55 @@ mod tests {
             render(&mut panel, width, height);
             panel.close_menu();
         }
+    }
+
+    #[test]
+    fn paused_and_waiting_requests_do_not_highlight_accounts_as_generating() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        let mut snap = served("codex", "demo-work", EndpointKind::Messages);
+        snap.requests_paused = true;
+        snap.active[0].status = RequestStatus::Paused;
+        snap.active[0].wait_until_ms = None;
+        panel.observe(&snap);
+        assert!(panel.active.is_empty());
+        let text = render(&mut panel, 160, 30);
+        assert!(text.contains("Paused · 1 request waiting"), "{text}");
+        assert!(!text.contains("● Codex / work"), "{text}");
+
+        // 0 queued while paused is distinct from held requests.
+        snap.active.clear();
+        panel.observe(&snap);
+        let zero = render(&mut panel, 160, 30);
+        assert!(zero.contains("Paused · 0 requests queued"), "{zero}");
+        assert!(zero.contains("p resume"), "{zero}");
+
+        // Waiting for reset with known vs unknown reset time.
+        let mut waiting = served("codex", "demo-work", EndpointKind::Messages);
+        waiting.wait_for_reset = true;
+        waiting.active[0].status = RequestStatus::Waiting;
+        let now_ms = waiting
+            .snapshot_at
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        waiting.active[0].wait_until_ms = Some(now_ms + 900_000);
+        panel.observe(&waiting);
+        assert!(panel.active.is_empty());
+        let known = render(&mut panel, 160, 30);
+        assert!(
+            known.contains("Waiting for reset · 1 request waiting"),
+            "{known}"
+        );
+        assert!(known.contains("next reset in 15m"), "{known}");
+        assert!(known.contains("rechecks then"), "{known}");
+        assert!(!known.contains("● Codex / work"), "{known}");
+
+        waiting.active[0].wait_until_ms = None;
+        panel.observe(&waiting);
+        let unknown = render(&mut panel, 160, 30);
+        assert!(
+            unknown.contains("reset time unknown, rechecking"),
+            "{unknown}"
+        );
     }
 }

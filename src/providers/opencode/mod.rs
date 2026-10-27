@@ -784,24 +784,8 @@ impl CliHandlers for OpenCodeCli {
     }
 
     fn login(&self) -> anyhow::Result<()> {
-        let url = "https://opencode.ai/console/account";
-        println!("Open {url} to get your OpenCode Go API key.");
-        let _ = crate::browser::open(url);
-        println!("Paste your OpenCode Go API key (input is hidden) and press Enter:");
-        let key = crate::prompt::read_hidden_line("API key: ")?;
-        if key.is_empty() {
-            anyhow::bail!("no API key provided");
-        }
-        let path = crate::config::save_opencode_api_key(&key)?;
-        println!("OpenCode API key saved to {}", path.display());
-        if crate::config::opencode_api_key_source().is_some_and(|source| source != "config.json") {
-            println!(
-                "Note: an environment key ({}) takes precedence; unset it to use the stored key.",
-                crate::config::opencode_api_key_source().unwrap_or("env")
-            );
-        }
-        println!("Check it with `cc-proxy usage opencode`.");
-        Ok(())
+        crate::auth_cli::AccountCli::open("opencode", &OPENCODE_ACCOUNTS)?
+            .login(&Default::default())
     }
 
     fn device(&self) -> anyhow::Result<()> {
@@ -825,15 +809,7 @@ impl CliHandlers for OpenCodeCli {
     }
 
     fn logout(&self) -> anyhow::Result<()> {
-        if crate::config::clear_opencode_api_key()? {
-            println!("OpenCode stored key cleared.");
-        } else {
-            println!("No stored OpenCode key in config.json.");
-        }
-        println!(
-            "Unset CCP_OPENCODE_API_KEY / OPENCODE_API_KEY if using env auth; a key in Claude Code settings.json is used only as a last resort."
-        );
-        Ok(())
+        crate::auth_cli::AccountCli::open("opencode", &OPENCODE_ACCOUNTS)?.logout(None, false)
     }
 
     fn accounts(&self) -> Option<&dyn AccountSupport> {
