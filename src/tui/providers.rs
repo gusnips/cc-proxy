@@ -1642,8 +1642,7 @@ impl ProvidersPanel {
             }
             Action::SetTierModel { .. } | Action::ResetTierModels { .. } => {
                 self.apply_model_action(action);
-                self.notice =
-                    Some(("Demo only. Nothing on this computer changed.".into(), false));
+                self.notice = Some(("Demo only. Nothing on this computer changed.".into(), false));
                 return;
             }
             Action::RefreshModels { provider } => {
@@ -4502,7 +4501,10 @@ mod tests {
             "Add another Codex account...",
             "Choose Codex models...",
         ] {
-            assert!(menu_text.contains(expected), "missing {expected}: {menu_text}");
+            assert!(
+                menu_text.contains(expected),
+                "missing {expected}: {menu_text}"
+            );
         }
 
         // Stepping down skips the section header and reaches Add another Codex account...
@@ -4549,9 +4551,15 @@ mod tests {
         assert!(!panel.filtering_models());
         let tiers_view = render(&mut panel, 140, 30);
         for expected in ["Choose Codex models", "fable", "opus", "sonnet", "haiku"] {
-            assert!(tiers_view.contains(expected), "missing {expected}: {tiers_view}");
+            assert!(
+                tiers_view.contains(expected),
+                "missing {expected}: {tiers_view}"
+            );
         }
-        assert!(!tiers_view.contains("Reset all to automatic"), "{tiers_view}");
+        assert!(
+            !tiers_view.contains("Reset all to automatic"),
+            "{tiers_view}"
+        );
 
         // Move to `opus` (index 1) and press Enter to open the live model filter.
         panel.press(KeyCode::Down);

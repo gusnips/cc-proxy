@@ -338,7 +338,12 @@ fn tier_arg(asked: &str) -> Result<&'static str> {
     }
 }
 
-pub(crate) fn set(registry: &Registry, provider: &str, tier: &'static str, model: &str) -> Result<()> {
+pub(crate) fn set(
+    registry: &Registry,
+    provider: &str,
+    tier: &'static str,
+    model: &str,
+) -> Result<()> {
     if registry.provider_for_model(model).is_none() {
         bail!(
             "cc-proxy doesn't serve a model called `{model}`. `cc-proxy models list {provider}` \

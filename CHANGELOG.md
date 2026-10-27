@@ -3,6 +3,12 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.9 (2026-10-27)
+
+- Account rows in the monitor now lead their second line with `ready` (in green), `waiting · <time> left` (in yellow, showing the effective unblock time across all exhausted windows and rate-limit waits), or `out of credit · tries again in <time>` (in red) before the window percentages (`5h 0% · week 33%`). You can scan down the left edge of `Request order` to see which accounts can take a chat right now and how long waiting accounts have left without comparing separate 5-hour and weekly timers on every row.
+- The action menu on an account or provider row now includes a `── <Provider> ──` section at the bottom with `Add another <Provider> account...`, `Choose <Provider> models...`, and `Refresh <Provider> model list` (for providers with live model discovery).
+- `Choose <Provider> models...` opens an in-panel picker inside `Details` for `fable`, `opus`, `sonnet` and `haiku` with live type-to-filter search and a `Reset all to automatic` option, so you can see and change a provider's model mapping without leaving the monitor.
+
 ## v0.4.8 (2026-10-27)
 
 - Fix Codex cache writes always showing `0 written` in the monitor. Codex reports cache writes in `usage.input_tokens_details.cache_write_tokens` inside `input_tokens`. Both translators and the monitor observer now read that field, map it to `cache_creation_input_tokens`, and subtract it from fresh input so totals and cost estimates do not double-count cache writes.

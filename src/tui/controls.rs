@@ -255,8 +255,8 @@ impl Action {
             }
             Self::RefreshModels { provider } => {
                 let name = ui::provider_name(provider);
-                let count = crate::models_map::refresh_provider(provider)?
-                    .map_or(0, |ids| ids.len());
+                let count =
+                    crate::models_map::refresh_provider(provider)?.map_or(0, |ids| ids.len());
                 if config::route().target() == Some(provider.as_str()) {
                     route::refresh_model_labels();
                 }
