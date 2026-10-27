@@ -342,21 +342,27 @@ impl ProvidersPanel {
             .is_none_or(|loaded| loaded.elapsed() >= REFRESH_AFTER)
             && !self.usage_busy.load(Ordering::SeqCst)
         {
-            self.spawn_load(true);
+            // The first read and the `r` key leave `loaded_at` empty.
+            self.spawn_load(if self.loaded_at.is_some() {
+                Usage::Paced
+            } else {
+                Usage::Ask
+            });
         }
     }
 
-    /// Starts a worker that reads the saved accounts and the order, and, when
-    /// `with_usage`, their usage. A dropped receiver does not stop a worker, so
-    /// `usage_busy` keeps a second usage read from starting beside it.
-    fn spawn_load(&mut self, with_usage: bool) {
+    /// Starts a worker that reads the saved accounts and the order, and `usage`.
+    /// A dropped receiver does not stop a worker, so `usage_busy` keeps a second
+    /// usage read from starting beside it.
+    fn spawn_load(&mut self, usage: Usage) {
+        let with_usage = usage != Usage::No;
         let (send, receive) = mpsc::channel();
         let busy = with_usage.then(|| {
             self.usage_busy.store(true, Ordering::SeqCst);
             BusyGuard(self.usage_busy.clone())
         });
         std::thread::spawn(move || {
-            load(&send, with_usage);
+            load(&send, usage);
             drop(busy);
         });
         self.pending = Some(receive);
@@ -367,7 +373,7 @@ impl ProvidersPanel {
     /// usage: a rename or a reorder has no new numbers to fetch.
     fn reload_saved(&mut self) {
         if self.mode == Mode::Local {
-            self.spawn_load(false);
+            self.spawn_load(Usage::No);
         }
     }
 
@@ -1654,6 +1660,18 @@ fn account_rows(
     }).collect()
 }
 
+/// What a read fetches besides the saved accounts and the order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Usage {
+    /// No numbers: a change was saved, and nothing new is left to fetch.
+    No,
+    /// Every account, now. The first read and the `r` key.
+    Ask,
+    /// The read every minute: an account that said 429 is left alone until its
+    /// wait is over.
+    Paced,
+}
+
 /// Clears `usage_busy` when the usage worker ends, even if it panics.
 struct BusyGuard(Arc<AtomicBool>);
 
@@ -1663,7 +1681,7 @@ impl Drop for BusyGuard {
     }
 }
 
-fn load(send: &mpsc::Sender<Loaded>, with_usage: bool) {
+fn load(send: &mpsc::Sender<Loaded>, usage: Usage) {
     let registry = Registry::new();
     let mut rows: Vec<ProviderRow> = crate::route::routable_providers(&registry)
         .into_iter()
@@ -1721,7 +1739,7 @@ fn load(send: &mpsc::Sender<Loaded>, with_usage: bool) {
         rows: rows.clone(),
         pool: pool.clone(),
     };
-    if send.send(first).is_err() || !with_usage {
+    if send.send(first).is_err() || usage == Usage::No {
         return;
     }
     for (id, headline) in crate::usage::headlines() {
@@ -1729,7 +1747,11 @@ fn load(send: &mpsc::Sender<Loaded>, with_usage: bool) {
             row.usage = Some(headline);
         }
     }
-    apply_account_usage(&mut rows, &crate::usage::account_usage());
+    let accounts = match usage {
+        Usage::Paced => crate::usage::account_usage_paced(),
+        _ => crate::usage::account_usage(),
+    };
+    apply_account_usage(&mut rows, &accounts);
     keep_last_good(&mut rows, &crate::usage::last_good_usage());
     let _ = send.send(Loaded { rows, pool });
 }

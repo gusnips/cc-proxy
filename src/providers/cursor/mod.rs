@@ -25,7 +25,7 @@ use crate::provider::{
 };
 use crate::providers::cursor::auth::{
     clear_cursor_auth, expired_auth_message, load_cursor_auth, missing_auth_message,
-    run_cursor_login,
+    run_cursor_login, saved_cursor_auth,
 };
 use crate::providers::cursor::client::CursorHttpClient;
 use crate::providers::cursor::model::resolve_cursor_model;
@@ -339,7 +339,9 @@ pub(crate) struct CursorCli;
 
 impl CliHandlers for CursorCli {
     fn auth_state(&self) -> crate::provider::AuthState {
-        match load_cursor_auth().ok().flatten() {
+        // The monitor and the pool read this for every provider. Renewing here
+        // would hold them up on Cursor's servers.
+        match saved_cursor_auth().ok().flatten() {
             Some(auth) => crate::provider::AuthState::SignedIn {
                 account: auth.email.or(auth.user_id),
                 expires_ms: auth.expires,

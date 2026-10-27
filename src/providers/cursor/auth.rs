@@ -45,14 +45,22 @@ impl<S: AuthStorage<StoredCursorAuth>> CursorTokenStore<S> {
         Self { store }
     }
 
-    pub fn load_auth(&self) -> anyhow::Result<Option<CursorAuth>> {
+    /// What is saved, as it is. A request uses `load_auth`, which renews an
+    /// expired token first; a status read must never start a network call.
+    pub fn saved_auth(&self) -> anyhow::Result<Option<CursorAuth>> {
         let Some(stored) = self.store.load()? else {
             return Ok(None);
         };
         if stored.access_token.trim().is_empty() {
             return Ok(None);
         }
-        let auth = enrich(stored, self.auth_path());
+        Ok(Some(enrich(stored, self.auth_path())))
+    }
+
+    pub fn load_auth(&self) -> anyhow::Result<Option<CursorAuth>> {
+        let Some(auth) = self.saved_auth()? else {
+            return Ok(None);
+        };
         self.refresh_if_needed(auth)
     }
 
@@ -125,16 +133,29 @@ pub fn file_store() -> CursorTokenStore<DefaultCursorAuthStore> {
 
 pub fn load_cursor_auth() -> anyhow::Result<Option<CursorAuth>> {
     if let Some(token) = env_cursor_token() {
-        return Ok(Some(enrich(
-            StoredCursorAuth {
-                access_token: token,
-                refresh_token: None,
-                api_key: None,
-            },
-            "environment".to_string(),
-        )));
+        return Ok(Some(env_auth(token)));
     }
     file_store().load_auth()
+}
+
+/// Like `load_cursor_auth`, but an expired token stays as it is. For showing
+/// who is signed in, where waiting on Cursor's servers would stall the screen.
+pub fn saved_cursor_auth() -> anyhow::Result<Option<CursorAuth>> {
+    if let Some(token) = env_cursor_token() {
+        return Ok(Some(env_auth(token)));
+    }
+    file_store().saved_auth()
+}
+
+fn env_auth(token: String) -> CursorAuth {
+    enrich(
+        StoredCursorAuth {
+            access_token: token,
+            refresh_token: None,
+            api_key: None,
+        },
+        "environment".to_string(),
+    )
 }
 
 /// Load only the bearer token for call sites that do not need auth metadata.
@@ -428,6 +449,24 @@ mod tests {
         assert_eq!(auth.user_id.as_deref(), Some("user_1"));
         assert_eq!(auth.email.as_deref(), Some("me@example.com"));
         assert_eq!(auth.expires, Some(4_102_444_800_000));
+    }
+
+    #[test]
+    fn a_status_read_keeps_an_expired_token_and_never_renews_it() {
+        let store = CursorTokenStore::new(InMemoryAuthStore::new());
+        store
+            .save_auth(StoredCursorAuth {
+                access_token: test_jwt(1, Some("user_1"), None),
+                refresh_token: Some("refresh".into()),
+                api_key: None,
+            })
+            .unwrap();
+
+        // `load_auth` would call Cursor's servers here. This must answer at once.
+        let auth = store.saved_auth().unwrap().unwrap();
+        assert_eq!(auth.expires, Some(1000));
+        assert_eq!(auth.refresh_token.as_deref(), Some("refresh"));
+        assert_eq!(auth.user_id.as_deref(), Some("user_1"));
     }
 
     #[test]

@@ -118,7 +118,7 @@ Usage loads in the background and refreshes while Accounts is open. Press `r` to
 refresh now. A failed lookup says usage is unavailable, not zero. If a refresh
 fails after a good one, the row keeps the last numbers and ends with a
 yellow `*`. Details starts with `* Refresh failed`, says the numbers may be out
-of date and gives the reason in one line. The last good numbers are saved, so
+of date and gives the reason in one line, such as `Claude is limiting requests. Try again in 4m.` After a 429, the automatic refresh leaves that account alone until its wait ends (5 minutes when Claude names none, at most an hour), and `r` asks at once. A renewal that gets no answer says so; only a login that is gone or turned down says to sign in again. Each failed lookup is one line in `proxy.log` with the provider, the account id, the kind of failure and how long it took, never a name or a token. The last good numbers are saved, so
 they are still there if you close the monitor and open it again. Page Up and Page
 Down scroll long details.
 
