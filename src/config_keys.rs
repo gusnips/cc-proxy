@@ -1,10 +1,10 @@
 //! `cc-proxy config get/set/list/edit`: inspect and change config.json
-//! through dotted keys (`port`, `opencode.apiKey`, `codex.fullLane`). With no
+//! through dotted keys (`port`, `auth.autoRotate`, `codex.fullLane`). With no
 //! subcommand, `cc-proxy config` opens the same keys as a screen (`interactive`).
 //!
-//! Reads show the FILE value — the thing `set` manages. When an environment
+//! Reads show the FILE value, the thing `set` manages. When an environment
 //! variable overrides a key at runtime, get/list say so instead of
-//! pretending the file wins. Secret keys never print their value.
+//! pretending the file wins.
 
 mod editor;
 mod interactive;
@@ -28,12 +28,11 @@ enum ConfigKind {
     AutoReviewEffort,
     /// Codex tier, validated by the request translator.
     ServiceTier,
-    /// Like Str, but get/list only ever print `set`/`unset`.
-    Secret,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ConfigKey {
+    label: &'static str,
     path: &'static str,
     kind: ConfigKind,
     /// Env vars that override the file at runtime, in precedence order.
@@ -52,7 +51,7 @@ impl ConfigKey {
                 Some(&["off", "none", "low", "medium", "high", "xhigh", "max"])
             }
             ConfigKind::ServiceTier => Some(&["fast", "priority", "ultrafast", "flex"]),
-            ConfigKind::Str | ConfigKind::Port | ConfigKind::Secret => None,
+            ConfigKind::Str | ConfigKind::Port => None,
         }
     }
 
@@ -64,6 +63,7 @@ impl ConfigKey {
 
 static CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
+        label: "Auto-rotate accounts",
         path: "auth.autoRotate",
         kind: ConfigKind::Bool,
         env: &[],
@@ -71,6 +71,23 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "switch saved accounts when one reaches a limit with a retry time",
     },
     ConfigKey {
+        label: "Pause new requests",
+        path: "auth.pauseRequests",
+        kind: ConfigKind::Bool,
+        env: &[],
+        default: Some("false"),
+        blurb: "hold new generations until you resume; running replies finish",
+    },
+    ConfigKey {
+        label: "Wait for account reset",
+        path: "auth.waitForReset",
+        kind: ConfigKind::Bool,
+        env: &[],
+        default: Some("false"),
+        blurb: "when all enabled accounts wait on a confirmed reset, hold streamed Messages requests until the earliest reset",
+    },
+    ConfigKey {
+        label: "Hourly 5-hour window ping",
         path: "auth.hourlyPing",
         kind: ConfigKind::Bool,
         env: &["CCP_HOURLY_PING"],
@@ -78,6 +95,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "every hour, ping each saved account of the routed providers with a 5h window, to start it early",
     },
     ConfigKey {
+        label: "Listener port",
         path: "port",
         kind: ConfigKind::Port,
         env: &["PORT"],
@@ -85,6 +103,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "listener port",
     },
     ConfigKey {
+        label: "Listener address",
         path: "bindAddress",
         kind: ConfigKind::Str,
         env: &["CCP_BIND_ADDRESS"],
@@ -92,6 +111,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "listener address",
     },
     ConfigKey {
+        label: "Auto-review model",
         path: "autoReviewModel",
         kind: ConfigKind::Str,
         env: &["CCP_AUTO_REVIEW_MODEL"],
@@ -99,6 +119,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "model for background review passes",
     },
     ConfigKey {
+        label: "Auto-review effort",
         path: "autoReviewEffort",
         kind: ConfigKind::AutoReviewEffort,
         env: &["CCP_AUTO_REVIEW_EFFORT"],
@@ -106,6 +127,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "effort for routed Codex security reviews (none|low|medium|high|xhigh|max; off inherits)",
     },
     ConfigKey {
+        label: "Verbose request logging",
         path: "log.verbose",
         kind: ConfigKind::Bool,
         env: &["CCP_LOG_VERBOSE"],
@@ -113,6 +135,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "verbose request logging",
     },
     ConfigKey {
+        label: "Log to stderr",
         path: "log.stderr",
         kind: ConfigKind::Bool,
         env: &["CCP_LOG_STDERR"],
@@ -120,13 +143,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "log to stderr instead of the log file",
     },
     ConfigKey {
-        path: "opencode.apiKey",
-        kind: ConfigKind::Secret,
-        env: &["CCP_OPENCODE_API_KEY", "OPENCODE_API_KEY"],
-        default: None,
-        blurb: "OpenCode Go API key",
-    },
-    ConfigKey {
+        label: "OpenCode Go base URL",
         path: "opencode.baseUrl",
         kind: ConfigKind::Str,
         env: &["CCP_OPENCODE_BASE_URL"],
@@ -134,13 +151,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "OpenCode Go API base URL",
     },
     ConfigKey {
-        path: "opencodeZen.apiKey",
-        kind: ConfigKind::Secret,
-        env: &["CCP_OPENCODE_ZEN_API_KEY", "OPENCODE_ZEN_API_KEY"],
-        default: None,
-        blurb: "OpenCode Zen API key",
-    },
-    ConfigKey {
+        label: "OpenCode Zen base URL",
         path: "opencodeZen.baseUrl",
         kind: ConfigKind::Str,
         env: &["CCP_OPENCODE_ZEN_BASE_URL"],
@@ -148,13 +159,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "OpenCode Zen API base URL",
     },
     ConfigKey {
-        path: "anthropic.apiKey",
-        kind: ConfigKind::Secret,
-        env: &["CCP_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
-        default: None,
-        blurb: "Anthropic API key",
-    },
-    ConfigKey {
+        label: "Anthropic base URL",
         path: "anthropic.baseUrl",
         kind: ConfigKind::Str,
         env: &["CCP_ANTHROPIC_BASE_URL"],
@@ -162,13 +167,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "Anthropic API base URL",
     },
     ConfigKey {
-        path: "gemini.apiKey",
-        kind: ConfigKind::Secret,
-        env: &["CCP_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
-        default: None,
-        blurb: "Gemini API key",
-    },
-    ConfigKey {
+        label: "Gemini base URL",
         path: "gemini.baseUrl",
         kind: ConfigKind::Str,
         env: &["CCP_GEMINI_BASE_URL"],
@@ -176,6 +175,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "Gemini API base URL",
     },
     ConfigKey {
+        label: "Codex base URL",
         path: "codex.baseUrl",
         kind: ConfigKind::Str,
         env: &["CCP_CODEX_BASE_URL"],
@@ -183,6 +183,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "Codex API base URL override",
     },
     ConfigKey {
+        label: "Codex service tier",
         path: "codex.serviceTier",
         kind: ConfigKind::ServiceTier,
         env: &["CCP_CODEX_SERVICE_TIER"],
@@ -190,6 +191,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "Codex Messages tier (fast|priority|ultrafast|flex)",
     },
     ConfigKey {
+        label: "Codex full Responses lane",
         path: "codex.fullLane",
         kind: ConfigKind::Bool,
         env: &["CCP_CODEX_FULL_LANE"],
@@ -197,6 +199,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "escape Responses Lite for sol/terra",
     },
     ConfigKey {
+        label: "Codex server compaction",
         path: "codex.serverCompaction",
         kind: ConfigKind::Bool,
         env: &["CCP_CODEX_SERVER_COMPACTION"],
@@ -204,6 +207,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "server-side conversation compaction",
     },
     ConfigKey {
+        label: "Codex Responses API",
         path: "codex.responsesApi",
         kind: ConfigKind::Bool,
         env: &["CCP_CODEX_RESPONSES_API"],
@@ -211,6 +215,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "prefer the Responses API transport",
     },
     ConfigKey {
+        label: "Codex Images API",
         path: "codex.imagesApi",
         kind: ConfigKind::Bool,
         env: &["CCP_CODEX_IMAGES_API"],
@@ -218,6 +223,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "enable the images API",
     },
     ConfigKey {
+        label: "Codex Transcriptions API",
         path: "codex.transcriptionsApi",
         kind: ConfigKind::Bool,
         env: &["CCP_CODEX_TRANSCRIPTIONS_API"],
@@ -225,6 +231,7 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "enable the transcriptions API",
     },
     ConfigKey {
+        label: "Codex previous_response_id",
         path: "codex.previousResponseId",
         kind: ConfigKind::Bool,
         env: &["CCP_CODEX_PREVIOUS_RESPONSE_ID"],
@@ -256,7 +263,7 @@ fn parse_bool(raw: &str) -> Result<bool> {
 
 fn parse_value(key: &ConfigKey, raw: &str) -> Result<serde_json::Value> {
     match key.kind {
-        ConfigKind::Str | ConfigKind::Secret => {
+        ConfigKind::Str => {
             if raw.trim().is_empty() {
                 anyhow::bail!("{} must not be empty", key.path);
             }
@@ -384,28 +391,13 @@ fn env_override(key: &ConfigKey) -> Option<(&'static str, String)> {
 
 fn display_value(key: &ConfigKey, file: Option<String>) -> String {
     if let Some((name, value)) = env_override(key) {
-        return if key.kind == ConfigKind::Secret {
-            format!("set (from ${name})")
-        } else {
-            format!("{value} (from ${name}; overrides config.json)")
-        };
-    }
-    if key.path == "opencode.apiKey" && config::opencode_api_key_source() == Some("claude-settings")
-    {
-        return "set (from claude-settings)".to_string();
+        return format!("{value} (from ${name}; overrides config.json)");
     }
     file_display_value(key, file)
 }
 
 /// The stored value and its default, without reading the environment or credentials.
 fn file_display_value(key: &ConfigKey, file: Option<String>) -> String {
-    if key.kind == ConfigKind::Secret {
-        return if file.is_some() {
-            "set (config.json)".to_string()
-        } else {
-            "unset".to_string()
-        };
-    }
     if let Some(value) = file {
         return value;
     }
@@ -442,12 +434,7 @@ pub fn run_config_get(name: &str) -> Result<()> {
     let root = read_file()?;
     let file = get_dotted(&root, key.path).and_then(scalar_text);
     if file.is_none() && key.default.is_none() && env_override(key).is_none() {
-        let secret_hint = if key.kind == ConfigKind::Secret {
-            " (secrets never print; this only reports set/unset)"
-        } else {
-            ""
-        };
-        anyhow::bail!("{0} is not set{secret_hint}", key.path);
+        anyhow::bail!("{} is not set", key.path);
     }
     println!("{}", display_value(key, file));
     Ok(())
@@ -465,8 +452,9 @@ pub fn run_config_list() -> Result<()> {
     }
     for (key, value) in rows {
         println!(
-            "{:<width$}  # {}",
+            "{:<width$}  # {}: {}",
             format!("{} = {value}", key.path),
+            key.label,
             key.blurb,
             width = width
         );
@@ -544,11 +532,7 @@ fn apply(key: &ConfigKey, raw: &str) -> Result<Applied> {
 pub fn run_config_set(name: &str, raw: &str) -> Result<()> {
     let key = find_key(name)?;
     let applied = apply(key, raw)?;
-    let saved = if key.kind == ConfigKind::Secret {
-        format!("{} saved", key.path)
-    } else {
-        format!("{} = {}", key.path, raw.trim())
-    };
+    let saved = format!("{} = {}", key.path, raw.trim());
     let mut lines = vec![saved, format!("Written to {}", applied.path.display())];
     if let Some(name) = applied.overridden_by {
         lines.push(format!("${name} is set and wins at runtime."));
@@ -670,6 +654,11 @@ mod tests {
     #[test]
     fn every_choice_is_accepted_by_its_own_validator() {
         for key in CONFIG_KEYS {
+            assert!(
+                !key.label.is_empty(),
+                "{} must have a human label",
+                key.path
+            );
             for choice in key.choices().into_iter().flatten() {
                 assert_eq!(
                     parse_value(key, choice).unwrap_or_else(|error| panic!(
@@ -686,7 +675,36 @@ mod tests {
             }
         }
         assert!(find_key("port").unwrap().choices().is_none());
-        assert!(find_key("opencode.apiKey").unwrap().choices().is_none());
+        assert!(find_key("codex.baseUrl").unwrap().choices().is_none());
+    }
+
+    #[test]
+    fn auth_keys_sit_first_and_api_key_settings_are_removed() {
+        let first_three: Vec<_> = CONFIG_KEYS.iter().take(3).map(|key| key.path).collect();
+        assert_eq!(
+            first_three,
+            ["auth.autoRotate", "auth.pauseRequests", "auth.waitForReset"]
+        );
+        for key in ["auth.pauseRequests", "auth.waitForReset"] {
+            let found = find_key(key).unwrap();
+            assert_eq!(found.default, Some("false"));
+            assert_eq!(parse_value(found, "true").unwrap(), serde_json::json!(true));
+            assert_eq!(
+                parse_value(found, "false").unwrap(),
+                serde_json::json!(false)
+            );
+        }
+        for removed in [
+            "opencode.apiKey",
+            "opencodeZen.apiKey",
+            "anthropic.apiKey",
+            "gemini.apiKey",
+        ] {
+            assert!(
+                find_key(removed).is_err(),
+                "{removed} should not be a setting"
+            );
+        }
     }
 
     #[test]
@@ -710,8 +728,8 @@ mod tests {
         assert_eq!(parse_value(flag, "ON").unwrap(), serde_json::json!(true));
         assert!(parse_value(flag, "maybe").is_err());
 
-        let secret = find_key("opencode.apiKey").unwrap();
-        assert!(parse_value(secret, "  ").is_err());
+        let text = find_key("codex.baseUrl").unwrap();
+        assert!(parse_value(text, "  ").is_err());
 
         assert!(find_key("nope.nothing").is_err());
     }

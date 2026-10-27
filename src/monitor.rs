@@ -50,6 +50,8 @@ impl EndpointKind {
 pub enum RequestStatus {
     Started,
     ProviderSelected,
+    Paused,
+    Waiting,
     Compacting,
     Upstream,
     Streaming,
@@ -62,6 +64,8 @@ impl RequestStatus {
         match self {
             Self::Started => "started",
             Self::ProviderSelected => "selected",
+            Self::Paused => "paused",
+            Self::Waiting => "waiting",
             Self::Compacting => "compacting",
             Self::Upstream => "upstream",
             Self::Streaming => "streaming",
@@ -107,6 +111,13 @@ pub enum MonitorEvent {
     ModelResolved {
         request_id: String,
         model: String,
+    },
+    RequestHeld {
+        request_id: String,
+        wait_until_ms: Option<u64>,
+    },
+    RequestReleased {
+        request_id: String,
     },
     CompactionStarted {
         request_id: String,
@@ -174,6 +185,7 @@ pub struct ActiveRequest {
     pub generation_finished_at: Option<SystemTime>,
     pub generation_duration: Option<Duration>,
     pub status: RequestStatus,
+    pub wait_until_ms: Option<u64>,
     pub streamed_bytes: u64,
     pub stream_chunks: u64,
     pub input_tokens: Option<u64>,
@@ -273,6 +285,8 @@ impl Throughput {
 pub struct MonitorState {
     pub started_at: SystemTime,
     pub uptime: Duration,
+    pub requests_paused: bool,
+    pub wait_for_reset: bool,
     pub sessions: Vec<SessionSummary>,
     pub active: Vec<ActiveRequest>,
     pub recent: Vec<CompletedRequest>,
@@ -385,6 +399,8 @@ impl MonitorHandle {
             Err(_) => MonitorState {
                 started_at: SystemTime::now(),
                 uptime: Duration::ZERO,
+                requests_paused: crate::config::auth_pause_requests(),
+                wait_for_reset: crate::config::auth_wait_for_reset(),
                 sessions: Vec::new(),
                 active: Vec::new(),
                 recent: Vec::new(),
@@ -468,6 +484,30 @@ impl MonitorHandle {
             request_id: request_id.into(),
             model: model.into(),
         });
+    }
+
+    pub fn request_held(&self, request_id: impl Into<String>, wait_until_ms: Option<u64>) {
+        self.publish(MonitorEvent::RequestHeld {
+            request_id: request_id.into(),
+            wait_until_ms,
+        });
+    }
+
+    pub fn request_released(&self, request_id: impl Into<String>) {
+        self.publish(MonitorEvent::RequestReleased {
+            request_id: request_id.into(),
+        });
+    }
+
+    pub fn is_held(&self, request_id: &str) -> bool {
+        self.store.lock().is_ok_and(|store| {
+            store.active.get(request_id).is_some_and(|active| {
+                matches!(
+                    active.status,
+                    RequestStatus::Paused | RequestStatus::Waiting
+                )
+            })
+        })
     }
 
     pub fn compaction_started(&self, request_id: impl Into<String>) {
@@ -608,6 +648,8 @@ impl MonitorEvent {
             | Self::AccountSelected { request_id, .. }
             | Self::ProviderSwitched { request_id, .. }
             | Self::ModelResolved { request_id, .. }
+            | Self::RequestHeld { request_id, .. }
+            | Self::RequestReleased { request_id, .. }
             | Self::CompactionStarted { request_id, .. }
             | Self::UpstreamStarted { request_id, .. }
             | Self::GenerationStarted { request_id, .. }
@@ -653,6 +695,7 @@ impl MonitorStore {
                         generation_finished_at: None,
                         generation_duration: None,
                         status: RequestStatus::Started,
+                        wait_until_ms: None,
                         streamed_bytes: 0,
                         stream_chunks: 0,
                         input_tokens: None,
@@ -743,13 +786,43 @@ impl MonitorStore {
                     });
                 }
             }
+            MonitorEvent::RequestHeld {
+                request_id,
+                wait_until_ms,
+            } => {
+                if let Some(active) = self.active.get_mut(&request_id) {
+                    active.status = if wait_until_ms.is_some() {
+                        RequestStatus::Waiting
+                    } else {
+                        RequestStatus::Paused
+                    };
+                    active.wait_until_ms = wait_until_ms;
+                }
+            }
+            MonitorEvent::RequestReleased { request_id } => {
+                if let Some(active) = self.active.get_mut(&request_id) {
+                    active.wait_until_ms = None;
+                    if matches!(
+                        active.status,
+                        RequestStatus::Paused | RequestStatus::Waiting
+                    ) {
+                        active.status = if active.provider.is_some() {
+                            RequestStatus::ProviderSelected
+                        } else {
+                            RequestStatus::Started
+                        };
+                    }
+                }
+            }
             MonitorEvent::CompactionStarted { request_id } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
+                    active.wait_until_ms = None;
                     active.status = RequestStatus::Compacting;
                 }
             }
             MonitorEvent::UpstreamStarted { request_id } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
+                    active.wait_until_ms = None;
                     active.status = RequestStatus::Upstream;
                 }
             }
@@ -970,6 +1043,7 @@ impl MonitorStore {
                 generation_finished_at: None,
                 generation_duration: None,
                 status: RequestStatus::Started,
+                wait_until_ms: None,
                 streamed_bytes: 0,
                 stream_chunks: 0,
                 input_tokens: None,
@@ -1162,6 +1236,8 @@ impl MonitorStore {
         MonitorState {
             started_at: self.started_at,
             uptime: self.started_instant.elapsed(),
+            requests_paused: crate::config::auth_pause_requests(),
+            wait_for_reset: crate::config::auth_wait_for_reset(),
             sessions,
             active,
             recent: self.recent.iter().cloned().collect(),

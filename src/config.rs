@@ -79,6 +79,10 @@ struct FileConfig {
 struct AuthConfig {
     #[serde(rename = "autoRotate")]
     auto_rotate: Option<bool>,
+    #[serde(rename = "pauseRequests")]
+    pause_requests: Option<bool>,
+    #[serde(rename = "waitForReset")]
+    wait_for_reset: Option<bool>,
     #[serde(rename = "hourlyPing")]
     hourly_ping: Option<bool>,
 }
@@ -305,6 +309,20 @@ pub fn bind_address() -> String {
 pub fn auth_auto_rotate() -> bool {
     read_file_config(&paths::config_dir())
         .and_then(|file| file.auth?.auto_rotate)
+        .unwrap_or(false)
+}
+
+/// Read on each request, so pausing or resuming takes effect without a restart.
+pub fn auth_pause_requests() -> bool {
+    read_file_config(&paths::config_dir())
+        .and_then(|file| file.auth?.pause_requests)
+        .unwrap_or(false)
+}
+
+/// Read on each request, so toggling reset waits takes effect without a restart.
+pub fn auth_wait_for_reset() -> bool {
+    read_file_config(&paths::config_dir())
+        .and_then(|file| file.auth?.wait_for_reset)
         .unwrap_or(false)
 }
 
@@ -921,24 +939,6 @@ pub fn anthropic_base_url() -> String {
         .unwrap_or_else(|| "https://api.anthropic.com".to_string())
 }
 
-pub fn save_anthropic_api_key(key: &str) -> anyhow::Result<PathBuf> {
-    crate::config_keys::write_value(
-        "anthropic.apiKey",
-        serde_json::Value::String(key.to_string()),
-    )
-}
-
-pub fn clear_anthropic_api_key() -> anyhow::Result<bool> {
-    let had = read_file_config(&paths::config_dir())
-        .and_then(|f| f.anthropic)
-        .and_then(|c| c.api_key)
-        .is_some();
-    if had {
-        crate::config_keys::remove_values(["anthropic.apiKey"])?;
-    }
-    Ok(had)
-}
-
 pub fn gemini_api_key_source() -> Option<&'static str> {
     let env: HashMap<_, _> = std::env::vars().collect();
     for var in ["CCP_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"] {
@@ -990,21 +990,6 @@ pub fn gemini_base_url() -> String {
         .and_then(|c| c.base_url)
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string())
-}
-
-pub fn save_gemini_api_key(key: &str) -> anyhow::Result<PathBuf> {
-    crate::config_keys::write_value("gemini.apiKey", serde_json::Value::String(key.to_string()))
-}
-
-pub fn clear_gemini_api_key() -> anyhow::Result<bool> {
-    let had = read_file_config(&paths::config_dir())
-        .and_then(|f| f.gemini)
-        .and_then(|c| c.api_key)
-        .is_some();
-    if had {
-        crate::config_keys::remove_values(["gemini.apiKey"])?;
-    }
-    Ok(had)
 }
 
 pub fn custom_providers() -> BTreeMap<String, CustomProviderConfig> {
@@ -1064,23 +1049,6 @@ pub fn remove_custom_provider(name: &str) -> anyhow::Result<bool> {
         crate::config_keys::remove_values([provider_key.as_str(), tiers_key.as_str()])?;
     }
     Ok(exists)
-}
-
-pub fn save_custom_provider_api_key(name: &str, key: &str) -> anyhow::Result<PathBuf> {
-    let path = format!("providers.{name}.apiKey");
-    crate::config_keys::write_value(&path, serde_json::Value::String(key.to_string()))
-}
-
-pub fn clear_custom_provider_api_key(name: &str) -> anyhow::Result<bool> {
-    let had = custom_providers()
-        .get(name)
-        .and_then(|c| c.api_key.as_ref())
-        .is_some();
-    if had {
-        let path = format!("providers.{name}.apiKey");
-        crate::config_keys::remove_values([path.as_str()])?;
-    }
-    Ok(had)
 }
 
 pub fn is_verbose() -> bool {
@@ -1822,6 +1790,43 @@ mod tests {
         ] {
             fs::write(&path, json).unwrap();
             assert_eq!(auth_auto_rotate(), expected, "{json}");
+        }
+    }
+
+    #[test]
+    fn pause_requests_and_wait_for_reset_default_off_and_hot_reload() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _env = isolated_env(&config);
+        assert!(!auth_pause_requests());
+        assert!(!auth_wait_for_reset());
+        let path = config.path().join("config.json");
+        for (json, expected_pause, expected_wait) in [
+            (
+                r#"{"auth":{"pauseRequests":true,"waitForReset":true}}"#,
+                true,
+                true,
+            ),
+            (
+                r#"{"auth":{"pauseRequests":true,"waitForReset":false}}"#,
+                true,
+                false,
+            ),
+            (
+                r#"{"auth":{"pauseRequests":false,"waitForReset":true}}"#,
+                false,
+                true,
+            ),
+            (r#"{"auth":{}}"#, false, false),
+            (
+                r#"{"auth":{"pauseRequests":"true","waitForReset":"true"}}"#,
+                false,
+                false,
+            ),
+        ] {
+            fs::write(&path, json).unwrap();
+            assert_eq!(auth_pause_requests(), expected_pause, "{json}");
+            assert_eq!(auth_wait_for_reset(), expected_wait, "{json}");
         }
     }
 

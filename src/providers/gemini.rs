@@ -424,16 +424,7 @@ impl CliHandlers for GeminiCli {
     }
 
     fn login(&self) -> Result<()> {
-        let url = "https://aistudio.google.com/apikey";
-        println!("Open {url} to get your Google AI Studio API key.");
-        let _ = crate::browser::open(url);
-        println!("Paste your Google AI Studio Gemini API key (input is hidden) and press Enter:");
-        let key = crate::prompt::read_hidden_line("API key: ")?;
-        if key.is_empty() {
-            bail!("no API key provided");
-        }
-        let path = config::save_gemini_api_key(&key)?;
-        println!("Gemini API key saved to {}", path.display());
+        crate::auth_cli::AccountCli::open("gemini", &GEMINI_ACCOUNTS)?.login(&Default::default())?;
         println!("Fetching Gemini's model list...");
         if let Err(error) = refresh_models() {
             eprintln!(
@@ -465,12 +456,7 @@ impl CliHandlers for GeminiCli {
 
     fn logout(&self) -> Result<()> {
         let _ = std::fs::remove_file(super::model_catalog::cache_file("gemini"));
-        if config::clear_gemini_api_key()? {
-            println!("Gemini stored key cleared.");
-        } else {
-            println!("No stored Gemini key in config.json.");
-        }
-        Ok(())
+        crate::auth_cli::AccountCli::open("gemini", &GEMINI_ACCOUNTS)?.logout(None, false)
     }
 
     fn accounts(&self) -> Option<&dyn crate::accounts::AccountSupport> {

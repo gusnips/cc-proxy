@@ -704,6 +704,7 @@ async fn handler_transcription(State(state): State<Arc<AppState>>, req: Request<
         traffic: None,
         monitor: state.monitor.clone(),
     };
+    crate::rotation::wait_while_paused(&req_id, state.monitor.as_ref()).await;
     let response = match state.transcriptions.as_ref() {
         Some(backend) => backend.handle(prepared, context).await,
         None => transcription_error_response(TranscriptionRequestError {
@@ -880,6 +881,7 @@ async fn dispatch_image_request(
         traffic: None,
         monitor: state.monitor.clone(),
     };
+    crate::rotation::wait_while_paused(&req_id, state.monitor.as_ref()).await;
     let response = match state.images.as_ref() {
         Some(backend) => backend.handle(operation, prepared, context).await,
         None => image_error_response(ImageRequestError {
@@ -1144,6 +1146,7 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
         traffic: traffic.clone(),
         monitor: state.monitor.clone(),
     };
+    crate::rotation::wait_while_paused(&req_id, state.monitor.as_ref()).await;
     let response = if let Some(parsed) = parsed {
         match provider
             .generate_anthropic_stream(parsed.messages, context)
@@ -1372,6 +1375,7 @@ async fn handler_chat_completions(
         traffic: traffic.clone(),
         monitor: state.monitor.clone(),
     };
+    crate::rotation::wait_while_paused(&req_id, state.monitor.as_ref()).await;
     let response = if let Some(translated) = translated {
         match state.chat_completions.as_ref() {
             Some(backend) => backend.handle(translated, context).await,
@@ -1857,22 +1861,39 @@ async fn dispatch_request(
         monitor: state.monitor.clone(),
     };
 
-    let response = if count_tokens {
-        provider.handle_count_tokens(body, context).await
-    } else if auto_review_route.is_some() {
-        crate::rotation::execute(provider.as_ref(), body, context, None).await
+    let want_stream = !count_tokens && body.stream;
+    let monitor_for_hold = state.monitor.clone();
+    let registry_for_call = state.registry.clone();
+    let provider_for_call = provider.clone();
+    let requested_for_call = requested_model.clone();
+    let req_id_for_call = req_id.clone();
+    let has_auto_review = auto_review_route.is_some();
+    let call = async move {
+        if !count_tokens {
+            crate::rotation::wait_while_paused(&req_id_for_call, monitor_for_hold.as_ref()).await;
+        }
+        if count_tokens {
+            provider_for_call.handle_count_tokens(body, context).await
+        } else if has_auto_review {
+            crate::rotation::execute(provider_for_call.as_ref(), body, context, None).await
+        } else {
+            let route = crate::config::route();
+            crate::rotation::execute_routed(
+                &registry_for_call,
+                &route,
+                &requested_for_call,
+                provider_for_call,
+                body,
+                context,
+                conversation_identity,
+            )
+            .await
+        }
+    };
+    let response = if want_stream {
+        await_held_stream(call, state.monitor.as_ref(), &req_id).await
     } else {
-        let route = crate::config::route();
-        crate::rotation::execute_routed(
-            &state.registry,
-            &route,
-            &requested_model,
-            provider.clone(),
-            body,
-            context,
-            conversation_identity,
-        )
-        .await
+        call.await
     };
     // A fallback provider may have answered, so name the one that did.
     let (served_provider, served_model) = response
@@ -1945,6 +1966,118 @@ async fn dispatch_request(
 /// Header Claude Code reads to populate the `requestId` field it writes into
 /// every transcript record.
 const REQUEST_ID_HEADER: &str = "request-id";
+/// How long a paused or reset-waiting stream can sit before cc-proxy opens the
+/// SSE response and sends `: keep-alive` comments so the client's 120s socket
+/// timer and 600s header timer never cut the wait short.
+const HOLD_KEEPALIVE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(45);
+const HOLD_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn await_held_stream(
+    call: impl Future<Output = Response> + Send + 'static,
+    monitor: Option<&MonitorHandle>,
+    req_id: &str,
+) -> Response {
+    await_held_stream_with(
+        call,
+        monitor,
+        req_id,
+        HOLD_KEEPALIVE_THRESHOLD,
+        HOLD_KEEPALIVE_INTERVAL,
+    )
+    .await
+}
+
+async fn await_held_stream_with(
+    call: impl Future<Output = Response> + Send + 'static,
+    monitor: Option<&MonitorHandle>,
+    req_id: &str,
+    threshold: std::time::Duration,
+    interval: std::time::Duration,
+) -> Response {
+    let mut call = Box::pin(call);
+    if let Ok(response) = tokio::time::timeout(threshold, &mut call).await {
+        return response;
+    }
+    // Only open a keep-alive stream while the request is held in the proxy
+    // (paused or waiting on an account reset), never during an upstream call.
+    if !monitor.is_some_and(|monitor| monitor.is_held(req_id)) {
+        return call.await;
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
+    tokio::spawn(async move {
+        if tx
+            .send(bytes::Bytes::from_static(b": keep-alive\n\n"))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+        let response = loop {
+            tokio::select! {
+                biased;
+                _ = tx.closed() => return,
+                response = &mut call => break response,
+                _ = ticker.tick() => {
+                    if tx
+                        .send(bytes::Bytes::from_static(b": keep-alive\n\n"))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        };
+        if response.status().is_success() {
+            let mut body = response.into_body();
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = tx.closed() => return,
+                    frame = body.frame() => match frame {
+                        Some(Ok(frame)) => {
+                            if let Ok(data) = frame.into_data()
+                                && tx.send(data).await.is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Some(Err(_)) | None => break,
+                    },
+                }
+            }
+        } else if let Ok(bytes) = axum::body::to_bytes(response.into_body(), 64 * 1024).await {
+            let payload = serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| {
+                json!({
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": String::from_utf8_lossy(&bytes).trim(),
+                    }
+                })
+            });
+            let event = format!("event: error\ndata: {payload}\n\n");
+            let _ = tx.send(bytes::Bytes::from(event)).await;
+        }
+    });
+    let stream = futures_util::stream::poll_fn(move |cx| {
+        rx.poll_recv(cx)
+            .map(|chunk| chunk.map(Ok::<_, std::convert::Infallible>))
+    });
+    (
+        StatusCode::OK,
+        [
+            (http::header::CONTENT_TYPE, "text/event-stream"),
+            (http::header::CACHE_CONTROL, "no-cache"),
+            (http::header::CONNECTION, "keep-alive"),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response()
+}
 
 /// Publish the per-request id this proxy mints. Anthropic returns `request-id`,
 /// and Claude Code records it as `requestId`; without it every downstream
@@ -2663,5 +2796,68 @@ mod auto_review_tests {
             apply_auto_review_model(&mut classifier, true, Some("grok-4.5"), "codex").is_none()
         );
         assert_eq!(classifier.model.as_deref(), Some("gpt-5.6-sol"));
+    }
+
+    #[tokio::test]
+    async fn held_stream_emits_keep_alive_and_cancels_when_client_disconnects() {
+        use super::{
+            Arc, Body, EndpointKind, IntoResponse, MonitorHandle, Response, StatusCode,
+            await_held_stream_with,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let monitor = MonitorHandle::default();
+        monitor.request_started("req-hold-1", None, None, EndpointKind::Messages);
+        monitor.request_held("req-hold-1", None);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let response = await_held_stream_with(
+            async move {
+                let _ = release_rx.await;
+                (
+                    StatusCode::OK,
+                    [(http::header::CONTENT_TYPE, "text/event-stream")],
+                    "event: message_start\ndata: {}\n\n",
+                )
+                    .into_response()
+            },
+            Some(&monitor),
+            "req-hold-1",
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = release_tx.send(());
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains(": keep-alive\n\n"), "{text}");
+        assert!(text.contains("event: message_start"), "{text}");
+
+        // Dropping the downstream stream while held cancels the pending upstream call.
+        monitor.request_started("req-hold-cancel", None, None, EndpointKind::Messages);
+        monitor.request_held("req-hold-cancel", None);
+        let called_upstream = Arc::new(AtomicBool::new(false));
+        let called_clone = called_upstream.clone();
+        let (release_tx2, release_rx2) = tokio::sync::oneshot::channel::<()>();
+        let response = await_held_stream_with(
+            async move {
+                let _ = release_rx2.await;
+                called_clone.store(true, Ordering::SeqCst);
+                Response::new(Body::from("never reached"))
+            },
+            Some(&monitor),
+            "req-hold-cancel",
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+        )
+        .await;
+        drop(response);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = release_tx2.send(());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!called_upstream.load(Ordering::SeqCst));
     }
 }

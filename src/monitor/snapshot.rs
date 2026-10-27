@@ -74,6 +74,10 @@ pub struct MonitorSnapshot {
     #[serde(default = "default_snapshot_at")]
     pub snapshot_at: SystemTime,
     pub uptime: Duration,
+    #[serde(default)]
+    pub requests_paused: bool,
+    #[serde(default)]
+    pub wait_for_reset: bool,
     pub sessions: Vec<SessionSnapshot>,
     pub active: Vec<ActiveSnapshot>,
     pub recent: Vec<CompletedSnapshot>,
@@ -89,6 +93,8 @@ impl MonitorSnapshot {
             started_at: now,
             snapshot_at: now,
             uptime: Duration::ZERO,
+            requests_paused: false,
+            wait_for_reset: false,
             sessions: Vec::new(),
             active: Vec::new(),
             recent: Vec::new(),
@@ -103,6 +109,8 @@ impl From<MonitorState> for MonitorSnapshot {
             started_at: state.started_at,
             snapshot_at: SystemTime::now(),
             uptime: state.uptime,
+            requests_paused: state.requests_paused,
+            wait_for_reset: state.wait_for_reset,
             sessions: state.sessions.into_iter().map(Into::into).collect(),
             active: state.active.into_iter().map(Into::into).collect(),
             recent: state.recent.into_iter().map(Into::into).collect(),
@@ -130,6 +138,8 @@ pub struct ActiveSnapshot {
     pub generation_finished_at: Option<SystemTime>,
     pub generation_duration: Option<Duration>,
     pub status: RequestStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_until_ms: Option<u64>,
     pub streamed_bytes: u64,
     pub stream_chunks: u64,
     pub input_tokens: Option<u64>,
@@ -171,6 +181,7 @@ impl From<ActiveRequest> for ActiveSnapshot {
             generation_finished_at: value.generation_finished_at,
             generation_duration: value.generation_duration,
             status: value.status,
+            wait_until_ms: value.wait_until_ms,
             streamed_bytes: value.streamed_bytes,
             stream_chunks: value.stream_chunks,
             input_tokens: value.usage.input_or(value.input_tokens),

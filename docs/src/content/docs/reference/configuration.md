@@ -13,7 +13,11 @@ These settings configure the proxy process. Claude Code client settings such as 
 {
   "bindAddress": "127.0.0.1",
   "port": 18765,
-  "auth": { "autoRotate": false },
+  "auth": {
+    "autoRotate": false,
+    "pauseRequests": false,
+    "waitForReset": false
+  },
   "autoReviewModel": "gpt-5.6-terra",
   "route": {
     "on": true,
@@ -100,6 +104,16 @@ cc-proxy config set auth.autoRotate true
 
 Or run `cc-proxy config`, find `auth.autoRotate` and press Right. The change
 applies on the next request.
+
+| Config key           | Default | Purpose                                                                                                                                                                                          |
+| -------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `auth.autoRotate`    | `false` | Switches saved accounts when a Messages request hits a provider-confirmed reset time or spent balance.                                                                                           |
+| `auth.pauseRequests` | `false` | Holds new generations before they start until resumed (`p` in the monitor or `cc-proxy config set auth.pauseRequests false`). Active replies finish, and `count_tokens`, health and usage work. |
+| `auth.waitForReset`  | `false` | With `auth.autoRotate` on, holds streamed Messages requests when every enabled account has a confirmed reset time, then rechecks at the earliest reset. Never waits on guessed limits or credit. |
+| `auth.hourlyPing`    | `false` | Sends a 1-token request at the top of each hour to enabled accounts on plans with a rolling 5-hour window (`CCP_HOURLY_PING` overrides).                                                         |
+
+Both `auth.pauseRequests` and `auth.waitForReset` live in `config.json` and stay
+in effect across monitor closes and proxy restarts until you turn them off.
 
 When a Messages request returns HTTP 429 with a valid `Retry-After` or a
 provider-confirmed future reset time, the account waits until that time.
