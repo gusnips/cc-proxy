@@ -15,7 +15,7 @@ use std::time::Duration;
 use axum::response::Response;
 use http::StatusCode;
 
-use super::chats::{Place, place_of, remember};
+use super::chats::{Place, assign, place_of, remember};
 use super::{
     Cooldown, Cooldowns, MAX_ROTATION_WAIT_MS, ServedBy, all_limited, execute, exhausted_response,
     now_ms, retry_deadline, spent_response, storage_error,
@@ -24,7 +24,7 @@ use crate::accounts::{Account, Accounts};
 use crate::anthropic::{MessagesRequest, json_error};
 use crate::config::{PoolEntry, Route};
 use crate::provider::{AuthState, Provider, RequestContext};
-use crate::registry::{Registry, anthropic_model_family};
+use crate::registry::{Registry, anthropic_model_family, normalize_incoming_model};
 use crate::request_identity::ConversationIdentity;
 
 /// One row that can serve this request: who answers, and with which model.
@@ -113,6 +113,11 @@ impl Saved {
 /// enabled rows, and answers as before when it has none: asking for a model by
 /// name is a choice of provider. With no row at all (nothing is signed in) the
 /// provider the server chose answers, so the person reads its own sign-in help.
+///
+/// Claude Code's `[1m]` suffix asks for the long context window and does not
+/// change the model. Read with it, `claude-opus-4-8[1m]` would look like one
+/// provider's own model, and a chat warm on a fallback would go back to the
+/// first provider. So the names are read without it here and in `plan_rows`.
 fn pool_rows(
     registry: &Registry,
     route: &Route,
@@ -123,7 +128,7 @@ fn pool_rows(
         return None;
     }
     let mut rows = crate::pool::active(route, registry);
-    if anthropic_model_family(requested).is_none() {
+    if anthropic_model_family(&normalize_incoming_model(requested)).is_none() {
         rows.retain(|row| row.provider == primary);
     }
     (!rows.is_empty()).then_some(rows)
@@ -140,12 +145,13 @@ fn plan_rows(
     rows: Vec<PoolEntry>,
     saved: &mut HashMap<String, Saved>,
 ) -> (Vec<Plan>, Option<String>) {
-    let tiered = anthropic_model_family(requested).is_some();
+    let requested = normalize_incoming_model(requested);
+    let tiered = anthropic_model_family(&requested).is_some();
     let mut plans = Vec::new();
     let mut refusal = None;
     for row in rows {
         let (provider, model) = if tiered {
-            match crate::tiers::resolve_for(registry, route, &row.provider, requested) {
+            match crate::tiers::resolve_for(registry, route, &row.provider, &requested) {
                 Ok(model) => match registry.provider_for_model(&model) {
                     Some(provider) if provider.name() == row.provider => (provider, model),
                     _ => continue,
@@ -179,6 +185,33 @@ fn plan_rows(
     (plans, refusal)
 }
 
+/// The key a request's chat is remembered under, and the main chat's key when
+/// the request is a helper agent's. The main chat and its helper agents share
+/// one session header, so each helper gets a key of its own: it starts where the
+/// main chat is, and whatever it does never moves the main chat. A request with
+/// no valid identity is not remembered, so a malformed header cannot take over
+/// a real chat's place.
+fn chat_keys(identity: Option<&ConversationIdentity>) -> (Option<String>, Option<String>) {
+    match identity {
+        None => (None, None),
+        Some(ConversationIdentity::Main(session)) => (Some(session.clone()), None),
+        Some(agent @ ConversationIdentity::Agent(session, _)) => (
+            Some(agent.search_session_id().into_owned()),
+            Some(session.clone()),
+        ),
+    }
+}
+
+fn ready(
+    plans: &[Plan],
+    at: usize,
+    tried: &HashSet<usize>,
+    snapshot: &[Cooldown],
+    now: u64,
+) -> bool {
+    !tried.contains(&at) && plans[at].wait(snapshot, now).is_none()
+}
+
 /// The chat's own row when it can serve, else the first row that is ready.
 fn pick(
     plans: &[Plan],
@@ -187,10 +220,39 @@ fn pick(
     snapshot: &[Cooldown],
     now: u64,
 ) -> Option<usize> {
-    let ready = |at: usize| !tried.contains(&at) && plans[at].wait(snapshot, now).is_none();
+    let is_ready = |at: usize| ready(plans, at, tried, snapshot, now);
     chat.and_then(|place| plans.iter().position(|plan| &plan.place() == place))
-        .filter(|at| ready(*at))
-        .or_else(|| (0..plans.len()).find(|at| ready(*at)))
+        .filter(|at| is_ready(*at))
+        .or_else(|| (0..plans.len()).find(|at| is_ready(*at)))
+}
+
+/// A chat with no row of its own that can serve takes the first row that is
+/// ready, `first`, or any other ready row of the same provider right under it:
+/// the one with the fewest recent chats. A row of another provider ends the
+/// run, so the order of the list still decides which provider answers, and the
+/// accounts of that provider share the new chats. The choice is saved before
+/// the request starts, so new chats that arrive together do not all pick the
+/// same account.
+fn spread(
+    plans: &[Plan],
+    first: usize,
+    chat: &str,
+    tried: &HashSet<usize>,
+    snapshot: &[Cooldown],
+    now: u64,
+) -> usize {
+    let provider = plans[first].provider.name();
+    let group: Vec<usize> = (first..plans.len())
+        .take_while(|at| plans[*at].provider.name() == provider)
+        .filter(|at| ready(plans, *at, tried, snapshot, now))
+        .collect();
+    if group.len() < 2 {
+        return first;
+    }
+    let places: Vec<Place> = group.iter().map(|at| plans[*at].place()).collect();
+    assign(chat, &places)
+        .and_then(|place| group.into_iter().find(|at| plans[*at].place() == place))
+        .unwrap_or(first)
 }
 
 fn first_release(plans: &[Plan], snapshot: &[Cooldown], now: u64) -> Option<u64> {
@@ -281,8 +343,16 @@ impl Pool<'_> {
         }
 
         let log = crate::logging::create_logger("auth");
-        let chat = context.session_id.clone();
-        let remembered = chat.as_deref().and_then(place_of);
+        let (chat, root) = chat_keys(identity.as_ref());
+        let own = chat.as_deref().and_then(place_of);
+        let root_place = root.as_deref().and_then(place_of);
+        let remembered = own.clone().or_else(|| root_place.clone());
+        // A chat keeps its place unless that row is gone, turned off or
+        // waiting. A row that only has no model for this request (the chat's
+        // other tiers) stays its place, and this request must not replace it.
+        let kept = remembered.as_ref().is_some_and(|place| {
+            enabled.contains(place) && !plans.iter().any(|p| &p.place() == place)
+        });
         let mut tried: HashSet<usize> = HashSet::new();
         let mut last_response = None;
         let mut waited = false;
@@ -298,7 +368,7 @@ impl Pool<'_> {
                 Vec::new()
             };
             let now = now_ms();
-            let Some(at) = pick(&plans, remembered.as_ref(), &tried, &snapshot, now) else {
+            let Some(mut at) = pick(&plans, remembered.as_ref(), &tried, &snapshot, now) else {
                 // Nothing ready: hold the request until the first row frees up
                 // (once per request, bounded), so the turn continues on it
                 // instead of dying on a 429.
@@ -335,6 +405,14 @@ impl Pool<'_> {
                         )
                     });
             };
+            // Without auto-rotate the first row answers everything, so nothing spreads.
+            if auto
+                && !kept
+                && let Some(chat) = chat.as_deref()
+                && remembered.as_ref() != Some(&plans[at].place())
+            {
+                at = spread(&plans, at, chat, &tried, &snapshot, now);
+            }
             tried.insert(at);
             let plan = &plans[at];
             let provider = plan.provider.name();
@@ -366,13 +444,10 @@ impl Pool<'_> {
             let sitout = auto.then(|| retry_deadline(&response, now_ms())).flatten();
             let Some(sitout) = sitout else {
                 if let Some(chat) = chat.as_deref() {
-                    // A chat keeps its place unless that row is gone, turned off
-                    // or waiting. A row that only has no model for this request
-                    // (the chat's other tiers) stays its place.
-                    let kept = remembered.as_ref().is_some_and(|place| {
-                        enabled.contains(place) && !plans.iter().any(|p| &p.place() == place)
-                    });
-                    if !kept {
+                    // A helper agent that stays where the main chat is needs
+                    // no place of its own.
+                    let follows_root = own.is_none() && root_place.as_ref() == Some(&plan.place());
+                    if !kept && !follows_root {
                         remember(chat, plan.place());
                     }
                 }
@@ -660,6 +735,19 @@ mod tests {
             requested: &str,
             monitor: Option<MonitorHandle>,
         ) -> Response {
+            let identity = chat.map(|chat| ConversationIdentity::Main(chat.to_string()));
+            self.ask_as(rows, identity, auto, requested, monitor).await
+        }
+
+        /// A request from this conversation: the main chat or a helper agent.
+        async fn ask_as(
+            &self,
+            rows: &[PoolEntry],
+            identity: Option<ConversationIdentity>,
+            auto: bool,
+            requested: &str,
+            monitor: Option<MonitorHandle>,
+        ) -> Response {
             let saved = [
                 (
                     "claude".to_string(),
@@ -699,14 +787,14 @@ mod tests {
             .unwrap();
             let context = RequestContext {
                 req_id: "pool-test".into(),
-                session_id: chat.map(str::to_string),
+                session_id: None,
                 session_seq: None,
                 provider: first,
                 account: None,
                 traffic: None,
                 monitor,
             };
-            pool.drive(rows.to_vec(), body, context, None).await
+            pool.drive(rows.to_vec(), body, context, identity).await
         }
 
         fn served(&self) -> Vec<Place> {
@@ -810,6 +898,84 @@ mod tests {
         // The chat is still on Codex for its next `opus` request.
         let back = world.ask(&mixed(), Some("chat-d")).await;
         assert_eq!(text(back).await, format!("codex:{CODEX_ONE}"));
+    }
+
+    #[tokio::test]
+    async fn a_helper_agent_never_moves_the_main_chat() {
+        let world = world();
+        let main = || Some(ConversationIdentity::Main("chat-main".into()));
+        let helper = |agent: &str| {
+            Some(ConversationIdentity::Agent(
+                "chat-main".into(),
+                agent.into(),
+            ))
+        };
+        let started = world
+            .ask_as(&mixed(), main(), true, "claude-opus-4-8", None)
+            .await;
+        assert_eq!(text(started).await, format!("claude:{CLAUDE_PRO}"));
+        world.served();
+
+        // A helper that asks for a Codex model uses Codex only: that is its own
+        // choice, and the main chat stays on Claude with its warm cache.
+        let codex_only = vec![row("codex", Some(CODEX_ONE))];
+        let child = world
+            .ask_as(
+                &codex_only,
+                helper("agent-1"),
+                true,
+                "claude-opus-4-8",
+                None,
+            )
+            .await;
+        assert_eq!(text(child).await, format!("codex:{CODEX_ONE}"));
+        world.served();
+        let again = world
+            .ask_as(&mixed(), main(), true, "claude-opus-4-8", None)
+            .await;
+        assert_eq!(text(again).await, format!("claude:{CLAUDE_PRO}"));
+        world.served();
+
+        // A new helper starts where the main chat is, and keeps no place of its own.
+        let fresh = world
+            .ask_as(&mixed(), helper("agent-2"), true, "claude-opus-4-8", None)
+            .await;
+        assert_eq!(text(fresh).await, format!("claude:{CLAUDE_PRO}"));
+        assert!(
+            place_of(
+                &ConversationIdentity::Agent("chat-main".into(), "agent-2".into())
+                    .search_session_id()
+            )
+            .is_none()
+        );
+        // The helper that left the main chat's place stays where it went.
+        world.served();
+        let stay = world
+            .ask_as(&mixed(), helper("agent-1"), true, "claude-opus-4-8", None)
+            .await;
+        assert_eq!(text(stay).await, format!("codex:{CODEX_ONE}"));
+    }
+
+    #[tokio::test]
+    async fn the_long_context_suffix_does_not_pull_a_chat_off_its_fallback() {
+        let world = world();
+        world.limit("claude", Some(CLAUDE_PRO));
+        let started = world.ask(&mixed(), Some("chat-1m")).await;
+        assert_eq!(text(started).await, format!("codex:{CODEX_ONE}"));
+        world.served();
+        world.recover("claude", CLAUDE_PRO);
+        // `[1m]` is the same Claude name: every row stays open and the chat
+        // stays on Codex, as it does without the suffix.
+        let same = world
+            .ask_with(&mixed(), Some("chat-1m"), true, "claude-opus-4-8[1m]", None)
+            .await;
+        assert_eq!(text(same).await, format!("codex:{CODEX_ONE}"));
+        let mut route = world.route.clone();
+        route.pool = Some(vec![row("claude", None), row("codex", None)]);
+        assert_eq!(
+            pool_rows(&world.registry, &route, "claude", "claude-opus-4-8[1m]"),
+            pool_rows(&world.registry, &route, "claude", "claude-opus-4-8")
+        );
     }
 
     #[tokio::test]
@@ -982,15 +1148,73 @@ mod tests {
         assert_eq!(text(same).await, format!("codex:{CODEX_ONE}"));
         assert_eq!(world.served(), [place("codex", Some(CODEX_ONE))]);
 
-        // Its row was removed or turned off while the proxy was down: the
-        // first ready row answers, as for a new chat.
+        // Its row was removed or turned off while the proxy was down: it takes
+        // a ready row of the first provider, as a new chat does.
         super::super::chats::forget_loaded();
         let rows = vec![
             row("claude", Some(CLAUDE_PRO)),
             row("claude", Some(CLAUDE_MAX)),
         ];
         let moved = world.ask(&rows, Some("chat-restart")).await;
-        assert_eq!(text(moved).await, format!("claude:{CLAUDE_PRO}"));
+        assert!(text(moved).await.starts_with("claude:"));
+    }
+
+    #[tokio::test]
+    async fn new_chats_spread_over_the_first_providers_ready_accounts_in_order() {
+        let world = world();
+        // Names of their own: places are counted across every chat in the process.
+        let ids = ["spread-a", "spread-b", "spread-c"];
+        let rows = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| row("claude", Some(*id)))
+                .chain([row("codex", Some(CODEX_ONE))])
+                .collect::<Vec<_>>()
+        };
+        let answer = |chat: &'static str, rows: Vec<PoolEntry>| {
+            let world = &world;
+            async move { text(world.ask(&rows, Some(chat)).await).await }
+        };
+        // Three new chats, three accounts, in the order of the list.
+        assert_eq!(answer("spread-1", rows(&ids)).await, "claude:spread-a");
+        assert_eq!(answer("spread-2", rows(&ids)).await, "claude:spread-b");
+        assert_eq!(answer("spread-3", rows(&ids)).await, "claude:spread-c");
+        assert_eq!(answer("spread-4", rows(&ids)).await, "claude:spread-a");
+        // A chat stays where it started, even when the others are lighter.
+        assert_eq!(answer("spread-1", rows(&ids)).await, "claude:spread-a");
+        // An account that is waiting takes no new chat, and Codex, under
+        // the Claude rows, takes none while any of them is ready.
+        world.limit("claude", Some("spread-b"));
+        assert_eq!(answer("spread-5", rows(&ids)).await, "claude:spread-c");
+        let calls = world.served();
+        assert!(!calls.contains(&place("codex", Some(CODEX_ONE))));
+        // A chat whose account is waiting moves to a ready one of the same provider.
+        assert_eq!(answer("spread-2", rows(&ids)).await, "claude:spread-a");
+    }
+
+    #[tokio::test]
+    async fn the_order_of_the_list_decides_the_provider_and_auto_rotate_off_spreads_nothing() {
+        let world = world();
+        // A row of another provider between two Claude rows ends the run.
+        let between = vec![
+            row("claude", Some("order-a")),
+            row("codex", Some(CODEX_ONE)),
+            row("claude", Some("order-b")),
+        ];
+        for chat in ["order-1", "order-2", "order-3"] {
+            let answer = world.ask(&between, Some(chat)).await;
+            assert_eq!(text(answer).await, "claude:order-a");
+        }
+        // Without auto-rotate the first row answers every request.
+        let rows = vec![row("claude", Some("off-a")), row("claude", Some("off-b"))];
+        for chat in ["off-1", "off-2", "off-3"] {
+            let answer = world
+                .ask_with(&rows, Some(chat), false, "claude-opus-4-8", None)
+                .await;
+            assert_eq!(text(answer).await, "claude:off-a");
+        }
+        // A request with no valid identity is not remembered, so it takes the first row.
+        let loose = world.ask(&rows, None).await;
+        assert_eq!(text(loose).await, "claude:off-a");
     }
 
     #[tokio::test]

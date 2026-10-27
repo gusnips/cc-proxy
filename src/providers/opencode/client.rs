@@ -174,14 +174,19 @@ impl OpenCodeClient {
         base_url: String,
         api_key: impl Fn() -> Option<String> + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
+        static CLIENT: std::sync::LazyLock<Arc<reqwest::Client>> = std::sync::LazyLock::new(|| {
+            Arc::new(
+                reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .connect_timeout(Duration::from_secs(10))
+                    .user_agent(USER_AGENT)
+                    .build()
+                    .expect("failed to build OpenCode client"),
+            )
+        });
         let base_url = reqwest::Url::parse(base_url.trim_end_matches('/'))?;
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .user_agent(USER_AGENT)
-            .build()?;
         Ok(Self {
-            client: Arc::new(client),
+            client: CLIENT.clone(),
             base_url,
             api_key: Box::new(api_key),
         })

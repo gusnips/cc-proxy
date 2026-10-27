@@ -1,6 +1,6 @@
 //! Account actions reuse the same stores and sign-in flow as the CLI.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::{
     accounts::{Account, Accounts},
@@ -13,17 +13,15 @@ use crate::{
 pub(super) enum Action {
     /// Starts the proxy from a monitor opened while it was off.
     StartProxy,
-    UseProvider(String),
-    /// Puts a saved account first in the pool and turns it on, so new chats use it.
-    UseAccount {
-        provider: String,
-        id: String,
-    },
-    /// Moves a row up (negative) or down (positive) in the pool.
-    MoveRow {
+    DisableRouting,
+    /// Sends Claude Code through the proxy again, with the pool as it is.
+    EnableRouting,
+    /// Saves the pool in its new order after moving a row.
+    SavePool {
         provider: String,
         account: Option<String>,
-        offset: isize,
+        at: usize,
+        pool: Vec<config::PoolEntry>,
     },
     /// Turns a row on or off. It keeps its place.
     SetEnabled {
@@ -52,18 +50,10 @@ impl Action {
     /// Whether the action may ask a question or open a browser. Only these hand
     /// the screen over; the rest run behind the monitor and answer on its footer.
     pub fn needs_terminal(&self) -> bool {
-        match self {
-            Self::StartProxy | Self::SignIn { .. } => true,
-            Self::UseProvider(provider) => start_flow::will_ask(provider),
-            Self::UseAccount { .. }
-            | Self::MoveRow { .. }
-            | Self::SetEnabled { .. }
-            | Self::RemoveAccount { .. }
-            | Self::RenameAccount { .. } => false,
-        }
+        matches!(self, Self::StartProxy | Self::SignIn { .. })
     }
 
-    pub fn run(&self, base_url: &str) -> Result<String> {
+    pub fn run(&self) -> Result<String> {
         match self {
             Self::StartProxy => {
                 route::preflight()?;
@@ -88,58 +78,24 @@ impl Action {
                     ),
                 }
             }
-            Self::UseProvider(provider) => {
+            Self::EnableRouting => {
                 route::preflight()?;
-                match start_flow::pick(Some(provider))? {
-                    start_flow::Pick::Provider(provider) => {
-                        route::activate(provider, base_url, route::Chain::Keep)?;
-                        Ok(format!(
-                            "Saved. Claude Code uses {} through the proxy. Open windows follow within a few seconds.",
-                            ui::provider_name(provider)
-                        ))
-                    }
-                    start_flow::Pick::Direct => {
-                        route::deactivate()?;
-                        Ok("Saved. Claude Code uses its original settings and login, without the proxy. The proxy keeps running.".into())
-                    }
-                }
+                route::resume(&daemon::client_url(&config::bind_address(), config::port()))?;
+                Ok("Saved. Claude Code goes through the proxy again. Open windows follow within a few seconds.".into())
             }
-            Self::UseAccount { provider, id } => {
-                let registry = Registry::new();
-                let handler = registry
-                    .provider(provider)
-                    .context("This provider was removed. Press r to refresh.")?;
-                let support = handler
-                    .cli()
-                    .accounts()
-                    .context("This provider does not support saved accounts.")?;
-                if let Some(var) = support.pinned_credentials() {
-                    bail!(
-                        "${var} supplies the login. Unset it in the proxy service before choosing a saved account."
-                    );
-                }
-                let accounts = Accounts::open(provider, support)?;
-                let account = saved_account(&accounts, id)?;
-                crate::rotation::switch_account(
-                    provider,
-                    &accounts,
-                    &crate::rotation::Cooldowns::new(),
-                    &account,
-                    crate::rotation::Switch::Chosen(support),
-                )?;
-                pool::use_now(provider, id)?;
-                Ok(format!(
-                    "Saved. {} / {} is first in the list now. New chats use it. Chats already running keep their account.",
-                    ui::provider_name(provider),
-                    account.name
-                ))
+            Self::DisableRouting => {
+                route::preflight()?;
+                route::deactivate()?;
+                Ok("Saved. Claude Code uses its original settings and login, without the proxy. The proxy keeps running.".into())
             }
-            Self::MoveRow {
+            Self::SavePool {
                 provider,
                 account,
-                offset,
+                at,
+                pool,
             } => {
-                let at = pool::move_by(provider, account.as_deref(), *offset)?;
+                pool::save(pool)?;
+                route::refresh_model_labels();
                 Ok(format!(
                     "Saved. {} is number {} in the list. New chats try the rows from the top.",
                     row_label(provider, account.as_deref())?,
@@ -152,6 +108,7 @@ impl Action {
                 enabled,
             } => {
                 pool::set_enabled(provider, account.as_deref(), *enabled)?;
+                route::refresh_model_labels();
                 let label = row_label(provider, account.as_deref())?;
                 Ok(if *enabled {
                     format!("Saved. {label} is on. New chats can use it.")
@@ -162,16 +119,8 @@ impl Action {
                 })
             }
             Self::RemoveAccount { provider, id } => {
-                let registry = Registry::new();
-                let handler = registry
-                    .provider(provider)
-                    .context("This provider was removed. Press r to refresh.")?;
-                let support = handler
-                    .cli()
-                    .accounts()
-                    .context("This provider does not support saved accounts.")?;
                 // The monitor already asked: removing is a second, explicit choice.
-                let accounts = Accounts::open(provider, support)?;
+                let accounts = open_accounts(provider)?;
                 let account = saved_account(&accounts, id)?;
                 accounts.remove(&account)?;
                 let _ = crate::rotation::Cooldowns::new().clear_account(provider, id);
@@ -182,15 +131,7 @@ impl Action {
                 ))
             }
             Self::RenameAccount { provider, id, name } => {
-                let registry = Registry::new();
-                let handler = registry
-                    .provider(provider)
-                    .context("This provider was removed. Press r to refresh.")?;
-                let support = handler
-                    .cli()
-                    .accounts()
-                    .context("This provider does not support saved accounts.")?;
-                let accounts = Accounts::open(provider, support)?;
+                let accounts = open_accounts(provider)?;
                 let account = saved_account(&accounts, id)?;
                 let renamed = accounts.rename(&account.name, name)?;
                 Ok(format!(
@@ -231,12 +172,28 @@ impl Action {
                     cli.login()?;
                 }
                 Ok(format!(
-                    "Saved the {} login. Choose Use provider to send Claude Code there.",
+                    "Saved the {} login. Enable its row to let new chats use it.",
                     ui::provider_name(provider)
                 ))
             }
         }
     }
+}
+
+fn open_accounts(provider: &str) -> Result<Accounts> {
+    let direct = Accounts::new(provider);
+    if direct.has_index_file() {
+        return Ok(direct);
+    }
+    let registry = Registry::new();
+    let handler = registry
+        .provider(provider)
+        .context("This provider was removed. Press r to refresh.")?;
+    let support = handler
+        .cli()
+        .accounts()
+        .context("This provider does not support saved accounts.")?;
+    Accounts::open(provider, support)
 }
 
 /// What a pool row is called in a message: `Codex / work`, or the provider
@@ -246,15 +203,7 @@ fn row_label(provider: &str, account: Option<&str>) -> Result<String> {
     let Some(id) = account else {
         return Ok(provider_name.to_string());
     };
-    let registry = Registry::new();
-    let handler = registry
-        .provider(provider)
-        .context("This provider was removed. Press r to refresh.")?;
-    let support = handler
-        .cli()
-        .accounts()
-        .context("This provider does not support saved accounts.")?;
-    let name = saved_account(&Accounts::open(provider, support)?, id)?.name;
+    let name = saved_account(&open_accounts(provider)?, id)?.name;
     Ok(format!("{provider_name} / {name}"))
 }
 

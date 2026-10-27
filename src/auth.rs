@@ -61,17 +61,44 @@ impl Keychain for StubKeychain {
 pub struct SystemKeychain;
 
 #[cfg(target_os = "macos")]
+type KeychainCache =
+    std::collections::HashMap<(String, String), (std::time::Instant, Option<String>)>;
+
+#[cfg(target_os = "macos")]
+static KEYCHAIN_CACHE: std::sync::LazyLock<std::sync::Mutex<KeychainCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(target_os = "macos")]
 impl Keychain for SystemKeychain {
     fn read(&self, service: &str, account: &str) -> Result<Option<String>> {
+        use std::time::{Duration, Instant};
+
+        let key = (service.to_string(), account.to_string());
+        if let Some((_, cached)) = KEYCHAIN_CACHE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&key)
+            .filter(|(checked, _)| checked.elapsed() < Duration::from_secs(30))
+        {
+            return Ok(cached.clone());
+        }
         let output = run_security(&["find-generic-password", "-s", service, "-a", account, "-w"])?;
         if output.status.success() {
             let mut raw = String::from_utf8(output.stdout)
                 .map_err(|err| anyhow::anyhow!("Keychain value is not valid UTF-8: {err}"))?;
             trim_one_trailing_newline(&mut raw);
+            KEYCHAIN_CACHE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(key, (Instant::now(), Some(raw.clone())));
             return Ok(Some(raw));
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("could not be found") || stderr.contains("specified item could not") {
+            KEYCHAIN_CACHE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(key, (Instant::now(), None));
             return Ok(None);
         }
         Err(anyhow::anyhow!("Keychain read failed: {}", stderr.trim()))
@@ -82,6 +109,10 @@ impl Keychain for SystemKeychain {
     }
 
     fn delete(&self, service: &str, account: &str) -> Result<()> {
+        KEYCHAIN_CACHE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&(service.to_string(), account.to_string()));
         let output = run_security(&["delete-generic-password", "-s", service, "-a", account])?;
         if output.status.success() {
             return Ok(());

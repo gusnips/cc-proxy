@@ -27,34 +27,36 @@ is written by its name. Accounts of different providers can sit in any order,
 for example a Claude account, a Codex account, then another Claude account.
 Providers you have not set up wait below the list, tagged `not set up`.
 
-New chats use the first row that is ready. A chat stays on its account until it
-hits a limit, so moving a row or turning it off changes new chats, not the ones
-you are in. With auto-rotate on, a row that is waiting is skipped. Without it,
-the first row that is on answers every request. When every row that is on has a
-confirmed wait, `[first reset]` marks the earliest reset.
+New chats share the first provider's ready accounts: a new chat takes the one
+with the fewest chats in the last hour, and the list order breaks a tie. A row of
+another provider, lower in the list, ends that group, so the order still decides
+which provider answers. A chat stays on its account until it hits a limit, so
+moving a row or turning it off changes new chats, not the ones you are in. With
+auto-rotate on, a row that is waiting is skipped. Without it, the first row that
+is on answers every request and nothing spreads. When every row that is on has a confirmed wait, `[first reset]` highlights the
+earliest reset in yellow and the line under the header shows `Next reset: <account> in <time>`
+beside `Last used`.
 
-The line under the header says who answered the newest request, for example
-`Serving: Claude subscription / contato@example.com`. That row has a teal `●` and
-a bold teal name, so you can see where requests really go. Before the first
-request, the mark is on the first row that is on. The cursor moves with the row
-that answers, unless you had moved it somewhere else. A row that is off keeps its
-place, shows its name dim and ends with `off`.
+The name takes the first line of each account row. Usage, wait times and state
+sit on the next line, so long account names do not compete with quota numbers.
+`Claude` means a Claude plan. `Anthropic` means an API key.
+
+A teal `●` marks every account serving requests now. The second line says how
+many requests it has, and Details lists their models. The header counts active
+requests across all windows. When no requests are running, a dim `○` marks the
+last account used. No mark appears before the first request. Traffic never
+moves your cursor. An account that is off stays in place and says `off` on its
+second line.
 
 Use Up and Down to choose a row, then Enter to see its actions. Choose an action
 with the arrows and press Enter to run it. Escape goes back without making a
 change. Wide terminals show the list and details side by side. Narrow terminals
 put details below the list.
 
-- Use provider sends Claude Code to that provider and moves its rows to the top
-  of the list. If the provider isn't signed in, or a Claude name has no model
-  yet, the monitor asks right there with the same prompts the commands use, then
-  returns to your row. Otherwise it just saves and says so. Windows already open
-  follow within a few seconds.
-- Use now puts an account first in the list and turns it on, so new chats use
-  it. It does not change where Claude Code goes. Chats already running keep
-  their account.
-- Move up and Move down change where a row stands. A row at the top has no
-  Move up, and a row at the bottom has no Move down. The list updates at once.
+- Move opens move mode on that row. Up and Down move it one place, Left moves it
+  to the top of the list and Right moves it to the bottom. Nothing is written
+  while you move it: press Enter to save the new order, or Escape to put the old
+  order back.
 - Disable turns a row off. It stays in the list and keeps its place, and new
   chats skip it. Enable turns it back on.
 - Sign in saves a login. You can add another account or sign in to a saved
@@ -72,9 +74,11 @@ put details below the list.
   that line deletes it, and Escape keeps it. The row leaves the list. To use it
   again, sign in again.
 - Disable proxy routing is the last row. It sends Claude Code back to its
-  original settings and login. The proxy keeps running, so you can switch back
-  here. It does not pick a saved account.
-- Claude subscription is a normal provider with its own saved accounts, usage and
+  original settings and login. The proxy keeps running. While routing is off,
+  the row says `Proxy routing is off`, and its action, Send Claude Code through
+  the proxy, turns routing back on with the list as it is. It does not pick a
+  saved account.
+- Claude is a normal provider with its own saved accounts, usage and
   rotation, and requests go through the proxy.
 
 Changes say what was saved and apply without a restart. A failed action stays
@@ -93,7 +97,7 @@ list. Escape clears the search first, then goes back to Accounts.
 Auto-rotate is off by default. A provider must confirm a limit and a reset time,
 or say the credit is spent, before the proxy switches. An account out of credit
 shows `out of credit` and when cc-proxy tries it again (a recheck every 30
-minutes, not a reset). Choose Use now after you add credit to try it at once.
+minutes, not a reset). After you add credit, cc-proxy retries at that time.
 When a row is spent, the next row that is on answers. Rotation applies to
 Messages requests before output starts, not every API.
 
@@ -120,7 +124,7 @@ Usage loads in the background and refreshes while Accounts is open. Press `r` to
 refresh now. A failed lookup says usage is unavailable, not zero. If a refresh
 fails after a good one, the row keeps the last numbers and ends with a
 yellow `*`. Details starts with `* Refresh failed`, says the numbers may be out
-of date and gives the reason in one line. The last good numbers are saved, so
+of date and gives the reason in one line, such as `Claude is limiting requests. Try again in 4m.` After a 429, the automatic refresh leaves that account alone until its wait ends (5 minutes when Claude names none, at most an hour), and `r` asks at once. A renewal that gets no answer says so; only a login that is gone or turned down says to sign in again. Each failed lookup is one line in `proxy.log` with the provider, the account id, the kind of failure and how long it took, never a name or a token. The last good numbers are saved, so
 they are still there if you close the monitor and open it again. Page Up and Page
 Down scroll long details.
 

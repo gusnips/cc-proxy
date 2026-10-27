@@ -170,6 +170,7 @@ fn run_monitor_loop(
         recent_selected: 0,
         connected: true,
         proxy_off: false,
+        saving: None,
         tick: 0,
         phase: MonitorPhase::Running,
         shutdown: config.shutdown,
@@ -204,6 +205,7 @@ fn run_monitor_events(
             && matches!(daemon::describe(), daemon::DaemonStatus::Stopped);
         app.clamp_selection(state.sessions.len(), state.recent.len());
         app.tick = app.tick.wrapping_add(1);
+        finish_saving(app);
         if app.page == Page::Accounts {
             app.providers.observe(state);
             app.providers.refresh();
@@ -401,6 +403,8 @@ struct MonitorApp {
     connected: bool,
     /// A local monitor whose proxy is not running: it offers to start it.
     proxy_off: bool,
+    /// A change saving behind the monitor, and its answer when it ends.
+    saving: Option<mpsc::Receiver<(controls::Action, anyhow::Result<String>)>>,
     tick: usize,
     phase: MonitorPhase,
     shutdown: Option<oneshot::Sender<()>>,
@@ -637,6 +641,18 @@ fn run_account_action(
         app.providers.finish_action(Err(anyhow::anyhow!(reason)));
         return Ok(());
     }
+    if !action.needs_terminal() {
+        if matches!(
+            action,
+            controls::Action::EnableRouting | controls::Action::DisableRouting
+        ) {
+            start_saving(app, action);
+        } else {
+            let result = action.run();
+            finish_account_action(app, &action, result);
+        }
+        return Ok(());
+    }
     terminal.draw(|frame| {
         render(frame, app, state);
         let area = frame.area();
@@ -650,32 +666,83 @@ fn run_account_action(
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         );
     })?;
-    let asks = action.needs_terminal();
-    if asks {
-        pause_for_questions()?;
+    pause_for_questions()?;
+    let result = action.run();
+    // Always restore the monitor, including a cancelled sign-in.
+    resume_after_questions(terminal)?;
+    finish_account_action(app, &action, result);
+    Ok(())
+}
+
+/// Runs a change that never asks a question behind the monitor, so keys, tabs
+/// and live requests keep working while it saves. One change runs at a time:
+/// while one is running, the notice already says "Saving...".
+fn start_saving(app: &mut MonitorApp, action: controls::Action) {
+    if app.saving.is_some() {
+        return;
     }
-    let result = action.run(&app.listen_url);
-    if asks {
-        // Always restore the monitor, including a cancelled sign-in.
-        resume_after_questions(terminal)?;
+    app.providers.show_saving();
+    let (send, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = action.run();
+        let _ = send.send((action, result));
+    });
+    app.saving = Some(receive);
+}
+
+/// Picks up the answer of a change that saved behind the monitor.
+fn finish_saving(app: &mut MonitorApp) {
+    let Some(receive) = &app.saving else {
+        return;
+    };
+    match receive.try_recv() {
+        Ok((action, result)) => {
+            app.saving = None;
+            finish_account_action(app, &action, result);
+        }
+        Err(mpsc::TryRecvError::Empty) => {}
+        Err(mpsc::TryRecvError::Disconnected) => {
+            app.saving = None;
+            app.providers.finish_action(Err(anyhow::anyhow!(
+                "The change stopped before it finished. Press r to refresh and see what was saved"
+            )));
+        }
     }
-    if let (Ok(_), controls::Action::RemoveAccount { provider, id }) = (&result, &action) {
-        app.providers.forget_account(provider, id);
-    }
-    // The row shows its new name at once. The next read confirms it.
-    if let (Ok(_), controls::Action::RenameAccount { provider, id, name }) = (&result, &action) {
-        let _ = app.providers.rename_account(provider, id, name);
-    }
-    // The list shows the new order at once. The next read confirms it.
+}
+
+fn finish_account_action(
+    app: &mut MonitorApp,
+    action: &controls::Action,
+    result: anyhow::Result<String>,
+) {
     if result.is_ok() {
-        app.providers.apply_pool_action(&action);
+        match action {
+            controls::Action::RemoveAccount { provider, id } => {
+                app.providers.forget_account(provider, id)
+            }
+            // The row shows its new name at once. The next read confirms it.
+            controls::Action::RenameAccount { provider, id, name } => {
+                let _ = app.providers.rename_account(provider, id, name);
+            }
+            _ => {}
+        }
+        // The list shows the new order at once. The next read confirms it.
+        app.providers.apply_pool_action(action);
+        if matches!(
+            action,
+            controls::Action::StartProxy
+                | controls::Action::EnableRouting
+                | controls::Action::DisableRouting
+                | controls::Action::SignIn { .. }
+        ) {
+            app.providers.reload_saved();
+        }
     }
-    if starting {
+    if *action == controls::Action::StartProxy {
         app.providers.finish_start(result);
     } else {
         app.providers.finish_action(result);
     }
-    Ok(())
 }
 
 fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorSnapshot) {
@@ -2054,6 +2121,8 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
         hint
     } else if app.page == Page::Accounts && app.providers.renaming() {
         " Enter save · Esc keep the old name · Ctrl-U clear · Ctrl-C close".to_string()
+    } else if app.page == Page::Accounts && app.providers.moving() {
+        " ↑/↓ move · ← top · → bottom · Enter save · Esc put back · q close".to_string()
     } else if app.page == Page::Accounts && app.providers.menu_open() {
         " Esc back · ↑/↓ choose · Enter run · q close".to_string()
     } else if area.width < 80 {
@@ -2202,7 +2271,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, attached: boo
         ("u / d", "scroll account details"),
         ("r", "refresh accounts and usage"),
         ("s", "start the proxy when it is off"),
-        ("●", "the row that answered the newest request"),
+        ("● / ○", "active accounts / last used when idle"),
         ("*", "last refresh failed; values may be old"),
         (
             "Esc",
@@ -3019,6 +3088,7 @@ mod tests {
             recent_selected: 0,
             connected: true,
             proxy_off: false,
+            saving: None,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3053,6 +3123,7 @@ mod tests {
             recent_selected: 0,
             connected: true,
             proxy_off: false,
+            saving: None,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3299,6 +3370,7 @@ mod tests {
             recent_selected: 0,
             connected: true,
             proxy_off: false,
+            saving: None,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3334,6 +3406,7 @@ mod tests {
             recent_selected: 0,
             connected: true,
             proxy_off: false,
+            saving: None,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: Some(shutdown_tx),
@@ -3384,6 +3457,7 @@ mod tests {
             recent_selected: 0,
             connected: false,
             proxy_off: true,
+            saving: None,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3426,6 +3500,7 @@ mod tests {
             recent_selected: 0,
             connected: true,
             proxy_off: false,
+            saving: None,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: Some(shutdown_tx),
@@ -3462,6 +3537,7 @@ mod tests {
             recent_selected: 0,
             connected: true,
             proxy_off: false,
+            saving: None,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3496,6 +3572,7 @@ mod tests {
             recent_selected: 0,
             connected: true,
             proxy_off: false,
+            saving: None,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3527,6 +3604,7 @@ mod tests {
             recent_selected: 10,
             connected: true,
             proxy_off: false,
+            saving: None,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3559,6 +3637,7 @@ mod tests {
             recent_selected: 0,
             connected: true,
             proxy_off: false,
+            saving: None,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,
@@ -3591,6 +3670,7 @@ mod tests {
             recent_selected: 0,
             connected: true,
             proxy_off: false,
+            saving: None,
             tick: 0,
             phase: MonitorPhase::Running,
             shutdown: None,

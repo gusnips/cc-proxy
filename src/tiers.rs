@@ -395,12 +395,25 @@ pub fn model_label(
     route: &Route,
     requested: &str,
 ) -> Option<crate::claude_settings::ModelLabel> {
+    model_label_for(registry, route, route.target()?, requested)
+}
+
+/// Like [`model_label`], for the provider that actually answers when the
+/// first provider in the pool is waiting or a chat stays on another row.
+pub fn model_label_for(
+    registry: &Registry,
+    route: &Route,
+    target: &str,
+    requested: &str,
+) -> Option<crate::claude_settings::ModelLabel> {
     use crate::providers::{codex, copilot, cursor, grok, kimi, opencode};
     use crate::registry::normalize_incoming_model;
 
-    route.target()?;
+    if !route.on {
+        return None;
+    }
     let normalized = normalize_incoming_model(requested);
-    let resolved = resolve(registry, route, &normalized).ok()?;
+    let resolved = resolve_for(registry, route, target, &normalized).ok()?;
     let handler = registry.provider_for_model(&resolved)?;
     let provider = handler.name();
     let mut description = match anthropic_model_family(&normalized) {

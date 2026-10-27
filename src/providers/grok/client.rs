@@ -70,18 +70,21 @@ impl GrokResponse {
 
 impl GrokClient {
     pub fn new(base_url: String, client_version: String) -> anyhow::Result<Self> {
-        let client = Arc::new(
-            reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(10))
-                .tcp_nodelay(true)
-                .http2_keep_alive_interval(Duration::from_secs(15))
-                .http2_keep_alive_timeout(Duration::from_secs(5))
-                .http2_keep_alive_while_idle(true)
-                .build()?,
-        );
+        static CLIENT: std::sync::LazyLock<Arc<reqwest::Client>> = std::sync::LazyLock::new(|| {
+            Arc::new(
+                reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .connect_timeout(Duration::from_secs(10))
+                    .tcp_nodelay(true)
+                    .http2_keep_alive_interval(Duration::from_secs(15))
+                    .http2_keep_alive_timeout(Duration::from_secs(5))
+                    .http2_keep_alive_while_idle(true)
+                    .build()
+                    .expect("failed to build Grok client"),
+            )
+        });
         Ok(Self {
-            client,
+            client: CLIENT.clone(),
             url: url_for(base_url)?,
             client_version,
         })

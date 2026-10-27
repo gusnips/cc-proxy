@@ -43,17 +43,6 @@ fn open_tiers(registry: &Registry, provider: &str) -> Vec<tiers::Mapping> {
         .collect()
 }
 
-/// Whether `cc-proxy use <provider>` has a question to ask: to sign in, or
-/// which model a Claude name should use. The monitor hands the screen to the
-/// questions only when this is true, so a plain switch never leaves it.
-pub fn will_ask(provider: &str) -> bool {
-    if provider == DIRECT {
-        return false;
-    }
-    let registry = Registry::new();
-    !is_signed_in(&registry, provider) || !open_tiers(&registry, provider).is_empty()
-}
-
 /// Asks which model a Claude name should use, but only for the names with no
 /// model or only a guess, and only once: the answers are kept. A name with no
 /// model (a provider that resells other vendors' models has none until you

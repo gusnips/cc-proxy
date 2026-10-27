@@ -4,18 +4,23 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 use jiff::{Timestamp, tz::TimeZone};
 use ratatui::text::Line;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, RETRY_AFTER};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::accounts::Accounts;
+use crate::auth::AuthStorage;
 use crate::config;
 use crate::providers::antigravity::Family;
+use crate::providers::claude::auth::{
+    AuthManager, RenewRejected, StoredAuth, USAGE_BETA, USAGE_URL,
+};
 use crate::providers::codex::auth::constants::CODEX_API_ENDPOINT;
 use crate::providers::codex::auth::manager::CodexAuthManager;
 use crate::providers::codex::auth::token_store as codex_tokens;
@@ -27,6 +32,11 @@ use crate::providers::opencode::client::{OpenCodeClient, OpenCodeUsageResponse};
 use crate::ui;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to leave an account alone after a 429 that gives no `Retry-After`.
+const RATE_LIMIT_FLOOR: Duration = Duration::from_secs(300);
+/// The longest wait a `Retry-After` can ask for, so one odd answer can't switch
+/// the automatic refresh off for a day. The `r` key still asks at once.
+const RATE_LIMIT_CEILING: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum UsageProvider {
@@ -51,7 +61,7 @@ impl UsageProvider {
 
     fn name(self) -> &'static str {
         match self {
-            Self::Claude => "Claude subscription",
+            Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Kimi => "Kimi",
             Self::Antigravity => "Antigravity",
@@ -82,18 +92,30 @@ impl UsageProvider {
             Failure::Setup(detail) => format!(
                 "cc-proxy couldn't build the usage request: {detail}. Check the provider settings."
             ),
-            Failure::Rejected(401 | 403) => {
+            Failure::Rejected {
+                status: 401 | 403, ..
+            } => {
                 format!("{name} didn't accept the sign-in when asked for usage.")
             }
-            Failure::Rejected(429) => format!(
+            Failure::Rejected {
+                status: 429,
+                retry_after,
+            } => format!(
                 "{name} is limiting requests and turned down the usage request. Run \
-                 `cc-proxy usage {id}` again later."
+                 `cc-proxy usage {id}` again {}.",
+                match retry_after {
+                    Some(seconds) => format!("in {}", format_time_left(seconds_i64(seconds))),
+                    None => "later".to_string(),
+                }
             ),
-            Failure::Rejected(status @ 500..) => format!(
+            Failure::Rejected {
+                status: status @ 500..,
+                ..
+            } => format!(
                 "The usage request failed with HTTP {status}, a problem on {name}'s \
                  side. Run `cc-proxy usage {id}` again in a few minutes."
             ),
-            Failure::Rejected(status) => format!(
+            Failure::Rejected { status, .. } => format!(
                 "{name} turned down the usage request with HTTP {status}. If you changed \
                  the {name} base URL, check it; if not, check for a cc-proxy update."
             ),
@@ -101,6 +123,15 @@ impl UsageProvider {
                 "{name} didn't answer the usage request within {} seconds. Check your \
                  connection and run `cc-proxy usage {id}` again.",
                 REQUEST_TIMEOUT.as_secs()
+            ),
+            Failure::RenewalTimedOut => format!(
+                "{name} didn't answer when cc-proxy renewed the sign-in. Check your \
+                 connection and run `cc-proxy usage {id}` again."
+            ),
+            Failure::Waiting(left) => format!(
+                "{name} asked cc-proxy to wait before the next usage request. Run \
+                 `cc-proxy usage {id}` again in {}.",
+                format_time_left(seconds_i64(left.as_secs()))
             ),
             Failure::Unreachable => format!(
                 "cc-proxy couldn't reach {name} to ask for usage. Check your internet \
@@ -127,20 +158,32 @@ impl Failure {
             Self::Setup(_) => {
                 "cc-proxy can't build the usage request. Check the provider settings.".into()
             }
-            Self::Rejected(401 | 403) => {
+            Self::Rejected {
+                status: 401 | 403, ..
+            } => {
                 format!("{name} rejected the sign-in. Choose Sign in to this account again.")
             }
-            Self::Rejected(429) => format!("{name} is limiting requests. Try again later."),
-            Self::Rejected(status @ 500..) => {
+            Self::Rejected {
+                status: 429,
+                retry_after,
+            } => limited(name, rate_limit_wait(*retry_after)),
+            Self::Waiting(left) => limited(name, *left),
+            Self::Rejected {
+                status: status @ 500..,
+                ..
+            } => {
                 format!("{name} had a problem (HTTP {status}). Press r to retry in a few minutes.")
             }
-            Self::Rejected(status) => format!(
+            Self::Rejected { status, .. } => format!(
                 "{name} refused the usage request (HTTP {status}). Check for a cc-proxy update."
             ),
             Self::TimedOut => format!(
                 "{name} didn't answer in {} seconds. Press r to retry.",
                 REQUEST_TIMEOUT.as_secs()
             ),
+            Self::RenewalTimedOut => {
+                format!("{name} didn't answer when cc-proxy renewed the sign-in. Press r to retry.")
+            }
             Self::Unreachable => {
                 format!("cc-proxy couldn't reach {name}. Check your connection, then press r.")
             }
@@ -151,17 +194,134 @@ impl Failure {
     }
 }
 
-/// Why a Codex or Kimi usage lookup failed, before it is put into words.
+/// Why a usage lookup failed, before it is put into words.
 #[derive(Debug)]
 enum Failure {
-    /// The saved sign-in couldn't be read, or couldn't be renewed.
+    /// The saved sign-in is gone or unreadable, or the provider turned down its
+    /// renewal. Only these mean "sign in again".
     SignInUnusable,
     /// A header couldn't be built from the saved sign-in or the config.
     Setup(String),
-    Rejected(u16),
+    /// The provider answered with an error. `retry_after` is its `Retry-After`
+    /// in seconds, when it sent one.
+    Rejected {
+        status: u16,
+        retry_after: Option<u64>,
+    },
     TimedOut,
+    /// The sign-in had to be renewed first, and Claude didn't answer that.
+    RenewalTimedOut,
     Unreachable,
     Unreadable,
+    /// An earlier 429 asked cc-proxy to wait, so nothing was sent this time.
+    Waiting(Duration),
+}
+
+impl Failure {
+    /// A fixed word for each cause, so a log line never carries a message that
+    /// could hold a name or a token.
+    fn category(&self) -> &'static str {
+        match self {
+            Self::SignInUnusable => "sign_in_unusable",
+            Self::Setup(_) => "setup",
+            Self::Rejected { .. } => "rejected",
+            Self::TimedOut => "timed_out",
+            Self::RenewalTimedOut => "renewal_timed_out",
+            Self::Unreachable => "unreachable",
+            Self::Unreadable => "unreadable",
+            Self::Waiting(_) => "waiting",
+        }
+    }
+}
+
+/// How long to leave an account alone after a 429: what `Retry-After` said,
+/// up to the ceiling, or the floor when it said nothing.
+fn rate_limit_wait(retry_after: Option<u64>) -> Duration {
+    retry_after
+        .map_or(RATE_LIMIT_FLOOR, |seconds| {
+            Duration::from_secs(seconds).min(RATE_LIMIT_CEILING)
+        })
+        .max(Duration::from_secs(1))
+}
+
+fn limited(name: &str, wait: Duration) -> String {
+    format!(
+        "{name} is limiting requests. Try again in {}.",
+        format_time_left(seconds_i64(wait.as_secs()))
+    )
+}
+
+fn seconds_i64(seconds: u64) -> i64 {
+    i64::try_from(seconds).unwrap_or(i64::MAX)
+}
+
+/// When each account may be asked again, after a 429. In memory: a monitor
+/// that is closed and opened again asks once, and learns the wait from the answer.
+// ponytail: one table per process. Two monitors open at once each hit the 429
+// once. A shared file would stop that, at the cost of a lock and a stale-file rule.
+type Waits = HashMap<(&'static str, String), Instant>;
+
+static WAITS: LazyLock<Mutex<Waits>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn lock_waits() -> MutexGuard<'static, Waits> {
+    WAITS.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+/// How much longer to leave `account` alone, if an earlier 429 asked for it.
+fn wait_left(provider: UsageProvider, account: &str) -> Option<Duration> {
+    let mut waits = lock_waits();
+    let key = (provider.id(), account.to_string());
+    let left = waits
+        .get(&key)?
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero());
+    if left.is_none() {
+        waits.remove(&key);
+    }
+    left
+}
+
+/// A 429 makes the next automatic refresh skip the account.
+fn start_wait(provider: UsageProvider, account: &str, retry_after: Option<u64>) {
+    lock_waits().insert(
+        (provider.id(), account.to_string()),
+        Instant::now() + rate_limit_wait(retry_after),
+    );
+}
+
+fn end_wait(provider: UsageProvider, account: &str) {
+    lock_waits().remove(&(provider.id(), account.to_string()));
+}
+
+/// One line in proxy.log for a lookup that failed: the provider, the saved
+/// account's id, the kind of failure, how long it took and, after a 429, when
+/// cc-proxy asks again. Never a name, a token or a reply body. At `info`, so
+/// the command line and the monitor screen don't print it.
+fn log_failure(provider: UsageProvider, account: &str, failure: &Failure, took: Duration) {
+    let mut fields = Map::from_iter([
+        ("provider".into(), serde_json::json!(provider.id())),
+        ("account".into(), serde_json::json!(account)),
+        ("failure".into(), serde_json::json!(failure.category())),
+        (
+            "elapsedMs".into(),
+            serde_json::json!(took.as_millis() as u64),
+        ),
+    ]);
+    if let Failure::Rejected {
+        status,
+        retry_after,
+    } = failure
+    {
+        fields.insert("status".into(), serde_json::json!(status));
+        if *status == 429 {
+            let wait = rate_limit_wait(*retry_after);
+            fields.insert(
+                "retryAtMs".into(),
+                serde_json::json!(crate::rotation::now_ms() + wait.as_millis() as u64),
+            );
+        }
+    }
+    crate::logging::create_logger("usage").info("usage_lookup_failed", Some(fields));
 }
 
 /// One plan's usage, in the same shape for every provider.
@@ -234,6 +394,29 @@ pub(crate) struct UsageWindow {
     pub resets_at_ms: Option<i64>,
 }
 
+impl UsageWindow {
+    fn family(&self) -> &str {
+        self.label.rsplit_once(' ').map_or("", |(family, _)| family)
+    }
+
+    /// A 5-hour window cannot be used while the same family's weekly or
+    /// monthly allowance is at 0%, so it must not glow green.
+    fn color(&self, siblings: &[Self]) -> ratatui::style::Color {
+        if self.remaining_percent > 0.0
+            && self.label.ends_with("5h")
+            && siblings.iter().any(|other| {
+                other.label != self.label
+                    && other.family() == self.family()
+                    && other.remaining_percent <= 0.0
+            })
+        {
+            ui::DIM_WHITE
+        } else {
+            ui::remaining_color(self.remaining_percent)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MonitorUsage {
     Reported(Vec<UsageWindow>),
@@ -255,7 +438,10 @@ impl MonitorUsage {
                         .map_or(String::new(), |reset| {
                             format!(", {}", format_reset(reset, now, tz))
                         });
-                    ui::remaining_line(window.label, window.remaining_percent, &reset)
+                    let mut line =
+                        ui::remaining_line(window.label, window.remaining_percent, &reset);
+                    line.spans[1].style.fg = Some(window.color(windows));
+                    line
                 })
                 .collect(),
         }
@@ -287,7 +473,7 @@ impl MonitorUsage {
             }
             spans.push(Span::styled(
                 format!("{:.0}%", window.remaining_percent),
-                Style::default().fg(ui::remaining_color(window.remaining_percent)),
+                Style::default().fg(window.color(windows)),
             ));
             if window.remaining_percent == 0.0
                 && let Some(reset) = window.resets_at_ms
@@ -484,7 +670,17 @@ pub(crate) fn headlines() -> Vec<(&'static str, MonitorUsage)> {
 
 /// Structured usage per saved account for the monitor. Call on its background
 /// worker, never a request. UUIDs join the results without exposing credentials.
+///
+/// Asks every account, including the ones an earlier 429 told cc-proxy to leave
+/// alone: this is the first read and the `r` key.
 pub(crate) fn account_usage() -> HashMap<(String, String), MonitorUsage> {
+    lock_waits().clear();
+    account_usage_paced()
+}
+
+/// Like `account_usage`, for the refresh nobody asked for. An account that
+/// answered 429 is skipped until its wait is over, and its row says how long.
+pub(crate) fn account_usage_paced() -> HashMap<(String, String), MonitorUsage> {
     let mut usage = HashMap::new();
     for provider in ["claude", "codex", "kimi", "grok", "antigravity"] {
         let unavailable = if matches!(provider, "claude" | "codex" | "kimi" | "antigravity") {
@@ -680,8 +876,14 @@ async fn fetch(
     let usage = futures_util::future::join_all(list.into_iter().map(|account| {
         let is_current = current.as_ref() == Some(&account.id);
         async move {
-            let result = match fetch_account(provider, &account.id, client).await {
+            let started = Instant::now();
+            let outcome = match wait_left(provider, &account.id) {
+                Some(left) => Err(Failure::Waiting(left)),
+                None => fetch_account(provider, &account.id, client).await,
+            };
+            let result = match outcome {
                 Ok(usage) => {
+                    end_wait(provider, &account.id);
                     // A spent family can't set or clear a wait for the whole account.
                     if usage.groups.is_empty() {
                         let _ = crate::rotation::Cooldowns::new().sync_account_window(
@@ -692,10 +894,23 @@ async fn fetch(
                     }
                     AccountResult::Usage { usage }
                 }
-                Err(failure) => AccountResult::Unavailable {
-                    short: failure.short(provider.name()),
-                    error: provider.describe(&account.name, failure),
-                },
+                Err(failure) => {
+                    if let Failure::Rejected {
+                        status: 429,
+                        retry_after,
+                    } = failure
+                    {
+                        start_wait(provider, &account.id, retry_after);
+                    }
+                    // A skipped account asked nothing, so there is nothing to log.
+                    if !matches!(failure, Failure::Waiting(_)) {
+                        log_failure(provider, &account.id, &failure, started.elapsed());
+                    }
+                    AccountResult::Unavailable {
+                        short: failure.short(provider.name()),
+                        error: provider.describe(&account.name, failure),
+                    }
+                }
             };
             AccountUsage {
                 id: account.id,
@@ -730,17 +945,24 @@ async fn fetch_account(
 }
 
 async fn claude(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure> {
-    use crate::providers::claude::auth::{AuthManager, StoredAuth, USAGE_BETA, USAGE_URL};
     let store = Accounts::new("claude")
         .for_request::<StoredAuth>(Some(id))
         .map_err(|_| Failure::SignInUnusable)?;
-    let manager = AuthManager::new(store);
-    let auth = manager
-        .get_auth()
-        .await
-        .map_err(|_| Failure::SignInUnusable)?;
+    claude_usage(client, &AuthManager::new(store), USAGE_URL).await
+}
+
+/// Asks `url` for the usage of the login `manager` holds. A 401 means Claude
+/// turned the access token down before its time ran out, so the login is
+/// renewed once and the question asked once more. A 403 or a 429 would not
+/// change after a renewal.
+async fn claude_usage<S: AuthStorage<StoredAuth>>(
+    client: &reqwest::Client,
+    manager: &AuthManager<S>,
+    url: &str,
+) -> Result<PlanUsage, Failure> {
+    let auth = manager.get_auth().await.map_err(renewal_failure)?;
     // A login saved before cc-proxy asked for the plan learns it here.
-    let auth = manager.learn_plan(auth).await;
+    let mut auth = manager.learn_plan(auth).await;
     // Claude's usage endpoint turns a free account away, which would read as a
     // broken sign-in. There is nothing to count: Claude Code can't use it.
     if auth.plan.as_deref() == Some("free") {
@@ -749,16 +971,50 @@ async fn claude(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure
             ..PlanUsage::default()
         });
     }
+    let body = match get_json(client, url, claude_headers(&auth.access)?).await {
+        Err(Failure::Rejected { status: 401, .. }) => {
+            auth = manager
+                .force_refresh(&auth.access)
+                .await
+                .map_err(renewal_failure)?;
+            get_json(client, url, claude_headers(&auth.access)?).await?
+        }
+        body => body?,
+    };
+    Ok(parse_claude(&body, auth.plan))
+}
+
+fn claude_headers(access: &str) -> Result<HeaderMap, Failure> {
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {}", auth.access))
+        HeaderValue::from_str(&format!("Bearer {access}"))
             .map_err(|_| Failure::Setup("the saved token is not a valid header".into()))?,
     );
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     headers.insert("anthropic-beta", HeaderValue::from_static(USAGE_BETA));
-    let body = get_json(client, USAGE_URL, headers).await?;
-    Ok(parse_claude(&body, auth.plan))
+    Ok(headers)
+}
+
+/// Why a saved Claude sign-in couldn't be used. Only a login that is gone, or
+/// that Claude turned down, means "sign in again". A Claude that is slow or out
+/// of reach doesn't, and a 429 or a 5xx on the renewal is the same answer the
+/// usage request would have got.
+fn renewal_failure(error: anyhow::Error) -> Failure {
+    if let Some(RenewRejected(status)) = error.downcast_ref::<RenewRejected>() {
+        return match status.as_u16() {
+            status @ (429 | 500..) => Failure::Rejected {
+                status,
+                retry_after: None,
+            },
+            _ => Failure::SignInUnusable,
+        };
+    }
+    match error.downcast_ref::<reqwest::Error>() {
+        Some(error) if error.is_timeout() => Failure::RenewalTimedOut,
+        Some(_) => Failure::Unreachable,
+        None => Failure::SignInUnusable,
+    }
 }
 
 async fn codex(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure> {
@@ -838,7 +1094,16 @@ async fn read_json(request: reqwest::RequestBuilder) -> Result<Value, Failure> {
     let response = request.send().await.map_err(transport_failure)?;
     let status = response.status();
     if !status.is_success() {
-        return Err(Failure::Rejected(status.as_u16()));
+        // Seconds only. A date, or anything else, is left out.
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse().ok());
+        return Err(Failure::Rejected {
+            status: status.as_u16(),
+            retry_after,
+        });
     }
     let body = response.bytes().await.map_err(transport_failure)?;
     serde_json::from_slice(&body).map_err(|_| Failure::Unreadable)
@@ -1135,7 +1400,18 @@ fn format_time_left(seconds: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::{
+        Json, Router,
+        http::StatusCode,
+        response::IntoResponse,
+        routing::{get, post},
+    };
+
     use super::*;
+    use crate::auth::InMemoryAuthStore;
 
     fn fixture(name: &str) -> Value {
         let path = format!("{}/tests/fixtures/usage/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -1506,6 +1782,28 @@ mod tests {
         );
         let usage = MonitorUsage::Unavailable("Press r to retry.".into());
         assert_eq!(usage.compact_line(now).to_string(), "unavailable");
+
+        // When the weekly allowance is 0%, a full 5h window is dimmed rather than green.
+        let blocked = PlanUsage {
+            five_hour: window(0.0, ms("2026-08-12T17:05:00Z")),
+            weekly: window(100.0, ms("2026-08-17T00:00:00Z")),
+            ..PlanUsage::default()
+        }
+        .monitor_usage();
+        let line = blocked.compact_line(now);
+        assert_eq!(line.spans[1].style.fg, Some(ui::DIM_WHITE));
+        assert_eq!(line.spans[4].style.fg, Some(ui::RED));
+        assert_eq!(
+            blocked.lines(now, &TimeZone::UTC)[0].spans[1].style.fg,
+            Some(ui::DIM_WHITE)
+        );
+    }
+
+    fn rejected(status: u16) -> Failure {
+        Failure::Rejected {
+            status,
+            retry_after: None,
+        }
     }
 
     #[test]
@@ -1513,24 +1811,220 @@ mod tests {
         let timed_out = UsageProvider::Claude.name();
         assert_eq!(
             Failure::TimedOut.short(timed_out),
-            "Claude subscription didn't answer in 10 seconds. Press r to retry."
+            "Claude didn't answer in 10 seconds. Press r to retry."
         );
         assert_eq!(
-            Failure::Rejected(401).short("Codex"),
+            rejected(401).short("Codex"),
             "Codex rejected the sign-in. Choose Sign in to this account again."
         );
         for failure in [
             Failure::SignInUnusable,
             Failure::TimedOut,
+            Failure::RenewalTimedOut,
             Failure::Unreachable,
             Failure::Unreadable,
-            Failure::Rejected(429),
-            Failure::Rejected(502),
+            rejected(429),
+            rejected(502),
+            Failure::Waiting(Duration::from_secs(90)),
         ] {
             let short = failure.short("Kimi");
             assert!(short.len() < 90, "{short}");
             assert!(!short.contains("cc-proxy usage"), "{short}");
             assert!(!short.contains("auth login"), "{short}");
+        }
+    }
+
+    #[test]
+    fn a_429_is_waited_out_as_long_as_the_provider_says_but_never_more_than_an_hour() {
+        assert_eq!(rate_limit_wait(Some(120)), Duration::from_secs(120));
+        assert_eq!(rate_limit_wait(None), RATE_LIMIT_FLOOR);
+        assert_eq!(rate_limit_wait(Some(86_400)), RATE_LIMIT_CEILING);
+        assert_eq!(rate_limit_wait(Some(0)), Duration::from_secs(1));
+
+        let told = Failure::Rejected {
+            status: 429,
+            retry_after: Some(120),
+        };
+        assert_eq!(
+            told.short("Claude"),
+            "Claude is limiting requests. Try again in 2m."
+        );
+        assert_eq!(
+            Failure::Waiting(Duration::from_secs(61)).short("Claude"),
+            "Claude is limiting requests. Try again in 2m."
+        );
+        assert!(
+            UsageProvider::Claude
+                .describe("work", told)
+                .contains("again in 2m.")
+        );
+
+        // The table is what makes the next automatic refresh skip the account.
+        let account = "wait-test-account";
+        assert_eq!(wait_left(UsageProvider::Claude, account), None);
+        start_wait(UsageProvider::Claude, account, Some(120));
+        let left = wait_left(UsageProvider::Claude, account).unwrap();
+        assert!(
+            left > Duration::from_secs(110) && left <= Duration::from_secs(120),
+            "{left:?}"
+        );
+        assert_eq!(wait_left(UsageProvider::Codex, account), None);
+        end_wait(UsageProvider::Claude, account);
+        assert_eq!(wait_left(UsageProvider::Claude, account), None);
+    }
+
+    #[test]
+    fn only_a_login_that_is_gone_or_turned_down_says_to_sign_in_again() {
+        let renewal = |status| {
+            renewal_failure(anyhow::Error::new(RenewRejected(
+                StatusCode::from_u16(status).unwrap(),
+            )))
+        };
+        assert!(matches!(renewal(400), Failure::SignInUnusable));
+        assert!(matches!(renewal(401), Failure::SignInUnusable));
+        assert!(matches!(
+            renewal(429),
+            Failure::Rejected {
+                status: 429,
+                retry_after: None
+            }
+        ));
+        assert!(matches!(
+            renewal(502),
+            Failure::Rejected { status: 502, .. }
+        ));
+        assert!(matches!(
+            renewal_failure(anyhow::anyhow!("No Claude subscription is saved.")),
+            Failure::SignInUnusable
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_renewal_with_no_answer_is_a_timeout_and_not_a_sign_in_to_replace() {
+        use anyhow::Context as _;
+        // A server that takes the connection and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let silent = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let error = client
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .context("Claude sign-in could not be renewed. Check your connection and retry.")
+            .unwrap_err();
+        silent.abort();
+        assert!(matches!(renewal_failure(error), Failure::RenewalTimedOut));
+    }
+
+    /// A stand-in for Claude. `/usage` accepts only the renewed token and turns
+    /// every other one down with `rejects` and `Retry-After: 120`.
+    async fn claude_stub(rejects: StatusCode) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let (renewed, counted) = (renewals.clone(), asked.clone());
+        let app = Router::new()
+            .route(
+                "/token",
+                post(move || {
+                    let renewed = renewed.clone();
+                    async move {
+                        renewed.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({
+                            "access_token": "new-access",
+                            "refresh_token": "new-refresh",
+                            "expires_in": 3600
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/usage",
+                get(move |headers: axum::http::HeaderMap| {
+                    let counted = counted.clone();
+                    async move {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        if headers["authorization"] == "Bearer new-access" {
+                            (
+                                StatusCode::OK,
+                                Json(serde_json::json!({
+                                    "five_hour": {"utilization": 20, "resets_at": "2026-10-25T12:00:00Z"},
+                                    "seven_day": {"utilization": 50}
+                                })),
+                            )
+                                .into_response()
+                        } else {
+                            (rejects, [("retry-after", "120")], Json(serde_json::json!({})))
+                                .into_response()
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), renewals, asked)
+    }
+
+    fn saved_claude_login(base: &str) -> AuthManager<InMemoryAuthStore<StoredAuth>> {
+        let store = InMemoryAuthStore::new();
+        store
+            .save(StoredAuth {
+                access: "stale-access".into(),
+                refresh: "refresh".into(),
+                expires: 4_102_444_800_000,
+                email: None,
+                account_id: None,
+                plan: Some("max".into()),
+            })
+            .unwrap();
+        AuthManager::with_endpoints(store, format!("{base}/token"), format!("{base}/profile"))
+    }
+
+    #[tokio::test]
+    async fn a_claude_usage_401_renews_the_login_once_and_asks_once_more() {
+        let (base, renewals, asked) = claude_stub(StatusCode::UNAUTHORIZED).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let manager = saved_claude_login(&base);
+
+        let usage = claude_usage(&client, &manager, &format!("{base}/usage"))
+            .await
+            .unwrap();
+
+        assert_eq!(usage.five_hour, window(20.0, ms("2026-10-25T12:00:00Z")));
+        assert_eq!(renewals.load(Ordering::SeqCst), 1);
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_claude_usage_403_or_429_keeps_the_login_and_the_retry_after() {
+        for status in [StatusCode::FORBIDDEN, StatusCode::TOO_MANY_REQUESTS] {
+            let (base, renewals, asked) = claude_stub(status).await;
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let manager = saved_claude_login(&base);
+
+            let failure = claude_usage(&client, &manager, &format!("{base}/usage"))
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(
+                    failure,
+                    Failure::Rejected { status: got, retry_after: Some(120) } if got == status.as_u16()
+                ),
+                "{failure:?}"
+            );
+            assert_eq!(renewals.load(Ordering::SeqCst), 0);
+            assert_eq!(asked.load(Ordering::SeqCst), 1);
         }
     }
 
@@ -1565,7 +2059,7 @@ mod tests {
 
     #[test]
     fn failures_say_which_account_failed_and_how_to_replace_only_that_sign_in() {
-        let message = UsageProvider::Codex.describe("work", Failure::Rejected(401));
+        let message = UsageProvider::Codex.describe("work", rejected(401));
         assert_eq!(
             message,
             "Codex account `work`: Codex didn't accept the sign-in when asked for usage. To replace this sign-in, run `cc-proxy auth login codex --replace --account work`."

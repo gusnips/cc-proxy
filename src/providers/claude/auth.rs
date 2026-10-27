@@ -102,6 +102,23 @@ impl TokenResponse {
     }
 }
 
+/// Claude answered a renewal with an error status. It is a type so a caller can
+/// tell a login that was turned down from a network that was slow.
+#[derive(Debug)]
+pub struct RenewRejected(pub reqwest::StatusCode);
+
+impl std::fmt::Display for RenewRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Claude sign-in renewal failed (HTTP {}). Run `cc-proxy auth login claude --replace`.",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RenewRejected {}
+
 pub struct ClaudeCli;
 pub static CLI: ClaudeCli = ClaudeCli;
 
@@ -199,16 +216,19 @@ impl<S: AuthStorage<StoredAuth>> AuthManager<S> {
         Self::with_endpoints(store, TOKEN_URL.into(), PROFILE_URL.into())
     }
 
-    fn with_endpoints(store: S, token_url: String, profile_url: String) -> Self {
-        Self {
-            lock: crate::auth::refresh_lock(&store.path()),
-            store,
-            client: reqwest::Client::builder()
+    pub(crate) fn with_endpoints(store: S, token_url: String, profile_url: String) -> Self {
+        static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+            reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(20))
                 .build()
-                .expect("failed to build Claude refresh client"),
+                .expect("failed to build Claude refresh client")
+        });
+        Self {
+            lock: crate::auth::refresh_lock(&store.path()),
+            store,
+            client: CLIENT.clone(),
             token_url,
             profile_url,
         }
@@ -291,10 +311,7 @@ impl<S: AuthStorage<StoredAuth>> AuthManager<S> {
             {
                 return Ok(latest);
             }
-            bail!(
-                "Claude sign-in renewal failed (HTTP {}). Run `cc-proxy auth login claude --replace`.",
-                response.status()
-            );
+            return Err(RenewRejected(response.status()).into());
         }
         let tokens: TokenResponse = response
             .json()
