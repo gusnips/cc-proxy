@@ -15,7 +15,7 @@ use std::time::Duration;
 use axum::response::Response;
 use http::StatusCode;
 
-use super::chats::{Place, place_of, remember};
+use super::chats::{Place, assign, place_of, remember};
 use super::{
     Cooldown, Cooldowns, MAX_ROTATION_WAIT_MS, ServedBy, all_limited, execute, exhausted_response,
     now_ms, retry_deadline, spent_response, storage_error,
@@ -202,6 +202,16 @@ fn chat_keys(identity: Option<&ConversationIdentity>) -> (Option<String>, Option
     }
 }
 
+fn ready(
+    plans: &[Plan],
+    at: usize,
+    tried: &HashSet<usize>,
+    snapshot: &[Cooldown],
+    now: u64,
+) -> bool {
+    !tried.contains(&at) && plans[at].wait(snapshot, now).is_none()
+}
+
 /// The chat's own row when it can serve, else the first row that is ready.
 fn pick(
     plans: &[Plan],
@@ -210,10 +220,39 @@ fn pick(
     snapshot: &[Cooldown],
     now: u64,
 ) -> Option<usize> {
-    let ready = |at: usize| !tried.contains(&at) && plans[at].wait(snapshot, now).is_none();
+    let is_ready = |at: usize| ready(plans, at, tried, snapshot, now);
     chat.and_then(|place| plans.iter().position(|plan| &plan.place() == place))
-        .filter(|at| ready(*at))
-        .or_else(|| (0..plans.len()).find(|at| ready(*at)))
+        .filter(|at| is_ready(*at))
+        .or_else(|| (0..plans.len()).find(|at| is_ready(*at)))
+}
+
+/// A chat with no row of its own that can serve takes the first row that is
+/// ready, `first`, or any other ready row of the same provider right under it:
+/// the one with the fewest recent chats. A row of another provider ends the
+/// run, so the order of the list still decides which provider answers, and the
+/// accounts of that provider share the new chats. The choice is saved before
+/// the request starts, so new chats that arrive together do not all pick the
+/// same account.
+fn spread(
+    plans: &[Plan],
+    first: usize,
+    chat: &str,
+    tried: &HashSet<usize>,
+    snapshot: &[Cooldown],
+    now: u64,
+) -> usize {
+    let provider = plans[first].provider.name();
+    let group: Vec<usize> = (first..plans.len())
+        .take_while(|at| plans[*at].provider.name() == provider)
+        .filter(|at| ready(plans, *at, tried, snapshot, now))
+        .collect();
+    if group.len() < 2 {
+        return first;
+    }
+    let places: Vec<Place> = group.iter().map(|at| plans[*at].place()).collect();
+    assign(chat, &places)
+        .and_then(|place| group.into_iter().find(|at| plans[*at].place() == place))
+        .unwrap_or(first)
 }
 
 fn first_release(plans: &[Plan], snapshot: &[Cooldown], now: u64) -> Option<u64> {
@@ -323,7 +362,7 @@ impl Pool<'_> {
                 Vec::new()
             };
             let now = now_ms();
-            let Some(at) = pick(&plans, remembered.as_ref(), &tried, &snapshot, now) else {
+            let Some(mut at) = pick(&plans, remembered.as_ref(), &tried, &snapshot, now) else {
                 // Nothing ready: hold the request until the first row frees up
                 // (once per request, bounded), so the turn continues on it
                 // instead of dying on a 429.
@@ -360,6 +399,13 @@ impl Pool<'_> {
                         )
                     });
             };
+            // Without auto-rotate the first row answers everything, so nothing spreads.
+            if auto
+                && let Some(chat) = chat.as_deref()
+                && remembered.as_ref() != Some(&plans[at].place())
+            {
+                at = spread(&plans, at, chat, &tried, &snapshot, now);
+            }
             tried.insert(at);
             let plan = &plans[at];
             let provider = plan.provider.name();
@@ -1101,15 +1147,73 @@ mod tests {
         assert_eq!(text(same).await, format!("codex:{CODEX_ONE}"));
         assert_eq!(world.served(), [place("codex", Some(CODEX_ONE))]);
 
-        // Its row was removed or turned off while the proxy was down: the
-        // first ready row answers, as for a new chat.
+        // Its row was removed or turned off while the proxy was down: it takes
+        // a ready row of the first provider, as a new chat does.
         super::super::chats::forget_loaded();
         let rows = vec![
             row("claude", Some(CLAUDE_PRO)),
             row("claude", Some(CLAUDE_MAX)),
         ];
         let moved = world.ask(&rows, Some("chat-restart")).await;
-        assert_eq!(text(moved).await, format!("claude:{CLAUDE_PRO}"));
+        assert!(text(moved).await.starts_with("claude:"));
+    }
+
+    #[tokio::test]
+    async fn new_chats_spread_over_the_first_providers_ready_accounts_in_order() {
+        let world = world();
+        // Names of their own: places are counted across every chat in the process.
+        let ids = ["spread-a", "spread-b", "spread-c"];
+        let rows = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| row("claude", Some(*id)))
+                .chain([row("codex", Some(CODEX_ONE))])
+                .collect::<Vec<_>>()
+        };
+        let answer = |chat: &'static str, rows: Vec<PoolEntry>| {
+            let world = &world;
+            async move { text(world.ask(&rows, Some(chat)).await).await }
+        };
+        // Three new chats, three accounts, in the order of the list.
+        assert_eq!(answer("spread-1", rows(&ids)).await, "claude:spread-a");
+        assert_eq!(answer("spread-2", rows(&ids)).await, "claude:spread-b");
+        assert_eq!(answer("spread-3", rows(&ids)).await, "claude:spread-c");
+        assert_eq!(answer("spread-4", rows(&ids)).await, "claude:spread-a");
+        // A chat stays where it started, even when the others are lighter.
+        assert_eq!(answer("spread-1", rows(&ids)).await, "claude:spread-a");
+        // An account that is waiting takes no new chat, and Codex, under
+        // the Claude rows, takes none while any of them is ready.
+        world.limit("claude", Some("spread-b"));
+        assert_eq!(answer("spread-5", rows(&ids)).await, "claude:spread-c");
+        let calls = world.served();
+        assert!(!calls.contains(&place("codex", Some(CODEX_ONE))));
+        // A chat whose account is waiting moves to a ready one of the same provider.
+        assert_eq!(answer("spread-2", rows(&ids)).await, "claude:spread-a");
+    }
+
+    #[tokio::test]
+    async fn the_order_of_the_list_decides_the_provider_and_auto_rotate_off_spreads_nothing() {
+        let world = world();
+        // A row of another provider between two Claude rows ends the run.
+        let between = vec![
+            row("claude", Some("order-a")),
+            row("codex", Some(CODEX_ONE)),
+            row("claude", Some("order-b")),
+        ];
+        for chat in ["order-1", "order-2", "order-3"] {
+            let answer = world.ask(&between, Some(chat)).await;
+            assert_eq!(text(answer).await, "claude:order-a");
+        }
+        // Without auto-rotate the first row answers every request.
+        let rows = vec![row("claude", Some("off-a")), row("claude", Some("off-b"))];
+        for chat in ["off-1", "off-2", "off-3"] {
+            let answer = world
+                .ask_with(&rows, Some(chat), false, "claude-opus-4-8", None)
+                .await;
+            assert_eq!(text(answer).await, "claude:off-a");
+        }
+        // A request with no valid identity is not remembered, so it takes the first row.
+        let loose = world.ask(&rows, None).await;
+        assert_eq!(text(loose).await, "claude:off-a");
     }
 
     #[tokio::test]

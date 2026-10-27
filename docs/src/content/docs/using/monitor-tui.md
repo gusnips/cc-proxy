@@ -27,10 +27,13 @@ is written by its name. Accounts of different providers can sit in any order,
 for example a Claude account, a Codex account, then another Claude account.
 Providers you have not set up wait below the list, tagged `not set up`.
 
-New chats use the first row that is ready. A chat stays on its account until it
-hits a limit, so moving a row or turning it off changes new chats, not the ones
-you are in. With auto-rotate on, a row that is waiting is skipped. Without it,
-the first row that is on answers every request. When every row that is on has a
+New chats share the first provider's ready accounts: a new chat takes the one
+with the fewest chats in the last hour, and the list order breaks a tie. A row of
+another provider, lower in the list, ends that group, so the order still decides
+which provider answers. A chat stays on its account until it hits a limit, so
+moving a row or turning it off changes new chats, not the ones you are in. With
+auto-rotate on, a row that is waiting is skipped. Without it, the first row that
+is on answers every request and nothing spreads. When every row that is on has a
 confirmed wait, `[first reset]` marks the earliest reset.
 
 The name takes the first line of each account row. Usage, wait times and state

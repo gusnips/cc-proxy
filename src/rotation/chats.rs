@@ -35,6 +35,10 @@ const CHAT_MEMORY: Duration = Duration::from_secs(24 * 60 * 60);
 const CHAT_LIMIT: usize = 2_048;
 /// A chat that keeps talking is saved again only after this long.
 const SAVE_AGAIN_MS: u64 = 5 * 60 * 1_000;
+/// A chat counts as using its account for this long after its last request,
+/// when new chats are spread over the accounts. Older chats keep their place but
+/// no longer weigh on it.
+const SPREAD_WINDOW: Duration = Duration::from_secs(60 * 60);
 
 /// One chat as it is saved.
 #[derive(Serialize, Deserialize)]
@@ -106,6 +110,30 @@ impl ChatMemory {
 
     pub(super) fn remember(&mut self, chat: &str, place: Place) {
         self.remember_at(chat, place, now_ms());
+    }
+
+    /// The place for a chat that has none it can use, among `candidates` in their
+    /// order: the one with the fewest recent chats, the first of them on a tie.
+    /// A chat already on one of them keeps it. The choice is saved at once, so
+    /// two new chats at the same moment never pick the same account.
+    // ponytail: it counts chats seen in the last hour, not open windows or tokens.
+    // Weigh by tokens (see `monitor::accounting`) if chats differ a lot in size.
+    pub(super) fn assign(&mut self, chat: &str, candidates: &[Place]) -> Option<Place> {
+        if let Some(place) = self
+            .place_of(chat)
+            .filter(|place| candidates.contains(place))
+        {
+            return Some(place);
+        }
+        let recent = |place: &Place| {
+            self.chats
+                .values()
+                .filter(|known| &known.place == place && known.seen.elapsed() < SPREAD_WINDOW)
+                .count()
+        };
+        let place = candidates.iter().min_by_key(|place| recent(place))?.clone();
+        self.remember(chat, place.clone());
+        Some(place)
     }
 
     fn remember_at(&mut self, chat: &str, place: Place, now_ms: u64) {
@@ -255,6 +283,11 @@ pub(super) fn remember(chat: &str, place: Place) {
     with_memory(|memory| memory.remember(chat, place));
 }
 
+/// See [`ChatMemory::assign`].
+pub(super) fn assign(chat: &str, candidates: &[Place]) -> Option<Place> {
+    with_memory(|memory| memory.assign(chat, candidates))?
+}
+
 /// A restart, for a test: the next use reads the file again.
 #[cfg(test)]
 pub(super) fn forget_loaded() {
@@ -302,6 +335,36 @@ mod tests {
             rows.iter().find(|row| row["chat"] == "chat-b").unwrap()["accountId"],
             serde_json::Value::Null
         );
+    }
+
+    #[test]
+    fn new_chats_spread_over_the_candidates_and_a_known_chat_keeps_its_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut memory = ChatMemory::load(dir.path().join("chats.json"));
+        let (a, b) = (place("claude", Some("a")), place("claude", Some("b")));
+        let both = [a.clone(), b.clone()];
+        // Each new chat takes the account with the fewest chats; a tie takes the first.
+        assert_eq!(memory.assign("one", &both), Some(a.clone()));
+        assert_eq!(memory.assign("two", &both), Some(b.clone()));
+        assert_eq!(memory.assign("three", &both), Some(a.clone()));
+        // A chat that already sits on a candidate stays, whatever the counts are.
+        assert_eq!(memory.assign("two", &both), Some(b.clone()));
+        assert_eq!(memory.assign("three", &both), Some(a.clone()));
+        // Another chat on `b` makes `a` the lighter one again.
+        memory.remember("four", b.clone());
+        memory.remember("five", b.clone());
+        assert_eq!(memory.assign("six", &both), Some(a.clone()));
+        // The pick is saved, so a restart keeps it.
+        let after = ChatMemory::load(dir.path().join("chats.json"));
+        assert_eq!(after.place_of("six"), Some(a.clone()));
+        // A chat on a place that is not a candidate moves to one.
+        memory.remember("seven", place("codex", None));
+        assert!(
+            memory
+                .assign("seven", &both)
+                .is_some_and(|p| both.contains(&p))
+        );
+        assert_eq!(memory.assign("eight", &[]), None);
     }
 
     #[test]

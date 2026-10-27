@@ -180,11 +180,14 @@ the monitor, not by hand: the ids belong to your saved logins.
 ```
 
 turns those three providers on, in that order, and turns the others off. A
-request takes the first row that is on and ready. A chat that already started
-keeps its row while that row can serve it, so the provider's prompt cache is
-reused; a row above it that frees up only takes new chats. When a row hits a
-limit that names a reset (or its balance is spent), the chat moves down the
-list. A row without a model for the requested tier is skipped.
+request takes the first row that is on and ready. With auto-rotate on, a new
+chat shares the ready accounts of that row's provider that sit together at the
+top: it takes the one with the fewest chats in the last hour, and the list
+order breaks a tie. A row of another provider ends the group. A chat that
+already started keeps its row while that row can serve it, so the provider's
+prompt cache is reused; a row above it that frees up only takes new chats. When
+a row hits a limit that names a reset (or its balance is spent), the chat moves
+to a ready row. A row without a model for the requested tier is skipped.
 
 Older config files that have `route.provider` and `route.fallback` still work.
 They are read as rows, with each provider's saved account first. The first time
