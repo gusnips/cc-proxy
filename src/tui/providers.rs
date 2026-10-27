@@ -82,48 +82,55 @@ impl AccountRow {
     }
 
     fn usage_summary(&self, now: u64) -> Line<'static> {
-        let mut summary = self.usage.as_ref().map_or_else(
-            || "checking...".into(),
-            |usage| usage.compact_line(jiff::Timestamp::now()),
-        );
-        let reset_is_shown = match &self.usage {
-            Some(MonitorUsage::Reported(windows)) => windows.iter().any(|window| {
-                window.remaining_percent == 0.0
-                    && window.resets_at_ms.is_some_and(|reset| reset > now as i64)
-            }),
-            _ => false,
-        };
-        if let Some(until) = self.waiting_until(now)
-            && (self.spent || !reset_is_shown)
-        {
-            let replaces = match &self.usage {
-                None | Some(MonitorUsage::Unavailable(_)) => true,
-                // "out of credit" says more than "not reported".
-                Some(MonitorUsage::NotReported(_)) => self.spent,
-                Some(MonitorUsage::Reported(_)) => false,
-            };
-            if replaces {
-                summary = Line::default();
-            } else {
-                summary.spans.push(Span::raw(" · "));
-            }
-            let left = ui::duration(Duration::from_millis(until - now));
-            if self.spent {
-                summary.spans.extend([
+        let timestamp = jiff::Timestamp::now();
+        if let Some(until) = self.waiting_until(now) {
+            let ms_left = until.saturating_sub(now);
+            let mut spans = if self.spent {
+                let left = ui::duration(Duration::from_millis(ms_left));
+                vec![
                     Span::styled(
                         "out of credit",
                         Style::default().fg(ui::remaining_color(0.0)),
                     ),
                     Span::raw(format!(" · tries again in {left}")),
-                ]);
+                ]
             } else {
-                summary.spans.extend([
+                let left = if ms_left >= 3_600_000 {
+                    crate::usage::format_time_left(ms_left.div_ceil(1000) as i64)
+                } else {
+                    ui::duration(Duration::from_millis(ms_left))
+                };
+                vec![
                     Span::styled("waiting", Style::default().fg(YELLOW)),
                     Span::raw(format!(" · {left} left")),
-                ]);
+                ]
+            };
+            match &self.usage {
+                Some(usage @ MonitorUsage::Reported(windows)) if !windows.is_empty() => {
+                    spans.push(Span::raw(" · "));
+                    spans.extend(usage.windows_line(timestamp).spans);
+                }
+                Some(MonitorUsage::NotReported(_)) if !self.spent => {
+                    spans.push(Span::raw(" · not reported"));
+                }
+                _ => {}
             }
+            return Line::from(spans);
         }
-        summary
+        match &self.usage {
+            None => "checking...".into(),
+            Some(usage @ MonitorUsage::Reported(windows))
+                if !windows.is_empty() && windows.iter().all(|w| w.remaining_percent > 0.0) =>
+            {
+                let mut spans = vec![
+                    Span::styled("ready", Style::default().fg(GREEN)),
+                    Span::raw(" · "),
+                ];
+                spans.extend(usage.compact_line(timestamp).spans);
+                Line::from(spans)
+            }
+            Some(usage) => usage.compact_line(timestamp),
+        }
     }
 }
 
@@ -259,6 +266,54 @@ struct MoveDraft {
     error: Option<String>,
 }
 
+/// Choosing which models answer Claude Code's four tier names on a provider.
+struct ModelsDraft {
+    provider: String,
+    mappings: Vec<crate::tiers::Mapping>,
+    tier_state: ListState,
+    picking: Option<TierPick>,
+    saving: bool,
+    error: Option<String>,
+}
+
+struct TierPick {
+    tier: &'static str,
+    options: Vec<String>,
+    filter: InputLine,
+    list_state: ListState,
+}
+
+impl TierPick {
+    fn filtered(&self) -> Vec<usize> {
+        let query = self.filter.value();
+        if query.trim().is_empty() {
+            (0..self.options.len()).collect()
+        } else {
+            crate::prompt::matching(&self.options, &query)
+        }
+    }
+}
+
+impl ModelsDraft {
+    fn has_chosen(&self) -> bool {
+        self.mappings
+            .iter()
+            .any(|m| m.basis == crate::tiers::Basis::Chosen)
+    }
+
+    fn row_count(&self) -> usize {
+        self.mappings.len() + usize::from(self.has_chosen())
+    }
+
+    fn refresh_mappings(&mut self, route: &config::Route) {
+        let registry = Registry::new();
+        self.mappings = crate::tiers::mapping(&registry, route, &self.provider);
+        let max = self.row_count().saturating_sub(1);
+        let at = self.tier_state.selected().unwrap_or(0).min(max);
+        self.tier_state.select(Some(at));
+    }
+}
+
 pub(super) struct ProvidersPanel {
     mode: Mode,
     rows: Vec<ProviderRow>,
@@ -292,6 +347,7 @@ pub(super) struct ProvidersPanel {
     detail_scroll: u16,
     rename: Option<RenameDraft>,
     moving: Option<MoveDraft>,
+    models: Option<ModelsDraft>,
 }
 
 impl ProvidersPanel {
@@ -323,6 +379,7 @@ impl ProvidersPanel {
             detail_scroll: 0,
             rename: None,
             moving: None,
+            models: None,
         };
         if mode == Mode::Demo {
             panel.rows = demo_rows();
@@ -813,10 +870,17 @@ impl ProvidersPanel {
     }
 
     pub fn close_menu(&mut self) -> bool {
+        if let Some(draft) = &mut self.models
+            && draft.picking.take().is_some()
+        {
+            draft.error = None;
+            return true;
+        }
         // A question that was never answered must not stay on screen, and a
         // cancelled move puts the old order back.
         let menu = self.menu.take().is_some();
         let rename = self.rename.take().is_some();
+        let models = self.models.take().is_some();
         let moving = if let Some(draft) = self.moving.take() {
             self.pool = draft.before;
             self.route_from_pool();
@@ -824,16 +888,19 @@ impl ProvidersPanel {
         } else {
             false
         };
-        let was_open = menu || rename || moving;
+        let was_open = menu || rename || moving || models;
         if was_open {
             self.notice = None;
         }
         was_open
     }
 
-    /// An action list, a name field or move mode is open over the account list.
+    /// An action list, a name field, move mode or model picker is open over the account list.
     pub fn menu_open(&self) -> bool {
-        self.menu.is_some() || self.rename.is_some() || self.moving.is_some()
+        self.menu.is_some()
+            || self.rename.is_some()
+            || self.moving.is_some()
+            || self.models.is_some()
     }
 
     /// A row is being moved in the list.
@@ -844,6 +911,109 @@ impl ProvidersPanel {
     /// A name is being typed: every key, even `q`, goes to the field.
     pub fn renaming(&self) -> bool {
         self.rename.is_some()
+    }
+
+    /// The model picker is open on a provider's tiers.
+    pub fn choosing_models(&self) -> bool {
+        self.models.is_some()
+    }
+
+    /// A tier's model filter is open: every key, even `q`, goes to the filter.
+    pub fn filtering_models(&self) -> bool {
+        self.models
+            .as_ref()
+            .is_some_and(|draft| draft.picking.is_some())
+    }
+
+    /// Typing in a tier's model filter or moving in its filtered model list.
+    pub fn press_models_filter(&mut self, key: KeyEvent) -> Option<Action> {
+        let draft = self.models.as_mut()?;
+        let pick = draft.picking.as_mut()?;
+        let control = key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                if !pick.filter.value().is_empty() {
+                    pick.filter = InputLine::new("");
+                    pick.list_state
+                        .select((!pick.options.is_empty()).then_some(0));
+                } else {
+                    draft.picking = None;
+                    draft.error = None;
+                }
+                None
+            }
+            KeyCode::Up => {
+                let len = pick.filtered().len();
+                if len > 0 {
+                    let at = pick.list_state.selected().unwrap_or(0);
+                    pick.list_state.select(Some(at.saturating_sub(1)));
+                }
+                None
+            }
+            KeyCode::Down => {
+                let len = pick.filtered().len();
+                if len > 0 {
+                    let at = pick.list_state.selected().unwrap_or(0);
+                    pick.list_state.select(Some((at + 1).min(len - 1)));
+                }
+                None
+            }
+            KeyCode::PageUp => {
+                let len = pick.filtered().len();
+                if len > 0 {
+                    let at = pick.list_state.selected().unwrap_or(0);
+                    pick.list_state.select(Some(at.saturating_sub(8)));
+                }
+                None
+            }
+            KeyCode::PageDown => {
+                let len = pick.filtered().len();
+                if len > 0 {
+                    let at = pick.list_state.selected().unwrap_or(0);
+                    pick.list_state.select(Some((at + 8).min(len - 1)));
+                }
+                None
+            }
+            KeyCode::Char('p') if control => {
+                let len = pick.filtered().len();
+                if len > 0 {
+                    let at = pick.list_state.selected().unwrap_or(0);
+                    pick.list_state.select(Some(at.saturating_sub(1)));
+                }
+                None
+            }
+            KeyCode::Char('n') if control => {
+                let len = pick.filtered().len();
+                if len > 0 {
+                    let at = pick.list_state.selected().unwrap_or(0);
+                    pick.list_state.select(Some((at + 1).min(len - 1)));
+                }
+                None
+            }
+            KeyCode::Enter => {
+                let filtered = pick.filtered();
+                let &idx = filtered.get(pick.list_state.selected().unwrap_or(0))?;
+                let model = pick.options[idx].clone();
+                let tier = pick.tier;
+                draft.error = None;
+                Some(Action::SetTierModel {
+                    provider: draft.provider.clone(),
+                    tier,
+                    model,
+                })
+            }
+            _ => {
+                let before = pick.filter.value();
+                let _ = pick.filter.press(key);
+                if pick.filter.value() != before {
+                    let len = pick.filtered().len();
+                    pick.list_state.select((len > 0).then_some(0));
+                }
+                None
+            }
+        }
     }
 
     /// Typing in the name field. Enter hands the new name back to be saved;
@@ -903,6 +1073,7 @@ impl ProvidersPanel {
         });
         self.menu = None;
         self.moving = None;
+        self.models = None;
         self.notice = None;
         self.detail_scroll = 0;
     }
@@ -917,6 +1088,27 @@ impl ProvidersPanel {
         });
         self.menu = None;
         self.rename = None;
+        self.models = None;
+        self.notice = None;
+        self.detail_scroll = 0;
+    }
+
+    fn open_models(&mut self, provider: String) {
+        let registry = Registry::new();
+        let mappings = crate::tiers::mapping(&registry, &self.route, &provider);
+        let mut tier_state = ListState::default();
+        tier_state.select(Some(0));
+        self.models = Some(ModelsDraft {
+            provider,
+            mappings,
+            tier_state,
+            picking: None,
+            saving: false,
+            error: None,
+        });
+        self.menu = None;
+        self.rename = None;
+        self.moving = None;
         self.notice = None;
         self.detail_scroll = 0;
     }
@@ -938,6 +1130,10 @@ impl ProvidersPanel {
             draft.error = None;
         }
         if let Some(draft) = &mut self.moving {
+            draft.saving = true;
+            draft.error = None;
+        }
+        if let Some(draft) = &mut self.models {
             draft.saving = true;
             draft.error = None;
         }
@@ -1013,6 +1209,64 @@ impl ProvidersPanel {
             }
             return None;
         }
+        if let Some(draft) = &mut self.models {
+            match key {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let at = draft.tier_state.selected().unwrap_or(0);
+                    draft.tier_state.select(Some(at.saturating_sub(1)));
+                    draft.error = None;
+                    self.notice = None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let at = draft.tier_state.selected().unwrap_or(0);
+                    let max = draft.row_count().saturating_sub(1);
+                    draft.tier_state.select(Some((at + 1).min(max)));
+                    draft.error = None;
+                    self.notice = None;
+                }
+                KeyCode::Left => {
+                    self.close_menu();
+                }
+                KeyCode::Enter | KeyCode::Right => {
+                    let at = draft.tier_state.selected().unwrap_or(0);
+                    if at < draft.mappings.len() {
+                        let tier = draft.mappings[at].tier;
+                        let current = draft.mappings[at].model.clone();
+                        let registry = Registry::new();
+                        let options = crate::models_map::choices(&registry, &draft.provider, tier);
+                        if options.is_empty() {
+                            let name = ui::provider_name(&draft.provider);
+                            draft.error = Some(format!(
+                                "{name} has no models listed yet. Run `cc-proxy models refresh {}`, then try again.",
+                                draft.provider
+                            ));
+                            return None;
+                        }
+                        let selected = current
+                            .as_ref()
+                            .and_then(|model| options.iter().position(|option| option == model))
+                            .unwrap_or(0);
+                        let mut list_state = ListState::default();
+                        list_state.select(Some(selected));
+                        draft.picking = Some(TierPick {
+                            tier,
+                            options,
+                            filter: InputLine::new(""),
+                            list_state,
+                        });
+                        draft.error = None;
+                        self.notice = None;
+                    } else {
+                        draft.error = None;
+                        return Some(Action::ResetTierModels {
+                            provider: draft.provider.clone(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            return None;
+        }
         match key {
             KeyCode::Up | KeyCode::Char('k') => self.step(false),
             KeyCode::Down | KeyCode::Char('j') => self.step(true),
@@ -1057,6 +1311,11 @@ impl ProvidersPanel {
                             self.open_rename(provider, id);
                             None
                         }
+                        Some((_, Action::ChooseModels { provider })) => {
+                            self.open_models(provider);
+                            None
+                        }
+                        Some((_, Action::SectionHeader)) => None,
                         chosen => chosen.map(|(_, action)| action),
                     };
                 }
@@ -1077,11 +1336,14 @@ impl ProvidersPanel {
         self.detail_scroll = 0;
         if let Some(menu) = &self.menu {
             let at = self.menu_state.selected().unwrap_or(0);
-            self.menu_state.select(Some(if down {
-                (at + 1).min(menu.len().saturating_sub(1))
+            let next = if down {
+                (at + 1..menu.len()).find(|&i| menu[i].1 != Action::SectionHeader)
             } else {
-                at.saturating_sub(1)
-            }));
+                (0..at).rev().find(|&i| menu[i].1 != Action::SectionHeader)
+            };
+            if let Some(next) = next {
+                self.menu_state.select(Some(next));
+            }
         } else {
             let entries = self.entries();
             let at = entries
@@ -1113,6 +1375,7 @@ impl ProvidersPanel {
             return Vec::new();
         };
         let account = self.selected_account();
+        let name = ui::provider_name(&row.id);
         let mut actions = Vec::new();
         // A row in the pool can move and be turned off. A provider that is not
         // set up is not in it.
@@ -1169,6 +1432,31 @@ impl ProvidersPanel {
                 },
             ));
         }
+        actions.push((format!("── {name} ──"), Action::SectionHeader));
+        if account.is_some() && row.supports_accounts {
+            actions.push((
+                format!("Add another {name} account..."),
+                Action::SignIn {
+                    provider: row.id.clone(),
+                    account: None,
+                    add: true,
+                },
+            ));
+        }
+        actions.push((
+            format!("Choose {name} models..."),
+            Action::ChooseModels {
+                provider: row.id.clone(),
+            },
+        ));
+        if crate::models_map::supports_refresh(&row.id) && row.state != AuthState::Missing {
+            actions.push((
+                format!("Refresh {name} model list"),
+                Action::RefreshModels {
+                    provider: row.id.clone(),
+                },
+            ));
+        }
         actions
     }
 
@@ -1179,6 +1467,11 @@ impl ProvidersPanel {
                 self.menu = None;
                 self.rename = None;
                 self.moving = None;
+                if let Some(draft) = &mut self.models {
+                    draft.saving = false;
+                    draft.error = None;
+                    draft.picking = None;
+                }
             }
             // A name that was refused stays in its field, with the reason beside it.
             Err(error) if self.rename.is_some() => self.refuse_name(format!("{error:#}")),
@@ -1186,6 +1479,12 @@ impl ProvidersPanel {
                 draft.saving = false;
                 draft.error = Some(format!(
                     "Couldn't save the order: {error:#}. Press Enter to retry, or Esc to put it back."
+                ));
+            }
+            Err(error) if let Some(draft) = &mut self.models => {
+                draft.saving = false;
+                draft.error = Some(format!(
+                    "Couldn't save the model choice: {error:#}. Press Enter to retry, or Esc to go back."
                 ));
             }
             Err(error) => {
@@ -1287,6 +1586,34 @@ impl ProvidersPanel {
         self.route.fallback = names;
     }
 
+    /// Shows a model choice or reset at once, without waiting for the next read.
+    pub fn apply_model_action(&mut self, action: &Action) {
+        match action {
+            Action::SetTierModel {
+                provider,
+                tier,
+                model,
+            } => {
+                self.route
+                    .tiers
+                    .entry(provider.clone())
+                    .or_default()
+                    .insert((*tier).to_string(), model.clone());
+            }
+            Action::ResetTierModels { provider } => {
+                self.route.tiers.remove(provider);
+            }
+            Action::RefreshModels { .. } => {}
+            _ => return,
+        }
+        if let Some(draft) = &mut self.models {
+            draft.picking = None;
+            draft.saving = false;
+            draft.error = None;
+            draft.refresh_mappings(&self.route);
+        }
+    }
+
     pub fn preview_action(&mut self, action: &Action) {
         match action {
             Action::StartProxy => {}
@@ -1313,6 +1640,23 @@ impl ProvidersPanel {
                 }
                 self.rename = None;
             }
+            Action::SetTierModel { .. } | Action::ResetTierModels { .. } => {
+                self.apply_model_action(action);
+                self.notice = Some(("Demo only. Nothing on this computer changed.".into(), false));
+                return;
+            }
+            Action::RefreshModels { provider } => {
+                self.notice = Some((
+                    format!(
+                        "Demo only. {} model list was not fetched.",
+                        ui::provider_name(provider)
+                    ),
+                    false,
+                ));
+                self.menu = None;
+                return;
+            }
+            Action::SectionHeader | Action::ChooseModels { .. } => return,
             Action::SignIn { .. } => {
                 self.notice = Some((
                     "Demo only. Run cc-proxy open to sign in to a real account.".into(),
@@ -1643,7 +1987,7 @@ impl ProvidersPanel {
                     } else {
                         "Request order"
                     },
-                    self.menu.is_none() && self.rename.is_none(),
+                    self.menu.is_none() && self.rename.is_none() && self.models.is_none(),
                 ))
                 .highlight_symbol("❯ ")
                 .style(Style::default().fg(DIM_WHITE))
@@ -1655,24 +1999,26 @@ impl ProvidersPanel {
             list_area,
             &mut self.list,
         );
-        let detail = panel(
-            if self.rename.is_some() {
-                "Rename account"
-            } else if self.moving.is_some() {
-                "Move row"
-            } else if self.menu.is_some() {
-                "Choose an action"
-            } else {
-                "Details"
-            },
-            self.menu_open(),
-        );
+        let detail_title = if self.rename.is_some() {
+            "Rename account".to_string()
+        } else if self.moving.is_some() {
+            "Move row".to_string()
+        } else if let Some(draft) = &self.models {
+            format!("Choose {} models", ui::provider_name(&draft.provider))
+        } else if self.menu.is_some() {
+            "Choose an action".to_string()
+        } else {
+            "Details".to_string()
+        };
+        let detail = panel(&detail_title, self.menu_open());
         let inner = detail.inner(detail_area);
         frame.render_widget(detail, detail_area);
         if let Some(draft) = &self.rename {
             render_rename(frame, inner, draft);
         } else if let Some(draft) = &self.moving {
             self.render_move(frame, inner, draft);
+        } else if let Some(draft) = &mut self.models {
+            render_models(frame, inner, draft, &self.notice);
         } else if let Some(menu) = &self.menu {
             let notice_height = if let Some((message, _)) = &self.notice {
                 Paragraph::new(message.as_str())
@@ -1686,14 +2032,23 @@ impl ProvidersPanel {
                 Layout::vertical([Constraint::Min(1), Constraint::Length(notice_height)])
                     .areas(inner);
             frame.render_stateful_widget(
-                List::new(menu.iter().map(|(label, _)| ListItem::new(label.clone())))
-                    .highlight_symbol("❯ ")
-                    .highlight_style(
-                        Style::default()
-                            .fg(TEAL)
-                            .bg(SELECTED_BG)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                List::new(menu.iter().map(|(label, action)| {
+                    if *action == Action::SectionHeader {
+                        ListItem::new(vec![
+                            Line::raw(""),
+                            Line::styled(label.clone(), Style::default().fg(DIM_WHITE)),
+                        ])
+                    } else {
+                        ListItem::new(label.clone())
+                    }
+                }))
+                .highlight_symbol("❯ ")
+                .highlight_style(
+                    Style::default()
+                        .fg(TEAL)
+                        .bg(SELECTED_BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 choices,
                 &mut self.menu_state,
             );
@@ -1831,6 +2186,158 @@ fn render_rename(frame: &mut ratatui::Frame<'_>, area: Rect, draft: &RenameDraft
         area.x.saturating_add(column).min(area.right() - 1),
         area.y.saturating_add(1).min(area.bottom() - 1),
     ));
+}
+
+fn render_models(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    draft: &mut ModelsDraft,
+    notice: &Option<(String, bool)>,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let provider_name = ui::provider_name(&draft.provider);
+    if let Some(pick) = &mut draft.picking {
+        const LABEL: &str = "Filter: ";
+        let room = usize::from(area.width).saturating_sub(LABEL.len() + 1);
+        let (shown, at) = pick.filter.window(room);
+        let mut header = vec![
+            Line::styled(
+                format!("Model for `{}` on {provider_name}", pick.tier),
+                Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
+            ),
+            Line::from(vec![
+                Span::styled(LABEL, Style::default().fg(DIM_WHITE)),
+                Span::styled(
+                    shown,
+                    Style::default()
+                        .fg(WHITE)
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
+            ]),
+        ];
+        if draft.saving {
+            header.push(Line::styled("Saving...", Style::default().fg(TEAL)));
+        } else if let Some(error) = &draft.error {
+            header.push(Line::styled(error.clone(), Style::default().fg(YELLOW)));
+        } else {
+            header.push(Line::raw(""));
+        }
+        let header_height = u16::try_from(header.len()).unwrap_or(3).min(area.height);
+        let footer_height = u16::from(area.height > header_height + 2);
+        let [top, middle, bottom] = Layout::vertical([
+            Constraint::Length(header_height),
+            Constraint::Min(0),
+            Constraint::Length(footer_height),
+        ])
+        .areas(area);
+        frame.render_widget(
+            Paragraph::new(header)
+                .style(Style::default().fg(DIM_WHITE).bg(BG))
+                .wrap(Wrap { trim: false }),
+            top,
+        );
+        let filtered = pick.filtered();
+        if filtered.is_empty() {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "No models match \"{}\". Press Backspace to edit, Ctrl-U to clear, or Esc to go back.",
+                    pick.filter.value()
+                ))
+                .style(Style::default().fg(YELLOW).bg(BG))
+                .wrap(Wrap { trim: false }),
+                middle,
+            );
+        } else {
+            let items: Vec<_> = filtered
+                .iter()
+                .map(|&idx| ListItem::new(pick.options[idx].clone()))
+                .collect();
+            frame.render_stateful_widget(
+                List::new(items)
+                    .highlight_symbol("❯ ")
+                    .style(Style::default().fg(WHITE))
+                    .highlight_style(
+                        Style::default()
+                            .fg(TEAL)
+                            .bg(SELECTED_BG)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                middle,
+                &mut pick.list_state,
+            );
+        }
+        if footer_height > 0 {
+            frame.render_widget(
+                Paragraph::new("Type to filter · ↑/↓ move · Enter save · Esc back")
+                    .style(Style::default().fg(DIM_WHITE).bg(BG)),
+                bottom,
+            );
+        }
+        let column = u16::try_from(LABEL.len() + at).unwrap_or(u16::MAX);
+        frame.set_cursor_position((
+            area.x.saturating_add(column).min(area.right() - 1),
+            area.y.saturating_add(1).min(area.bottom() - 1),
+        ));
+        return;
+    }
+
+    let mut items: Vec<ListItem<'static>> = draft
+        .mappings
+        .iter()
+        .map(|mapping| {
+            let detail = match &mapping.model {
+                Some(model) => format!(
+                    "{model} ({})",
+                    crate::models_map::basis_label(mapping.basis)
+                ),
+                None => "no model yet".into(),
+            };
+            ListItem::new(format!("{:<7} {detail}", mapping.tier))
+        })
+        .collect();
+    if draft.has_chosen() {
+        items.push(ListItem::new("Reset all to automatic"));
+    }
+    let list_height = u16::try_from(items.len()).unwrap_or(4).min(area.height);
+    let [list_box, info_box] =
+        Layout::vertical([Constraint::Length(list_height), Constraint::Min(0)]).areas(area);
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("❯ ")
+            .style(Style::default().fg(WHITE))
+            .highlight_style(
+                Style::default()
+                    .fg(TEAL)
+                    .bg(SELECTED_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        list_box,
+        &mut draft.tier_state,
+    );
+    let mut notes = vec![Line::raw("")];
+    if draft.saving {
+        notes.push(Line::styled("Saving...", Style::default().fg(TEAL)));
+        notes.push(Line::raw(""));
+    } else if let Some(error) = &draft.error {
+        notes.push(Line::styled(error.clone(), Style::default().fg(YELLOW)));
+        notes.push(Line::raw(""));
+    } else if let Some((message, problem)) = notice {
+        notes.push(Line::styled(
+            message.clone(),
+            Style::default().fg(if *problem { YELLOW } else { GREEN }),
+        ));
+        notes.push(Line::raw(""));
+    }
+    notes.push("Press Enter on a Claude name to choose its model.".into());
+    notes.push("Esc goes back.".into());
+    frame.render_widget(
+        Paragraph::new(notes)
+            .style(Style::default().fg(DIM_WHITE).bg(BG))
+            .wrap(Wrap { trim: false }),
+        info_box,
+    );
 }
 
 /// Every account generating a reply gets a teal bullet. When all are idle,
@@ -3361,10 +3868,14 @@ mod tests {
     fn a_wait_timer_never_invents_zero_quota() {
         let mut account = demo_rows().remove(0).accounts.remove(1);
         let now = crate::rotation::now_ms();
+        assert_eq!(
+            account.usage_summary(now).to_string(),
+            "ready · 5h 58% · week 88%"
+        );
         account.waits = vec![(None, now + 60_000)];
         assert_eq!(
             account.usage_summary(now).to_string(),
-            "5h 58% · week 88% · waiting · 1m00s left"
+            "waiting · 1m00s left · 5h 58% · week 88%"
         );
         account.usage = None;
         assert_eq!(
@@ -3373,6 +3884,62 @@ mod tests {
         );
         account.waits = vec![(Some("one-model".into()), now + 60_000)];
         assert_eq!(account.usage_summary(now).to_string(), "checking...");
+    }
+
+    #[test]
+    fn ready_and_waiting_rows_lead_with_status_and_effective_unblock_time() {
+        let now = crate::rotation::now_ms();
+        let mut rows = demo_rows();
+        let usage = HashMap::from([
+            (
+                ("codex".into(), "demo-home".into()),
+                MonitorUsage::Reported(vec![
+                    UsageWindow {
+                        label: "5h",
+                        remaining_percent: 100.0,
+                        resets_at_ms: Some(now as i64 + 2 * 3_600_000),
+                    },
+                    UsageWindow {
+                        label: "week",
+                        remaining_percent: 0.0,
+                        resets_at_ms: Some(now as i64 + 24 * 3_600_000),
+                    },
+                ]),
+            ),
+            (
+                ("codex".into(), "demo-work".into()),
+                MonitorUsage::Reported(vec![
+                    UsageWindow {
+                        label: "5h",
+                        remaining_percent: 0.0,
+                        resets_at_ms: Some(now as i64 + 2 * 3_600_000),
+                    },
+                    UsageWindow {
+                        label: "week",
+                        remaining_percent: 0.0,
+                        resets_at_ms: Some(now as i64 + 75 * 3_600_000),
+                    },
+                ]),
+            ),
+        ]);
+        apply_account_usage(&mut rows, &usage);
+        // 5h is 100% but weekly is 0%: the row leads with waiting and the weekly unblock time.
+        let home_line = rows[0].accounts[0].usage_summary(now);
+        assert_eq!(home_line.spans[0].style.fg, Some(YELLOW));
+        assert_eq!(
+            home_line.to_string(),
+            "waiting · 1d left · 5h 100% · week 0%"
+        );
+        // Both windows at 0%: the row shows the longer 3d 3h unblock time once at the start.
+        let work_line = rows[0].accounts[1].usage_summary(now);
+        assert_eq!(
+            work_line.to_string(),
+            "waiting · 3d 3h left · 5h 0% · week 0%"
+        );
+        // A ready account leads with green `ready`.
+        let kimi_line = demo_rows()[1].accounts[0].usage_summary(now);
+        assert_eq!(kimi_line.spans[0].style.fg, Some(GREEN));
+        assert_eq!(kimi_line.to_string(), "ready · 5h 72%");
     }
 
     #[test]
@@ -3489,7 +4056,11 @@ mod tests {
         codex.accounts[1].waits = vec![(None, now + 1_800_000)];
         codex.accounts[1].spent = true;
         let summary = codex.accounts[1].usage_summary(now).to_string();
-        assert!(summary.starts_with("5h 58% · week 88% · out of credit · tries again in"));
+        assert!(
+            summary.starts_with("out of credit · tries again in"),
+            "{summary}"
+        );
+        assert!(summary.ends_with(" · 5h 58% · week 88%"), "{summary}");
 
         // One account out of credit and one with a real reset: the real one is first.
         codex.accounts[0].waits = vec![(None, now + 3_600_000)];
@@ -3917,5 +4488,143 @@ mod tests {
             unknown.contains("reset time unknown, rechecking"),
             "{unknown}"
         );
+    }
+
+    #[test]
+    fn provider_section_in_menu_offers_add_account_and_in_panel_model_picker() {
+        let mut panel = ProvidersPanel::new(Mode::Demo);
+        panel.selected = Entry::Account("codex".into(), "demo-work".into());
+        panel.press(KeyCode::Enter);
+        let menu_text = render(&mut panel, 140, 30);
+        for expected in [
+            "── Codex ──",
+            "Add another Codex account...",
+            "Choose Codex models...",
+        ] {
+            assert!(
+                menu_text.contains(expected),
+                "missing {expected}: {menu_text}"
+            );
+        }
+
+        // Stepping down skips the section header and reaches Add another Codex account...
+        let mut visited = Vec::new();
+        for _ in 0..10 {
+            let at = panel.menu_state.selected().unwrap();
+            let (label, action) = &panel.menu.as_ref().unwrap()[at];
+            assert_ne!(*action, Action::SectionHeader, "cursor landed on header");
+            visited.push(label.clone());
+            panel.press(KeyCode::Down);
+        }
+        assert!(visited.iter().any(|l| l == "Add another Codex account..."));
+        assert!(visited.iter().any(|l| l == "Choose Codex models..."));
+
+        // Verify Add another Codex account... returns SignIn with add: true.
+        let add_idx = panel
+            .menu
+            .as_ref()
+            .unwrap()
+            .iter()
+            .position(|(label, _)| label == "Add another Codex account...")
+            .unwrap();
+        panel.menu_state.select(Some(add_idx));
+        assert_eq!(
+            panel.press(KeyCode::Enter),
+            Some(Action::SignIn {
+                provider: "codex".into(),
+                account: None,
+                add: true,
+            })
+        );
+
+        // Choose Codex models... opens the 4 tiers in the right-hand panel.
+        let choose_idx = panel
+            .menu
+            .as_ref()
+            .unwrap()
+            .iter()
+            .position(|(label, _)| label == "Choose Codex models...")
+            .unwrap();
+        panel.menu_state.select(Some(choose_idx));
+        assert_eq!(panel.press(KeyCode::Enter), None);
+        assert!(panel.choosing_models());
+        assert!(!panel.filtering_models());
+        let tiers_view = render(&mut panel, 140, 30);
+        for expected in ["Choose Codex models", "fable", "opus", "sonnet", "haiku"] {
+            assert!(
+                tiers_view.contains(expected),
+                "missing {expected}: {tiers_view}"
+            );
+        }
+        assert!(
+            !tiers_view.contains("Reset all to automatic"),
+            "{tiers_view}"
+        );
+
+        // Move to `opus` (index 1) and press Enter to open the live model filter.
+        panel.press(KeyCode::Down);
+        assert_eq!(panel.press(KeyCode::Enter), None);
+        assert!(panel.filtering_models());
+        let filter_view = render(&mut panel, 140, 30);
+        assert!(
+            filter_view.contains("Model for `opus` on Codex"),
+            "{filter_view}"
+        );
+        assert!(filter_view.contains("Filter: "), "{filter_view}");
+
+        // Type a filter, then press Enter to save the matching model.
+        for ch in "5.3".chars() {
+            assert_eq!(panel.press_models_filter(key(KeyCode::Char(ch))), None);
+        }
+        let filtered_view = render(&mut panel, 140, 30);
+        assert!(filtered_view.contains("Filter: 5.3"), "{filtered_view}");
+        // First Esc clears the filter text without leaving the tier's model list.
+        assert_eq!(panel.press_models_filter(key(KeyCode::Esc)), None);
+        assert!(panel.filtering_models());
+
+        // Pick the first model for `opus`.
+        let set_action = panel.press_models_filter(key(KeyCode::Enter)).unwrap();
+        assert!(!set_action.needs_terminal());
+        assert!(matches!(
+            &set_action,
+            Action::SetTierModel {
+                provider,
+                tier: "opus",
+                ..
+            } if provider == "codex"
+        ));
+        panel.preview_action(&set_action);
+        // Back on the 4-tier view, showing `(your choice)` and `Reset all to automatic`.
+        assert!(panel.choosing_models());
+        assert!(!panel.filtering_models());
+        let updated_view = render(&mut panel, 140, 30);
+        assert!(updated_view.contains("(your choice)"), "{updated_view}");
+        assert!(
+            updated_view.contains("Reset all to automatic"),
+            "{updated_view}"
+        );
+
+        // Select `Reset all to automatic` and press Enter.
+        for _ in 0..5 {
+            panel.press(KeyCode::Down);
+        }
+        let reset_action = panel.press(KeyCode::Enter).unwrap();
+        assert_eq!(
+            reset_action,
+            Action::ResetTierModels {
+                provider: "codex".into()
+            }
+        );
+        panel.preview_action(&reset_action);
+        let reset_view = render(&mut panel, 140, 30);
+        assert!(!reset_view.contains("(your choice)"), "{reset_view}");
+        assert!(
+            !reset_view.contains("Reset all to automatic"),
+            "{reset_view}"
+        );
+
+        // Esc closes the model picker back to the account.
+        assert!(panel.close_menu());
+        assert!(!panel.choosing_models());
     }
 }
