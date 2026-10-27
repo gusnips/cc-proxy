@@ -85,8 +85,8 @@ impl AccountRow {
         let timestamp = jiff::Timestamp::now();
         if let Some(until) = self.waiting_until(now) {
             let ms_left = until.saturating_sub(now);
+            let left = crate::usage::format_time_left(ms_left.div_ceil(1000) as i64);
             let mut spans = if self.spent {
-                let left = ui::duration(Duration::from_millis(ms_left));
                 vec![
                     Span::styled(
                         "out of credit",
@@ -95,11 +95,6 @@ impl AccountRow {
                     Span::raw(format!(" · tries again in {left}")),
                 ]
             } else {
-                let left = if ms_left >= 3_600_000 {
-                    crate::usage::format_time_left(ms_left.div_ceil(1000) as i64)
-                } else {
-                    ui::duration(Duration::from_millis(ms_left))
-                };
                 vec![
                     Span::styled("waiting", Style::default().fg(YELLOW)),
                     Span::raw(format!(" · {left} left")),
@@ -3875,13 +3870,10 @@ mod tests {
         account.waits = vec![(None, now + 60_000)];
         assert_eq!(
             account.usage_summary(now).to_string(),
-            "waiting · 1m00s left · 5h 58% · week 88%"
+            "waiting · 1m left · 5h 58% · week 88%"
         );
         account.usage = None;
-        assert_eq!(
-            account.usage_summary(now).to_string(),
-            "waiting · 1m00s left"
-        );
+        assert_eq!(account.usage_summary(now).to_string(), "waiting · 1m left");
         account.waits = vec![(Some("one-model".into()), now + 60_000)];
         assert_eq!(account.usage_summary(now).to_string(), "checking...");
     }
