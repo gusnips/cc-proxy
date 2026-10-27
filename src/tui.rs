@@ -250,17 +250,22 @@ fn run_monitor_events(
                     {
                         run_settings_key(terminal, app, key)?;
                     }
-                    // A name being typed owns every key, `q` and `?` included. Only
-                    // Ctrl-C still leaves, like in a settings field.
+                    // A name or model filter being typed owns every key, `q` and `?`
+                    // included. Only Ctrl-C still leaves, like in a settings field.
                     _ if app.phase == MonitorPhase::Running
                         && !app.show_help
                         && !app.show_setup
                         && app.page == Page::Accounts
-                        && app.providers.renaming()
+                        && (app.providers.renaming() || app.providers.filtering_models())
                         && !(key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL)) =>
                     {
-                        if let Some(action) = app.providers.press_rename(key) {
+                        let action = if app.providers.renaming() {
+                            app.providers.press_rename(key)
+                        } else {
+                            app.providers.press_models_filter(key)
+                        };
+                        if let Some(action) = action {
                             run_account_action(terminal, app, state, action)?;
                         }
                     }
@@ -723,6 +728,7 @@ fn run_account_action(
                 | controls::Action::DisableRouting
                 | controls::Action::SetPauseRequests(_)
                 | controls::Action::SetWaitForReset(_)
+                | controls::Action::RefreshModels { .. }
         ) {
             start_saving(app, action);
         } else {
@@ -858,6 +864,7 @@ fn finish_account_action(
         }
         // The list shows the new order at once. The next read confirms it.
         app.providers.apply_pool_action(action);
+        app.providers.apply_model_action(action);
         if matches!(
             action,
             controls::Action::StartProxy
@@ -1353,7 +1360,7 @@ fn header_face(app: &MonitorApp, state: &MonitorSnapshot) -> (&'static str, Mood
     }
 }
 
-fn panel(title: &'static str, focused: bool) -> Block<'static> {
+fn panel(title: &str, focused: bool) -> Block<'static> {
     let color = if focused { TEAL } else { SEPARATOR };
     Block::default()
         .title(Span::styled(
@@ -2526,6 +2533,11 @@ fn render_footer(
         hint
     } else if app.page == Page::Accounts && app.providers.renaming() {
         " Enter save · Esc keep the old name · Ctrl-U clear · Ctrl-C close".to_string()
+    } else if app.page == Page::Accounts && app.providers.filtering_models() {
+        " Type to filter · ↑/↓ move · Enter save · Esc back · Ctrl-U clear · Ctrl-C close"
+            .to_string()
+    } else if app.page == Page::Accounts && app.providers.choosing_models() {
+        " Esc back · ↑/↓ choose tier · Enter pick model · q close".to_string()
     } else if app.page == Page::Accounts && app.providers.moving() {
         " ↑/↓ move · ← top · → bottom · Enter save · Esc put back · q close".to_string()
     } else if app.page == Page::Accounts && app.providers.menu_open() {

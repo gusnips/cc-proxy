@@ -107,7 +107,7 @@ pub fn choose(registry: &Registry, provider: &str, tiers: &[&'static str]) -> Re
 }
 
 /// Every model `provider` offers, the best fits for `tier` first.
-fn choices(registry: &Registry, provider: &str, tier: &str) -> Vec<String> {
+pub(crate) fn choices(registry: &Registry, provider: &str, tier: &str) -> Vec<String> {
     let mut models = tiers::ranked(registry, provider, tier);
     let ranked: HashSet<String> = models.iter().cloned().collect();
     models.extend(
@@ -142,12 +142,19 @@ fn once_each(models: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn basis_label(basis: Basis) -> &'static str {
+pub(crate) fn basis_label(basis: Basis) -> &'static str {
     match basis {
         Basis::Chosen => "your choice",
         Basis::Sure => "picked by cc-proxy",
         Basis::Guess => "a guess, not confirmed",
     }
+}
+
+pub(crate) fn supports_refresh(provider: &str) -> bool {
+    matches!(
+        provider,
+        "copilot" | "antigravity" | "gemini" | "opencode" | "opencode-zen"
+    ) || config::custom_providers().contains_key(provider)
 }
 
 /// Fetches the live model list of a provider (or every provider that supports
@@ -202,7 +209,7 @@ fn refresh_one(provider: &str) -> Result<()> {
     Ok(())
 }
 
-fn refresh_provider(provider: &str) -> Result<Option<Vec<String>>> {
+pub(crate) fn refresh_provider(provider: &str) -> Result<Option<Vec<String>>> {
     let ids = match provider {
         "copilot" => {
             let Some(auth) = crate::providers::copilot::auth::file_store().load()? else {
@@ -331,7 +338,7 @@ fn tier_arg(asked: &str) -> Result<&'static str> {
     }
 }
 
-fn set(registry: &Registry, provider: &str, tier: &'static str, model: &str) -> Result<()> {
+pub(crate) fn set(registry: &Registry, provider: &str, tier: &'static str, model: &str) -> Result<()> {
     if registry.provider_for_model(model).is_none() {
         bail!(
             "cc-proxy doesn't serve a model called `{model}`. `cc-proxy models list {provider}` \

@@ -48,6 +48,26 @@ pub(super) enum Action {
         account: Option<String>,
         add: bool,
     },
+    /// A non-selectable section title in the action list.
+    SectionHeader,
+    /// Opens the in-panel model picker for `provider`.
+    ChooseModels {
+        provider: String,
+    },
+    /// Sets which model answers `tier` on `provider`.
+    SetTierModel {
+        provider: String,
+        tier: &'static str,
+        model: String,
+    },
+    /// Clears custom tier choices on `provider` so cc-proxy picks automatically.
+    ResetTierModels {
+        provider: String,
+    },
+    /// Fetches the live model catalog for `provider`.
+    RefreshModels {
+        provider: String,
+    },
 }
 
 impl Action {
@@ -205,6 +225,42 @@ impl Action {
                     "Saved the {} login. Enable its row to let new chats use it.",
                     ui::provider_name(provider)
                 ))
+            }
+            Self::SectionHeader | Self::ChooseModels { .. } => Ok(String::new()),
+            Self::SetTierModel {
+                provider,
+                tier,
+                model,
+            } => {
+                let registry = Registry::new();
+                crate::models_map::set(&registry, provider, tier, model)?;
+                if config::route().target() == Some(provider.as_str()) {
+                    route::refresh_model_labels();
+                }
+                Ok(format!(
+                    "Saved. {} `{tier}` uses `{model}`.",
+                    ui::provider_name(provider)
+                ))
+            }
+            Self::ResetTierModels { provider } => {
+                let path = format!("route.tiers.{provider}");
+                crate::config_keys::remove_values([path.as_str()])?;
+                if config::route().target() == Some(provider.as_str()) {
+                    route::refresh_model_labels();
+                }
+                Ok(format!(
+                    "Saved. {} uses automatic model picks again.",
+                    ui::provider_name(provider)
+                ))
+            }
+            Self::RefreshModels { provider } => {
+                let name = ui::provider_name(provider);
+                let count = crate::models_map::refresh_provider(provider)?
+                    .map_or(0, |ids| ids.len());
+                if config::route().target() == Some(provider.as_str()) {
+                    route::refresh_model_labels();
+                }
+                Ok(format!("Saved. {name} lists {count} models now."))
             }
         }
     }
