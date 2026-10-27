@@ -193,7 +193,13 @@ pub fn save(entries: &[PoolEntry]) -> Result<()> {
 }
 
 fn write(dir: &Path, entries: &[PoolEntry], turn_on: bool) -> Result<()> {
-    let clean = clean(entries, &route::routable_providers(&Registry::new()))?;
+    write_with(&Registry::new(), dir, entries, turn_on)
+}
+
+/// Building a registry makes every provider's HTTP client, which loads the
+/// system's certificates. A caller that already has one passes it in.
+fn write_with(registry: &Registry, dir: &Path, entries: &[PoolEntry], turn_on: bool) -> Result<()> {
+    let clean = clean(entries, &route::routable_providers(registry))?;
     let mut values = vec![("route.pool", serde_json::json!(clean))];
     if turn_on {
         values.push(("route.on", serde_json::Value::Bool(true)));
@@ -295,9 +301,10 @@ fn live_rows() -> Result<Vec<PoolEntry>> {
 
 fn edit<R>(change: impl FnOnce(&mut Vec<PoolEntry>) -> Result<R>) -> Result<R> {
     locked(|| {
-        let mut rows = live_rows()?;
+        let registry = Registry::new();
+        let mut rows = entries(&config::route(), &registry)?;
         let out = change(&mut rows)?;
-        write(&paths::config_dir(), &rows, false)?;
+        write_with(&registry, &paths::config_dir(), &rows, false)?;
         Ok(out)
     })
 }
