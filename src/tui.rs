@@ -642,7 +642,15 @@ fn run_account_action(
         return Ok(());
     }
     if !action.needs_terminal() {
-        start_saving(app, action);
+        if matches!(
+            action,
+            controls::Action::EnableRouting | controls::Action::DisableRouting
+        ) {
+            start_saving(app, action);
+        } else {
+            let result = action.run();
+            finish_account_action(app, &action, result);
+        }
         return Ok(());
     }
     terminal.draw(|frame| {
@@ -720,6 +728,15 @@ fn finish_account_action(
         }
         // The list shows the new order at once. The next read confirms it.
         app.providers.apply_pool_action(action);
+        if matches!(
+            action,
+            controls::Action::StartProxy
+                | controls::Action::EnableRouting
+                | controls::Action::DisableRouting
+                | controls::Action::SignIn { .. }
+        ) {
+            app.providers.reload_saved();
+        }
     }
     if *action == controls::Action::StartProxy {
         app.providers.finish_start(result);
@@ -2104,6 +2121,8 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
         hint
     } else if app.page == Page::Accounts && app.providers.renaming() {
         " Enter save · Esc keep the old name · Ctrl-U clear · Ctrl-C close".to_string()
+    } else if app.page == Page::Accounts && app.providers.moving() {
+        " ↑/↓ move · ← top · → bottom · Enter save · Esc put back · q close".to_string()
     } else if app.page == Page::Accounts && app.providers.menu_open() {
         " Esc back · ↑/↓ choose · Enter run · q close".to_string()
     } else if area.width < 80 {

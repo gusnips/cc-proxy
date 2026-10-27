@@ -16,11 +16,12 @@ pub(super) enum Action {
     DisableRouting,
     /// Sends Claude Code through the proxy again, with the pool as it is.
     EnableRouting,
-    /// Moves a row up (negative) or down (positive) in the pool.
-    MoveRow {
+    /// Saves the pool in its new order after moving a row.
+    SavePool {
         provider: String,
         account: Option<String>,
-        offset: isize,
+        at: usize,
+        pool: Vec<config::PoolEntry>,
     },
     /// Turns a row on or off. It keeps its place.
     SetEnabled {
@@ -87,12 +88,14 @@ impl Action {
                 route::deactivate()?;
                 Ok("Saved. Claude Code uses its original settings and login, without the proxy. The proxy keeps running.".into())
             }
-            Self::MoveRow {
+            Self::SavePool {
                 provider,
                 account,
-                offset,
+                at,
+                pool,
             } => {
-                let at = pool::move_by(provider, account.as_deref(), *offset)?;
+                pool::save(pool)?;
+                route::refresh_model_labels();
                 Ok(format!(
                     "Saved. {} is number {} in the list. New chats try the rows from the top.",
                     row_label(provider, account.as_deref())?,
@@ -105,6 +108,7 @@ impl Action {
                 enabled,
             } => {
                 pool::set_enabled(provider, account.as_deref(), *enabled)?;
+                route::refresh_model_labels();
                 let label = row_label(provider, account.as_deref())?;
                 Ok(if *enabled {
                     format!("Saved. {label} is on. New chats can use it.")
@@ -115,16 +119,8 @@ impl Action {
                 })
             }
             Self::RemoveAccount { provider, id } => {
-                let registry = Registry::new();
-                let handler = registry
-                    .provider(provider)
-                    .context("This provider was removed. Press r to refresh.")?;
-                let support = handler
-                    .cli()
-                    .accounts()
-                    .context("This provider does not support saved accounts.")?;
                 // The monitor already asked: removing is a second, explicit choice.
-                let accounts = Accounts::open(provider, support)?;
+                let accounts = open_accounts(provider)?;
                 let account = saved_account(&accounts, id)?;
                 accounts.remove(&account)?;
                 let _ = crate::rotation::Cooldowns::new().clear_account(provider, id);
@@ -135,15 +131,7 @@ impl Action {
                 ))
             }
             Self::RenameAccount { provider, id, name } => {
-                let registry = Registry::new();
-                let handler = registry
-                    .provider(provider)
-                    .context("This provider was removed. Press r to refresh.")?;
-                let support = handler
-                    .cli()
-                    .accounts()
-                    .context("This provider does not support saved accounts.")?;
-                let accounts = Accounts::open(provider, support)?;
+                let accounts = open_accounts(provider)?;
                 let account = saved_account(&accounts, id)?;
                 let renamed = accounts.rename(&account.name, name)?;
                 Ok(format!(
@@ -192,13 +180,11 @@ impl Action {
     }
 }
 
-/// What a pool row is called in a message: `Codex / work`, or the provider
-/// alone when it holds one credential.
-fn row_label(provider: &str, account: Option<&str>) -> Result<String> {
-    let provider_name = ui::provider_name(provider);
-    let Some(id) = account else {
-        return Ok(provider_name.to_string());
-    };
+fn open_accounts(provider: &str) -> Result<Accounts> {
+    let direct = Accounts::new(provider);
+    if direct.has_index_file() {
+        return Ok(direct);
+    }
     let registry = Registry::new();
     let handler = registry
         .provider(provider)
@@ -207,7 +193,17 @@ fn row_label(provider: &str, account: Option<&str>) -> Result<String> {
         .cli()
         .accounts()
         .context("This provider does not support saved accounts.")?;
-    let name = saved_account(&Accounts::open(provider, support)?, id)?.name;
+    Accounts::open(provider, support)
+}
+
+/// What a pool row is called in a message: `Codex / work`, or the provider
+/// alone when it holds one credential.
+fn row_label(provider: &str, account: Option<&str>) -> Result<String> {
+    let provider_name = ui::provider_name(provider);
+    let Some(id) = account else {
+        return Ok(provider_name.to_string());
+    };
+    let name = saved_account(&open_accounts(provider)?, id)?.name;
     Ok(format!("{provider_name} / {name}"))
 }
 

@@ -112,6 +112,36 @@ pub fn resume(base_url: &str) -> Result<()> {
     Ok(())
 }
 
+/// The provider that answers new chats now: the first enabled row that is not
+/// waiting on a limit (when auto-rotate is on), else the first enabled row.
+pub fn active_target(route: &config::Route) -> Option<&str> {
+    if !route.on {
+        return None;
+    }
+    if config::auth_auto_rotate()
+        && let Some(pool) = &route.pool
+    {
+        let cooldowns = crate::rotation::Cooldowns::new();
+        let now = crate::rotation::now_ms();
+        if let Some(row) = pool.iter().find(|row| {
+            row.enabled
+                && cooldowns
+                    .waits(
+                        &row.provider,
+                        row.account_id.as_deref().unwrap_or("default"),
+                    )
+                    .is_ok_and(|waits| {
+                        !waits
+                            .iter()
+                            .any(|wait| wait.model.is_none() && wait.until_ms > now)
+                    })
+        }) {
+            return Some(row.provider.as_str());
+        }
+    }
+    route.target()
+}
+
 /// Update names only while both the route and the settings ownership are active.
 /// Observed IDs keep an existing Claude session's native model capabilities intact.
 pub fn sync_model_labels(
@@ -119,13 +149,26 @@ pub fn sync_model_labels(
     route: &config::Route,
     observed: Option<&str>,
 ) -> Result<bool> {
-    let Some(target) = route.target() else {
+    let Some(target) = active_target(route) else {
         return Ok(false);
     };
+    sync_model_labels_for(registry, route, target, observed)
+}
+
+/// Like [`sync_model_labels`], for the provider that actually served a request.
+pub fn sync_model_labels_for(
+    registry: &Registry,
+    route: &config::Route,
+    target: &str,
+    observed: Option<&str>,
+) -> Result<bool> {
+    if !route.on {
+        return Ok(false);
+    }
     let base = picker_models(registry, target);
     let base_refs: Vec<&str> = base.iter().map(String::as_str).collect();
     claude_settings::sync_model_labels(&base_refs, observed, |model| {
-        tiers::model_label(registry, route, model)
+        tiers::model_label_for(registry, route, target, model)
     })
 }
 

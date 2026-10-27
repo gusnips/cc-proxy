@@ -394,6 +394,29 @@ pub(crate) struct UsageWindow {
     pub resets_at_ms: Option<i64>,
 }
 
+impl UsageWindow {
+    fn family(&self) -> &str {
+        self.label.rsplit_once(' ').map_or("", |(family, _)| family)
+    }
+
+    /// A 5-hour window cannot be used while the same family's weekly or
+    /// monthly allowance is at 0%, so it must not glow green.
+    fn color(&self, siblings: &[Self]) -> ratatui::style::Color {
+        if self.remaining_percent > 0.0
+            && self.label.ends_with("5h")
+            && siblings.iter().any(|other| {
+                other.label != self.label
+                    && other.family() == self.family()
+                    && other.remaining_percent <= 0.0
+            })
+        {
+            ui::DIM_WHITE
+        } else {
+            ui::remaining_color(self.remaining_percent)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MonitorUsage {
     Reported(Vec<UsageWindow>),
@@ -415,7 +438,10 @@ impl MonitorUsage {
                         .map_or(String::new(), |reset| {
                             format!(", {}", format_reset(reset, now, tz))
                         });
-                    ui::remaining_line(window.label, window.remaining_percent, &reset)
+                    let mut line =
+                        ui::remaining_line(window.label, window.remaining_percent, &reset);
+                    line.spans[1].style.fg = Some(window.color(windows));
+                    line
                 })
                 .collect(),
         }
@@ -447,7 +473,7 @@ impl MonitorUsage {
             }
             spans.push(Span::styled(
                 format!("{:.0}%", window.remaining_percent),
-                Style::default().fg(ui::remaining_color(window.remaining_percent)),
+                Style::default().fg(window.color(windows)),
             ));
             if window.remaining_percent == 0.0
                 && let Some(reset) = window.resets_at_ms
@@ -1756,6 +1782,21 @@ mod tests {
         );
         let usage = MonitorUsage::Unavailable("Press r to retry.".into());
         assert_eq!(usage.compact_line(now).to_string(), "unavailable");
+
+        // When the weekly allowance is 0%, a full 5h window is dimmed rather than green.
+        let blocked = PlanUsage {
+            five_hour: window(0.0, ms("2026-08-12T17:05:00Z")),
+            weekly: window(100.0, ms("2026-08-17T00:00:00Z")),
+            ..PlanUsage::default()
+        }
+        .monitor_usage();
+        let line = blocked.compact_line(now);
+        assert_eq!(line.spans[1].style.fg, Some(ui::DIM_WHITE));
+        assert_eq!(line.spans[4].style.fg, Some(ui::RED));
+        assert_eq!(
+            blocked.lines(now, &TimeZone::UTC)[0].spans[1].style.fg,
+            Some(ui::DIM_WHITE)
+        );
     }
 
     fn rejected(status: u16) -> Failure {

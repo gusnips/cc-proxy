@@ -42,17 +42,20 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
     }
 
     fn new_with_token_endpoint(store: CodexTokenStore<S>, token_endpoint: String) -> Self {
+        static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(15))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("failed to create Codex OAuth refresh client")
+        });
         let refresh_lock = crate::auth::refresh_lock(&store.auth_path());
         Self {
             store,
             #[cfg(test)]
             test_auth: Arc::new(Mutex::new(None)),
             refresh_lock,
-            refresh_client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(15))
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("failed to create Codex OAuth refresh client"),
+            refresh_client: CLIENT.clone(),
             token_endpoint,
         }
     }

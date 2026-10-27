@@ -165,15 +165,23 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.keys(b"\x1b")
                 monitor.text("Request order")
                 # One flat list in the order requests try it: the saved accounts of ztest, then ytest's row (off).
-                # Move up puts the second row first without changing the saved login.
+                # Move... lets arrows reorder in memory; Esc puts the old order back, Enter saves.
                 monitor.keys(b"\x1b[H" + b"\x1b[B" + b"\r\r")
+                monitor.text("Request order · moving")
+                monitor.keys(b"\x1b[A\r")
                 work_id = next(a["id"] for a in json.loads(index.read_text())["accounts"] if a["name"] == "work")
                 monitor.wait(lambda: bool(pool()) and pool()[0].get("accountId") == work_id,
                              "The account did not move to the top")
-                # The change saves behind the monitor: wait for its answer before the next key.
                 monitor.text("is number 1 in the list")
                 assert [row["provider"] for row in pool()] == ["ztest", "ztest", "ytest"], pool()
                 assert pool()[0]["enabled"] is True
+                # Esc in Move... cancels and restores the order without saving.
+                before_move = file.read_bytes()
+                monitor.keys(b"\r\r")
+                monitor.text("Request order · moving")
+                monitor.keys(b"\x1b[C\x1b")
+                monitor.text("Details")
+                assert file.read_bytes() == before_move
                 # The first save writes the pool and drops the older keys.
                 assert "provider" not in read()["route"] and "fallback" not in read()["route"], read()["route"]
                 # Right opens the actions and Left comes back to the same row. Neither runs one.
@@ -223,13 +231,13 @@ with tempfile.TemporaryDirectory(prefix="ccp-monitor-") as tmp:
                 monitor.wait(lambda: pool()[2]["enabled"] is True, "The row was not turned on")
                 monitor.text("is on. New chats can use it")
                 assert [row["provider"] for row in pool()] == ["ztest", "ztest", "ytest"], pool()
-                # Move up changes where the row stands. The cursor stays on it.
-                monitor.keys(b"\x1b[H" + b"\x1b[B" * 2 + b"\r\r")
+                # Move... changes where the row stands. Up moves one place, Enter saves, and the cursor stays on it.
+                monitor.keys(b"\x1b[H" + b"\x1b[B" * 2 + b"\r\r\x1b[A\r")
                 monitor.wait(lambda: [row["provider"] for row in pool()] == ["ztest", "ytest", "ztest"], "The row did not move up")
                 monitor.text("is number 2 in the list")
                 # Neither "Use now" nor "Use provider" exists any more: the order and the on/off switch decide.
                 monitor.keys(b"\r")
-                monitor.text("Move down")
+                monitor.text("Move...")
                 assert b"Use now" not in monitor.output[monitor.mark:] and b"Use provider" not in monitor.output[monitor.mark:]
                 monitor.keys(b"\x1b")
                 monitor.text("Details")

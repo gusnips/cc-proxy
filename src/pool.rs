@@ -189,17 +189,35 @@ fn older_rows(route: &Route, candidates: &[Candidate]) -> Vec<PoolEntry> {
 /// choices and every other key, and removes the older first provider and
 /// fallback keys.
 pub fn save(entries: &[PoolEntry]) -> Result<()> {
-    write(&paths::config_dir(), entries, false)
+    locked(|| write(&paths::config_dir(), entries, false))
 }
 
 fn write(dir: &Path, entries: &[PoolEntry], turn_on: bool) -> Result<()> {
-    write_with(&Registry::new(), dir, entries, turn_on)
+    let mut routable: Vec<&'static str> = route::PROVIDERS.to_vec();
+    let mut custom: Vec<String> = config::custom_providers().into_keys().collect();
+    custom.sort_unstable();
+    for name in custom {
+        let key = name.trim().to_ascii_lowercase();
+        if !key.is_empty() && key != route::DIRECT && !routable.contains(&key.as_str()) {
+            routable.push(crate::provider::intern_provider_name(&key));
+        }
+    }
+    write_routable(&routable, dir, entries, turn_on)
 }
 
 /// Building a registry makes every provider's HTTP client, which loads the
 /// system's certificates. A caller that already has one passes it in.
 fn write_with(registry: &Registry, dir: &Path, entries: &[PoolEntry], turn_on: bool) -> Result<()> {
-    let clean = clean(entries, &route::routable_providers(registry))?;
+    write_routable(&route::routable_providers(registry), dir, entries, turn_on)
+}
+
+fn write_routable(
+    routable: &[&str],
+    dir: &Path,
+    entries: &[PoolEntry],
+    turn_on: bool,
+) -> Result<()> {
+    let clean = clean(entries, routable)?;
     let mut values = vec![("route.pool", serde_json::json!(clean))];
     if turn_on {
         values.push(("route.on", serde_json::Value::Bool(true)));
@@ -240,7 +258,7 @@ fn clean(entries: &[PoolEntry], routable: &[&str]) -> Result<Vec<PoolEntry>> {
 
 /// Turn one row on or off. The row keeps its place.
 pub fn set_enabled(provider: &str, account_id: Option<&str>, enabled: bool) -> Result<()> {
-    edit(|rows| {
+    edit_row(provider, account_id, |rows| {
         let at = find(rows, provider, account_id)?;
         rows[at].enabled = enabled;
         Ok(())
@@ -250,15 +268,20 @@ pub fn set_enabled(provider: &str, account_id: Option<&str>, enabled: bool) -> R
 /// Move one row up (negative) or down (positive) by `offset` places, stopping
 /// at the ends. Returns where the row is now.
 pub fn move_by(provider: &str, account_id: Option<&str>, offset: isize) -> Result<usize> {
-    edit(|rows| shift(rows, provider, account_id, offset))
+    edit_row(provider, account_id, |rows| {
+        shift(rows, provider, account_id, offset)
+    })
 }
 
 /// Put one account first and turn it on, as `cc-proxy auth use` does. On
 /// first, then to the top: a request in between sees it on, never first and off.
 pub fn use_now(provider: &str, account_id: &str) -> Result<()> {
-    set_enabled(provider, Some(account_id), true)?;
-    move_by(provider, Some(account_id), isize::MIN)?;
-    Ok(())
+    edit_row(provider, Some(account_id), |rows| {
+        let at = find(rows, provider, Some(account_id))?;
+        rows[at].enabled = true;
+        shift(rows, provider, Some(account_id), isize::MIN)?;
+        Ok(())
+    })
 }
 
 /// Make `provider` the first of the pool: its rows move to the top, in their
@@ -297,6 +320,30 @@ pub(crate) fn save_and_turn_on(rows: &[PoolEntry]) -> Result<()> {
 
 fn live_rows() -> Result<Vec<PoolEntry>> {
     entries(&config::route(), &Registry::new())
+}
+
+/// Edits a single row. When `route.pool` is already saved and contains that
+/// row, it writes `config.json` directly without scanning every provider.
+fn edit_row<R>(
+    provider: &str,
+    account_id: Option<&str>,
+    change: impl FnOnce(&mut Vec<PoolEntry>) -> Result<R>,
+) -> Result<R> {
+    locked(|| {
+        let route = config::route();
+        if let Some(mut rows) = route.pool.clone()
+            && find(&rows, provider, account_id).is_ok()
+        {
+            let out = change(&mut rows)?;
+            write(&paths::config_dir(), &rows, false)?;
+            return Ok(out);
+        }
+        let registry = Registry::new();
+        let mut rows = entries(&route, &registry)?;
+        let out = change(&mut rows)?;
+        write_with(&registry, &paths::config_dir(), &rows, false)?;
+        Ok(out)
+    })
 }
 
 fn edit<R>(change: impl FnOnce(&mut Vec<PoolEntry>) -> Result<R>) -> Result<R> {

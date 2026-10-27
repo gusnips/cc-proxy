@@ -217,15 +217,18 @@ impl<S: AuthStorage<StoredAuth>> AuthManager<S> {
     }
 
     pub(crate) fn with_endpoints(store: S, token_url: String, profile_url: String) -> Self {
-        Self {
-            lock: crate::auth::refresh_lock(&store.path()),
-            store,
-            client: reqwest::Client::builder()
+        static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+            reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(20))
                 .build()
-                .expect("failed to build Claude refresh client"),
+                .expect("failed to build Claude refresh client")
+        });
+        Self {
+            lock: crate::auth::refresh_lock(&store.path()),
+            store,
+            client: CLIENT.clone(),
             token_url,
             profile_url,
         }

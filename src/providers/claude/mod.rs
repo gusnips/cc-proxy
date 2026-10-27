@@ -43,14 +43,17 @@ impl Default for ClaudeProvider {
 
 impl ClaudeProvider {
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
+        static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+            reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(10))
                 .read_timeout(Duration::from_secs(120))
                 .user_agent(concat!("cc-proxy/", env!("CARGO_PKG_VERSION")))
                 .build()
-                .expect("failed to build Claude client"),
+                .expect("failed to build Claude client")
+        });
+        Self {
+            client: CLIENT.clone(),
             base_url: "https://api.anthropic.com".into(),
         }
     }

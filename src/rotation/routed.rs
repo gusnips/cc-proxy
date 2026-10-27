@@ -347,6 +347,12 @@ impl Pool<'_> {
         let own = chat.as_deref().and_then(place_of);
         let root_place = root.as_deref().and_then(place_of);
         let remembered = own.clone().or_else(|| root_place.clone());
+        // A chat keeps its place unless that row is gone, turned off or
+        // waiting. A row that only has no model for this request (the chat's
+        // other tiers) stays its place, and this request must not replace it.
+        let kept = remembered.as_ref().is_some_and(|place| {
+            enabled.contains(place) && !plans.iter().any(|p| &p.place() == place)
+        });
         let mut tried: HashSet<usize> = HashSet::new();
         let mut last_response = None;
         let mut waited = false;
@@ -401,6 +407,7 @@ impl Pool<'_> {
             };
             // Without auto-rotate the first row answers everything, so nothing spreads.
             if auto
+                && !kept
                 && let Some(chat) = chat.as_deref()
                 && remembered.as_ref() != Some(&plans[at].place())
             {
@@ -437,12 +444,6 @@ impl Pool<'_> {
             let sitout = auto.then(|| retry_deadline(&response, now_ms())).flatten();
             let Some(sitout) = sitout else {
                 if let Some(chat) = chat.as_deref() {
-                    // A chat keeps its place unless that row is gone, turned off
-                    // or waiting. A row that only has no model for this request
-                    // (the chat's other tiers) stays its place.
-                    let kept = remembered.as_ref().is_some_and(|place| {
-                        enabled.contains(place) && !plans.iter().any(|p| &p.place() == place)
-                    });
                     // A helper agent that stays where the main chat is needs
                     // no place of its own.
                     let follows_root = own.is_none() && root_place.as_ref() == Some(&plan.place());

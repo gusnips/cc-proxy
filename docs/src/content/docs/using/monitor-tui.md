@@ -33,8 +33,9 @@ another provider, lower in the list, ends that group, so the order still decides
 which provider answers. A chat stays on its account until it hits a limit, so
 moving a row or turning it off changes new chats, not the ones you are in. With
 auto-rotate on, a row that is waiting is skipped. Without it, the first row that
-is on answers every request and nothing spreads. When every row that is on has a
-confirmed wait, `[first reset]` marks the earliest reset.
+is on answers every request and nothing spreads. When every row that is on has a confirmed wait, `[first reset]` highlights the
+earliest reset in yellow and the line under the header shows `Next reset: <account> in <time>`
+beside `Last used`.
 
 The name takes the first line of each account row. Usage, wait times and state
 sit on the next line, so long account names do not compete with quota numbers.
@@ -52,8 +53,10 @@ with the arrows and press Enter to run it. Escape goes back without making a
 change. Wide terminals show the list and details side by side. Narrow terminals
 put details below the list.
 
-- Move up and Move down change where a row stands. A row at the top has no
-  Move up, and a row at the bottom has no Move down. The list updates at once.
+- Move opens move mode on that row. Up and Down move it one place, Left moves it
+  to the top of the list and Right moves it to the bottom. Nothing is written
+  while you move it: press Enter to save the new order, or Escape to put the old
+  order back.
 - Disable turns a row off. It stays in the list and keeps its place, and new
   chats skip it. Enable turns it back on.
 - Sign in saves a login. You can add another account or sign in to a saved
