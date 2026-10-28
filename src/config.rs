@@ -85,7 +85,12 @@ struct AuthConfig {
     wait_for_reset: Option<bool>,
     #[serde(rename = "hourlyPing")]
     hourly_ping: Option<bool>,
+    #[serde(rename = "spreadChats")]
+    spread_chats: Option<usize>,
 }
+
+/// How many of the top ready accounts share new chats when `auth.spreadChats` is unset.
+pub(crate) const DEFAULT_SPREAD_CHATS: usize = 5;
 
 #[derive(Deserialize, Clone)]
 struct CodexConfig {
@@ -341,6 +346,14 @@ pub fn auth_hourly_ping() -> bool {
     read_file_config(&paths::config_dir())
         .and_then(|file| file.auth?.hourly_ping)
         .unwrap_or(false)
+}
+
+/// Read on each request, so changing it never needs a proxy restart. At least 1.
+pub fn auth_spread_chats() -> usize {
+    read_file_config(&paths::config_dir())
+        .and_then(|file| file.auth?.spread_chats)
+        .unwrap_or(DEFAULT_SPREAD_CHATS)
+        .max(1)
 }
 
 pub fn log_verbose() -> bool {

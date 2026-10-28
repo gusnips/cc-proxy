@@ -113,12 +113,13 @@ cc-proxy config set auth.autoRotate true
 Or run `cc-proxy config`, find `auth.autoRotate` and press Right. The change
 applies on the next request.
 
-| Config key           | Default | Purpose                                                                                                                                                                                          |
-| -------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `auth.autoRotate`    | `false` | Switches saved accounts when a Messages request hits a provider-confirmed reset time or spent balance.                                                                                           |
-| `auth.pauseRequests` | `false` | Holds new generations before they start until resumed (`p` in the monitor or `cc-proxy config set auth.pauseRequests false`). Active replies finish, and `count_tokens`, health and usage work.  |
-| `auth.waitForReset`  | `false` | With `auth.autoRotate` on, holds streamed Messages requests when every enabled account has a confirmed reset time, then rechecks at the earliest reset. Never waits on guessed limits or credit. |
-| `auth.hourlyPing`    | `false` | Sends a 1-token request at the top of each hour, and a minute after an account's wait ends, to enabled accounts on plans with a rolling 5-hour window (`CCP_HOURLY_PING` overrides).             |
+| Config key           | Default | Purpose                                                                                                                                                                                                  |
+| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth.autoRotate`    | `false` | Switches saved accounts when a Messages request hits a provider-confirmed reset time or spent balance.                                                                                                   |
+| `auth.pauseRequests` | `false` | Holds new generations before they start until resumed (`p` in the monitor or `cc-proxy config set auth.pauseRequests false`). Active replies finish, and `count_tokens`, health and usage work.          |
+| `auth.waitForReset`  | `false` | With `auth.autoRotate` on, holds streamed Messages requests when every enabled account has a confirmed reset time, then rechecks at the earliest reset. Never waits on guessed limits or credit.         |
+| `auth.spreadChats`   | `5`     | How many of the top ready accounts of the request pool share new chats, whatever their provider. `1` sends every new chat to the first ready account. A chat stays on its account until it hits a limit. |
+| `auth.hourlyPing`    | `false` | Sends a 1-token request at the top of each hour, and a minute after an account's wait ends, to enabled accounts on plans with a rolling 5-hour window (`CCP_HOURLY_PING` overrides).                     |
 
 Both `auth.pauseRequests` and `auth.waitForReset` live in `config.json` and stay
 in effect across monitor closes and proxy restarts until you turn them off.
@@ -205,12 +206,13 @@ the monitor, not by hand: the ids belong to your saved logins.
 ```
 
 turns those three providers on, in that order, and turns the others off. A
-request takes the first row that is on and ready. With auto-rotate on, a new
-chat shares the ready accounts of that row's provider that sit together at the
-top: it takes the one with the fewest chats in the last hour, and the list
-order breaks a tie. A row of another provider ends the group. A chat that
-already started keeps its row while that row can serve it, so the provider's
-prompt cache is reused; a row above it that frees up only takes new chats. When
+request without a chat takes the first row that is on and ready. With
+auto-rotate on, new chats share the top 5 ready accounts across providers
+(`auth.spreadChats` changes the number). A new chat takes the one with the
+fewest chats in the last hour, and list order breaks a tie. A chat that already
+started keeps its row while that row can serve it, even if it falls below the
+top 5. A row above it that frees up only takes new chats, so an existing chat
+keeps using its provider's prompt cache. When
 a row hits a limit that names a reset (or its balance is spent), the chat moves
 to a ready row. A row without a model for the requested tier is skipped.
 

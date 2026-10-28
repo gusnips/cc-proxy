@@ -1934,9 +1934,9 @@ impl ProvidersPanel {
         } else if !self.auto_rotate {
             " Auto-rotate is off, so the first row that is on answers every request."
         } else if self.wait_for_reset {
-            " New chats share the first provider's ready accounts. Auto-wait holds streamed Messages requests until the earliest confirmed reset."
+            " New chats share the top ready accounts across providers. Auto-wait holds streamed Messages requests until the earliest confirmed reset."
         } else {
-            " New chats share the first provider's ready accounts. A chat stays on its account until it hits a limit."
+            " New chats share the top ready accounts across providers. A chat stays on its account until it hits a limit."
         };
         frame.render_widget(
             Paragraph::new(vec![
@@ -4353,7 +4353,7 @@ mod tests {
         let mut panel = ProvidersPanel::new(Mode::Demo);
         let text = render(&mut panel, 160, 30);
         assert!(
-            text.contains("New chats share the first provider's ready accounts. A chat stays on its account until it hits a limit."),
+            text.contains("New chats share the top ready accounts across providers. A chat stays on its account until it hits a limit."),
             "{text}"
         );
         assert!(text.contains("Claude Code: Codex"), "{text}");

@@ -3,6 +3,11 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.10 (2026-10-28)
+
+- New chats now share the top 5 ready accounts of the list, whatever their provider. Before, only the accounts of the first ready provider shared them, so a Claude account at the top kept Codex idle until every Claude account was waiting. A new chat takes the account with the fewest chats in the last hour, and the list order breaks a tie. A row below the top 5 takes new chats only once some of them are waiting or turned off. Change the 5 with `cc-proxy config set auth.spreadChats 3`, or set it to `1` to send every new chat to the first ready account. A chat still stays on its account until it hits a limit, so the provider's prompt cache keeps working.
+- The hourly ping now also starts an account's window about a minute after its wait ends. Before, an account that became ready at 06:10 waited until 07:00 for its 5-hour window to start. The ping loop now checks the clock every 30 seconds instead of sleeping until the top of the hour. The setting is still `auth.hourlyPing`. In `proxy.log` the ping line is now `window_ping`, with `why` set to `hourly` or `ready`.
+
 ## v0.4.9 (2026-10-27)
 
 - Account rows in the monitor now lead their second line with `ready` (in green), `waiting · <time> left` (in yellow, showing the effective unblock time across all exhausted windows and rate-limit waits), or `out of credit · tries again in <time>` (in red) before the window percentages (`5h 0% · week 33%`). You can scan down the left edge of `Request order` to see which accounts can take a chat right now and how long waiting accounts have left without comparing separate 5-hour and weekly timers on every row.

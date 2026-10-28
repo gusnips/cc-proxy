@@ -22,6 +22,8 @@ enum ConfigKind {
     Str,
     /// TCP port 1-65535.
     Port,
+    /// Whole number, 1 or more.
+    Count,
     /// true/false (also 1/0, yes/no, on/off).
     Bool,
     /// Codex auto-review effort, or off to inherit ordinary effort.
@@ -51,7 +53,7 @@ impl ConfigKey {
                 Some(&["off", "none", "low", "medium", "high", "xhigh", "max"])
             }
             ConfigKind::ServiceTier => Some(&["fast", "priority", "ultrafast", "flex"]),
-            ConfigKind::Str | ConfigKind::Port => None,
+            ConfigKind::Str | ConfigKind::Port | ConfigKind::Count => None,
         }
     }
 
@@ -85,6 +87,14 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         env: &[],
         default: Some("false"),
         blurb: "when all enabled accounts wait on a confirmed reset, hold streamed Messages requests until the earliest reset",
+    },
+    ConfigKey {
+        label: "Accounts that share new chats",
+        path: "auth.spreadChats",
+        kind: ConfigKind::Count,
+        env: &[],
+        default: Some("5"),
+        blurb: "new chats share the top ready accounts of the list, whatever the provider; 1 sends every new chat to the first ready one",
     },
     ConfigKey {
         label: "Hourly 5-hour window ping",
@@ -278,6 +288,15 @@ fn parse_value(key: &ConfigKey, raw: &str) -> Result<serde_json::Value> {
                 anyhow::bail!("{} must be a port 1-65535", key.path);
             }
             Ok(serde_json::Value::from(port))
+        }
+        ConfigKind::Count => {
+            let count: u32 = raw
+                .trim()
+                .parse()
+                .ok()
+                .filter(|count| *count > 0)
+                .with_context(|| format!("{} must be a whole number, 1 or more", key.path))?;
+            Ok(serde_json::Value::from(count))
         }
         ConfigKind::Bool => Ok(serde_json::Value::from(parse_bool(raw)?)),
         ConfigKind::AutoReviewEffort => {
@@ -635,6 +654,19 @@ mod tests {
         }
         for value in ["", "turbo", "Ultrafast"] {
             assert!(parse_value(key, value).is_err());
+        }
+    }
+
+    #[test]
+    fn spread_chats_takes_a_whole_number_of_one_or_more() {
+        let key = find_key("auth.spreadChats").unwrap();
+        assert_eq!(
+            key.default,
+            Some(crate::config::DEFAULT_SPREAD_CHATS.to_string().as_str())
+        );
+        assert_eq!(parse_value(key, " 3 ").unwrap(), serde_json::json!(3));
+        for value in ["", "0", "-1", "2.5", "many"] {
+            assert!(parse_value(key, value).is_err(), "{value}");
         }
     }
 
