@@ -1,10 +1,11 @@
 //! A routed request on the request pool (`crate::pool`): the enabled rows in
 //! their saved order, accounts of different providers mixed.
 //!
-//! A new chat takes the first row that is ready. A chat that already started
-//! keeps its provider and account while they can still serve it, so the
-//! provider's cache is reused, even after a row above recovers. When that row
-//! hits a limit, is turned off or is removed, the chat moves down the pool.
+//! A new chat shares the top ready rows across providers (`auth.spreadChats`).
+//! A chat that already started keeps its provider and account while they can
+//! still serve it. Its cache is reused even after a row above recovers. When
+//! its account hits a limit, is turned off or is removed, the chat moves down
+//! the pool.
 //! Running requests are pinned to the account they started on. A chat's place is
 //! saved (see `chats`), so a restart or an update keeps it too.
 
@@ -1279,6 +1280,11 @@ mod tests {
         );
         // One means the first ready row answers every new chat.
         world.spread = 1;
+        // Shrinking the group never moves an existing chat outside it.
+        assert_eq!(
+            text(world.ask(&rows, Some("cap-5")).await).await,
+            "claude:cap-c"
+        );
         for chat in ["one-1", "one-2", "one-3"] {
             let rows = [row("claude", Some("one-a")), row("codex", Some("one-b"))];
             assert_eq!(
