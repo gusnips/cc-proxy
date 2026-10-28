@@ -113,12 +113,13 @@ cc-proxy config set auth.autoRotate true
 Or run `cc-proxy config`, find `auth.autoRotate` and press Right. The change
 applies on the next request.
 
-| Config key           | Default | Purpose                                                                                                                                                                                          |
-| -------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `auth.autoRotate`    | `false` | Switches saved accounts when a Messages request hits a provider-confirmed reset time or spent balance.                                                                                           |
-| `auth.pauseRequests` | `false` | Holds new generations before they start until resumed (`p` in the monitor or `cc-proxy config set auth.pauseRequests false`). Active replies finish, and `count_tokens`, health and usage work.  |
-| `auth.waitForReset`  | `false` | With `auth.autoRotate` on, holds streamed Messages requests when every enabled account has a confirmed reset time, then rechecks at the earliest reset. Never waits on guessed limits or credit. |
-| `auth.hourlyPing`    | `false` | Sends a 1-token request at the top of each hour, and a minute after an account's wait ends, to enabled accounts on plans with a rolling 5-hour window (`CCP_HOURLY_PING` overrides).             |
+| Config key           | Default | Purpose                                                                                                                                                                                                  |
+| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth.autoRotate`    | `false` | Switches saved accounts when a Messages request hits a provider-confirmed reset time or spent balance.                                                                                                   |
+| `auth.pauseRequests` | `false` | Holds new generations before they start until resumed (`p` in the monitor or `cc-proxy config set auth.pauseRequests false`). Active replies finish, and `count_tokens`, health and usage work.          |
+| `auth.waitForReset`  | `false` | With `auth.autoRotate` on, holds streamed Messages requests when every enabled account has a confirmed reset time, then rechecks at the earliest reset. Never waits on guessed limits or credit.         |
+| `auth.spreadChats`   | `5`     | How many of the top ready accounts of the request pool share new chats, whatever their provider. `1` sends every new chat to the first ready account. A chat stays on its account until it hits a limit. |
+| `auth.hourlyPing`    | `false` | Sends a 1-token request at the top of each hour, and a minute after an account's wait ends, to enabled accounts on plans with a rolling 5-hour window (`CCP_HOURLY_PING` overrides).                     |
 
 Both `auth.pauseRequests` and `auth.waitForReset` live in `config.json` and stay
 in effect across monitor closes and proxy restarts until you turn them off.
