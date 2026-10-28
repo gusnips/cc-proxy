@@ -3,7 +3,7 @@
 //! reset time to wait for, so that account sits out and is tried again later.
 //! No guessed windows: that later try is a recheck, never a claimed reset.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io;
 use std::path::PathBuf;
@@ -82,6 +82,9 @@ struct Sitout {
     spent: bool,
 }
 
+/// `(provider, account id)`.
+type AccountKey = (String, String);
+
 pub(crate) struct Cooldowns {
     path: PathBuf,
 }
@@ -125,6 +128,22 @@ impl Cooldowns {
                 spent: c.spent,
             })
             .collect())
+    }
+
+    /// The waits that hold a whole account, `(provider, account)` to when the
+    /// longest one ends. A wait on one model is not a window ending, and a spent
+    /// balance only has a recheck time.
+    fn account_waits(&self, now: u64) -> Result<HashMap<AccountKey, u64>> {
+        let mut waits = HashMap::new();
+        for cooldown in self.read()? {
+            if cooldown.model.is_none() && !cooldown.spent && cooldown.until_ms > now {
+                let ends = waits
+                    .entry((cooldown.provider, cooldown.account))
+                    .or_default();
+                *ends = cooldown.until_ms.max(*ends);
+            }
+        }
+        Ok(waits)
     }
 
     #[cfg(test)]
@@ -558,26 +577,97 @@ fn pinged_providers(route: &crate::config::Route) -> Vec<&str> {
     pool
 }
 
-/// Sends a one-token Messages request at the start of every hour (`XX:00`) to
-/// every enabled account of the request pool, not only the one in use, for each
-/// provider whose plan has a rolling window (see `WINDOWED_PLANS`). The windows
-/// start counting down early while `cc-proxy` is running. Controlled by
-/// `auth.hourlyPing` (read on each tick).
+/// How often the ping loop looks at the clock and at the saved waits.
+const PING_TICK: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long after a wait ends the account gets its ready ping. The provider's
+/// reset can land a moment late, and a ping that comes too early is answered
+/// 429 and saves the wait again.
+const READY_PING_DELAY_MS: u64 = 60_000;
+
+/// Sends a one-token Messages request to every enabled account of the request
+/// pool, not only the one in use, for each provider whose plan has a rolling
+/// window (see `WINDOWED_PLANS`). The windows start counting down early while
+/// `cc-proxy` is running. Controlled by `auth.hourlyPing` (read on each tick).
+///
+/// Two moments send it. The first is the start of every hour (`XX:00`), which
+/// also catches a window that ended without a limit. The second is a minute
+/// after an account's wait ends, so a window that opens at 06:10 starts at 06:11
+/// and not at 07:00. The loop ticks every `PING_TICK` and reads the wall clock,
+/// so a sleeping laptop pings on waking, not whenever its timer catches up.
 ///
 /// A saved wait never stops a ping. A window that ends at the top of the hour
 /// is still "waiting" for a moment when the tick fires, and skipping it would
 /// leave the next window unstarted for a whole hour. The provider answers: a
 /// limited account says 429, which also refreshes its wait.
-pub(crate) fn spawn_hourly_ping(registry: Arc<Registry>) {
+// ponytail: a window that ends with no limit is only seen by the hourly ping,
+// up to an hour late. Upgrade path: read the window's end from each ping's
+// answer and ping again a minute after it.
+pub(crate) fn spawn_window_pings(registry: Arc<Registry>) {
     tokio::spawn(async move {
+        let cooldowns = Cooldowns::new();
+        let mut ready = ReadyPings::default();
+        let started = now_ms();
+        let mut next_hour = started + ms_until_next_hour(started);
         loop {
-            let wait_ms = ms_until_next_hour(now_ms());
-            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-            if crate::config::auth_hourly_ping() {
-                ping_routed_providers(&registry, &crate::config::route(), &Cooldowns::new()).await;
+            tokio::time::sleep(PING_TICK).await;
+            let now = now_ms();
+            let hour_is_up = now >= next_hour;
+            if hour_is_up {
+                next_hour = now + ms_until_next_hour(now);
+            }
+            if !crate::config::auth_hourly_ping() {
+                // Waits seen before it went off say nothing about the time after.
+                ready = ReadyPings::default();
+                continue;
+            }
+            // A failed read keeps what was seen: no waits is not "all ended".
+            let Ok(waits) = cooldowns.account_waits(now) else {
+                continue;
+            };
+            let due = ready.look(now, waits);
+            let route = crate::config::route();
+            if hour_is_up {
+                ping_routed_providers(&registry, &route, &cooldowns, None).await;
+            } else if !due.is_empty() {
+                ping_routed_providers(&registry, &route, &cooldowns, Some(&due)).await;
             }
         }
     });
+}
+
+/// Finds the accounts whose wait just ended and when each one is due a ping.
+#[derive(Default)]
+struct ReadyPings {
+    /// The account-wide waits on the last look, with when they end.
+    waiting: HashMap<AccountKey, u64>,
+    /// Accounts whose wait ended, with when their ping is due.
+    due: HashMap<AccountKey, u64>,
+}
+
+impl ReadyPings {
+    /// Takes the waits that run at `now`. Returns the accounts whose ping is
+    /// due, once each.
+    fn look(&mut self, now: u64, waits: HashMap<AccountKey, u64>) -> HashSet<AccountKey> {
+        for (key, ends) in &self.waiting {
+            if !waits.contains_key(key) {
+                // Ended on its own, or cleared early: ready from the sooner one.
+                self.due
+                    .insert(key.clone(), (*ends).min(now) + READY_PING_DELAY_MS);
+            }
+        }
+        // Limited again before its ping went out: the next end sets the time.
+        self.due.retain(|key, _| !waits.contains_key(key));
+        self.waiting = waits;
+        let due_now: HashSet<AccountKey> = self
+            .due
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.due.retain(|key, _| !due_now.contains(key));
+        due_now
+    }
 }
 
 /// Every saved account, not only the current one: a window only starts on the
@@ -586,10 +676,12 @@ fn ping_targets(list: Vec<Account>) -> Vec<Option<String>> {
     list.into_iter().map(|account| Some(account.id)).collect()
 }
 
+/// Pings the pool: every enabled account, or only the ones in `only`.
 async fn ping_routed_providers(
     registry: &Registry,
     route: &crate::config::Route,
     cooldowns: &Cooldowns,
+    only: Option<&HashSet<AccountKey>>,
 ) {
     let log = crate::logging::create_logger("auth");
     let rows = crate::pool::active(route, registry);
@@ -615,13 +707,16 @@ async fn ping_routed_providers(
             rows.iter()
                 .any(|row| row.provider == name && row.account_id.as_deref() == id)
         };
+        let wanted =
+            |id: &str| only.is_none_or(|keys| keys.contains(&(name.clone(), id.to_string())));
         let targets: Vec<Option<String>> = match saved {
             Some(list) if !list.is_empty() => ping_targets(
                 list.into_iter()
-                    .filter(|account| enabled(Some(&account.id)))
+                    .filter(|account| enabled(Some(&account.id)) && wanted(&account.id))
                     .collect(),
             ),
-            _ if enabled(None) => vec![None],
+            // A ready ping follows a saved account's wait, and this provider has none.
+            _ if only.is_none() && enabled(None) => vec![None],
             _ => Vec::new(),
         };
         for account in targets {
@@ -633,7 +728,7 @@ async fn ping_routed_providers(
             })) else {
                 continue;
             };
-            let req_id = format!("hourly-ping-{}", uuid::Uuid::new_v4());
+            let req_id = format!("ping-{}", uuid::Uuid::new_v4());
             let context = RequestContext {
                 account: account.clone(),
                 req_id: req_id.clone(),
@@ -651,8 +746,12 @@ async fn ping_routed_providers(
                 let _ = cooldowns.sit_out(&name, id, &model, &sitout);
             }
             log.info(
-                "hourly_ping",
+                "window_ping",
                 Some(serde_json::Map::from_iter([
+                    (
+                        "why".into(),
+                        serde_json::json!(if only.is_some() { "ready" } else { "hourly" }),
+                    ),
                     ("provider".into(), serde_json::json!(&name)),
                     ("model".into(), serde_json::json!(&model)),
                     ("account".into(), serde_json::json!(account)),
@@ -1817,7 +1916,13 @@ mod tests {
         };
         let registry =
             Registry::from_providers([Arc::new(ChainFake { name: "codex" }) as Arc<dyn Provider>]);
-        ping_routed_providers(&registry, &crate::config::Route::default(), &cooldowns).await;
+        ping_routed_providers(
+            &registry,
+            &crate::config::Route::default(),
+            &cooldowns,
+            None,
+        )
+        .await;
     }
 
     /// Answers 200 and counts the calls. It has a model, so a ping reaches it.
@@ -1948,6 +2053,7 @@ mod tests {
             &registry,
             &route_to("codex", &["anthropic", "antigravity"]),
             &cooldowns,
+            None,
         )
         .await;
         let calls = |counter: &Arc<std::sync::atomic::AtomicUsize>| {
@@ -1988,11 +2094,105 @@ mod tests {
         let cooldowns = Cooldowns {
             path: dir.path().join("rotation.json"),
         };
-        ping_routed_providers(&registry, &route, &cooldowns).await;
+        ping_routed_providers(&registry, &route, &cooldowns, None).await;
         let calls = |counter: &Arc<std::sync::atomic::AtomicUsize>| {
             counter.load(std::sync::atomic::Ordering::SeqCst)
         };
         assert_eq!(calls(&codex_calls), 1);
         assert_eq!(calls(&kimi_calls), 0);
+    }
+
+    fn key(account: &str) -> AccountKey {
+        ("claude".into(), account.into())
+    }
+
+    #[test]
+    fn a_ready_ping_is_due_a_minute_after_a_wait_ends() {
+        let mut ready = ReadyPings::default();
+        let waits = |ends: u64| HashMap::from([(key("a"), ends)]);
+        // Still waiting: nothing is due, and the first look of a run knows no ends.
+        assert!(ready.look(1_000, waits(5_000)).is_empty());
+        // The wait ended at 5_000, and the minute is not over.
+        assert!(ready.look(5_500, HashMap::new()).is_empty());
+        assert!(
+            ready
+                .look(5_000 + READY_PING_DELAY_MS - 1, HashMap::new())
+                .is_empty()
+        );
+        // Due once, then forgotten.
+        let due = ready.look(5_000 + READY_PING_DELAY_MS, HashMap::new());
+        assert_eq!(due, HashSet::from([key("a")]));
+        assert!(
+            ready
+                .look(5_000 + READY_PING_DELAY_MS + 1, HashMap::new())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_wait_cleared_early_counts_from_the_clearing_and_a_new_wait_cancels_the_ping() {
+        let mut ready = ReadyPings::default();
+        // The wait should have run to 90_000 but was cleared at 10_000.
+        ready.look(0, HashMap::from([(key("a"), 90_000)]));
+        assert!(ready.look(10_000, HashMap::new()).is_empty());
+        assert_eq!(
+            ready.look(10_000 + READY_PING_DELAY_MS, HashMap::new()),
+            HashSet::from([key("a")])
+        );
+        // Limited again inside the minute: no ping now, the next end decides.
+        ready.look(0, HashMap::from([(key("b"), 5_000)]));
+        ready.look(6_000, HashMap::new());
+        assert!(
+            ready
+                .look(7_000, HashMap::from([(key("b"), 100_000)]))
+                .is_empty()
+        );
+        assert!(ready.look(100_000 + 1, HashMap::new()).is_empty());
+        assert_eq!(
+            ready.look(100_000 + READY_PING_DELAY_MS, HashMap::new()),
+            HashSet::from([key("b")])
+        );
+    }
+
+    #[test]
+    fn only_a_whole_account_wait_counts_as_a_window_ending() {
+        let dir = tempfile::tempdir().unwrap();
+        let cooldowns = Cooldowns {
+            path: dir.path().join("rotation.json"),
+        };
+        let later = now_ms() + 60_000;
+        cooldowns
+            .mark_with("claude", "a", None, later, false)
+            .unwrap();
+        cooldowns
+            .mark_with("claude", "a", Some("haiku"), later + 1, false)
+            .unwrap();
+        cooldowns
+            .mark_with("claude", "b", None, later, true)
+            .unwrap();
+        assert_eq!(
+            cooldowns.account_waits(now_ms()).unwrap(),
+            HashMap::from([(key("a"), later)])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ready_ping_skips_an_account_nobody_named() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let codex = Arc::new(Counting {
+            name: "codex",
+            calls: calls.clone(),
+        }) as Arc<dyn Provider>;
+        let registry = Registry::from_providers([codex]);
+        let dir = tempfile::tempdir().unwrap();
+        let cooldowns = Cooldowns {
+            path: dir.path().join("rotation.json"),
+        };
+        let route = route_to("codex", &[]);
+        let nobody = HashSet::new();
+        ping_routed_providers(&registry, &route, &cooldowns, Some(&nobody)).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        ping_routed_providers(&registry, &route, &cooldowns, None).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

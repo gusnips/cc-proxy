@@ -22,8 +22,16 @@ These settings configure the proxy process. Claude Code client settings such as 
   "route": {
     "on": true,
     "pool": [
-      { "provider": "codex", "accountId": "0b1c8c44-2f6e-4d0e-9a51-6e0a7b6f2c11", "enabled": true },
-      { "provider": "antigravity", "accountId": "5d2e90a1-81c4-4b73-bb0e-2f3a9c64d7e8", "enabled": true }
+      {
+        "provider": "codex",
+        "accountId": "0b1c8c44-2f6e-4d0e-9a51-6e0a7b6f2c11",
+        "enabled": true
+      },
+      {
+        "provider": "antigravity",
+        "accountId": "5d2e90a1-81c4-4b73-bb0e-2f3a9c64d7e8",
+        "enabled": true
+      }
     ],
     "tiers": { "codex": { "haiku": "gpt-6-luna" } }
   },
@@ -108,9 +116,9 @@ applies on the next request.
 | Config key           | Default | Purpose                                                                                                                                                                                          |
 | -------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `auth.autoRotate`    | `false` | Switches saved accounts when a Messages request hits a provider-confirmed reset time or spent balance.                                                                                           |
-| `auth.pauseRequests` | `false` | Holds new generations before they start until resumed (`p` in the monitor or `cc-proxy config set auth.pauseRequests false`). Active replies finish, and `count_tokens`, health and usage work. |
+| `auth.pauseRequests` | `false` | Holds new generations before they start until resumed (`p` in the monitor or `cc-proxy config set auth.pauseRequests false`). Active replies finish, and `count_tokens`, health and usage work.  |
 | `auth.waitForReset`  | `false` | With `auth.autoRotate` on, holds streamed Messages requests when every enabled account has a confirmed reset time, then rechecks at the earliest reset. Never waits on guessed limits or credit. |
-| `auth.hourlyPing`    | `false` | Sends a 1-token request at the top of each hour to enabled accounts on plans with a rolling 5-hour window (`CCP_HOURLY_PING` overrides).                                                         |
+| `auth.hourlyPing`    | `false` | Sends a 1-token request at the top of each hour, and a minute after an account's wait ends, to enabled accounts on plans with a rolling 5-hour window (`CCP_HOURLY_PING` overrides).             |
 
 Both `auth.pauseRequests` and `auth.waitForReset` live in `config.json` and stay
 in effect across monitor closes and proxy restarts until you turn them off.
@@ -161,9 +169,12 @@ To start rolling 5-hour quota windows early while `cc-proxy` is running, enable
 cc-proxy config set auth.hourlyPing true
 ```
 
-At the start of every hour (`XX:00`), cc-proxy sends a one-token request using
-the smallest tier model to every account that is turned on in the request
-pool, not only the one in use. Rows that are turned off are not pinged. Only plans with a rolling
+cc-proxy sends a one-token request using the smallest tier model to every
+account that is turned on in the request pool, not only the one in use. It does
+this at the start of every hour (`XX:00`), and again a minute after an
+account's wait ends: a window that opens at 06:10 starts at 06:11, not at 07:00.
+The hourly ping also starts a window that ended without a limit, up to an hour
+late. Rows that are turned off are not pinged. Only plans with a rolling
 window get it: Claude, Codex, Kimi, Antigravity, OpenCode Go and GLM. A key that
 pays per token (Anthropic, Gemini, OpenCode Zen, a custom provider) would be
 charged for every ping, and a monthly plan (Cursor, Copilot) has no window to

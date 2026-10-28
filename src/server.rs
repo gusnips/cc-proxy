@@ -175,7 +175,7 @@ pub async fn serve_listener(
         ])),
     );
     let registry = Arc::new(Registry::new());
-    crate::rotation::spawn_hourly_ping(registry.clone());
+    crate::rotation::spawn_window_pings(registry.clone());
     let app = app_with_monitor(registry, monitor);
     axum::serve(
         listener,
