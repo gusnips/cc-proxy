@@ -326,7 +326,8 @@ pub fn auth_wait_for_reset() -> bool {
         .unwrap_or(false)
 }
 
-/// Read at the top of each hour, so toggling it takes effect without a restart.
+/// Read on each ping tick (every 30 seconds), so toggling it takes effect without
+/// a restart.
 pub fn auth_hourly_ping() -> bool {
     if let Ok(raw) = std::env::var("CCP_HOURLY_PING") {
         let lower = raw.trim().to_ascii_lowercase();
