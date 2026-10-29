@@ -183,6 +183,7 @@ impl ProviderRow {
             self.usage_error =
                 retain_previous_usage(&mut self.usage, &previous.usage, &previous.usage_error);
         }
+        let now = crate::rotation::now_ms();
         for account in &mut self.accounts {
             if let Some(old) = previous.accounts.iter().find(|old| old.id == account.id) {
                 // A failure that already kept the last saved numbers stays.
@@ -190,6 +191,12 @@ impl ProviderRow {
                 account.usage_error =
                     retain_previous_usage(&mut account.usage, &old.usage, &old.usage_error)
                         .or(saved_failure);
+                if account.waiting_until(now).is_none()
+                    && self.id != "antigravity"
+                    && let Some(MonitorUsage::Reported(windows)) = account.usage.clone()
+                {
+                    sync_exhausted_wait(account, &windows, now);
+                }
             }
         }
     }
@@ -450,11 +457,17 @@ impl ProvidersPanel {
         self.pending_usage = with_usage;
     }
 
-    /// Reads the saved accounts and the order again after a change, not their
-    /// usage: a sign-in or a routing toggle has no new numbers to fetch.
+    /// Reads the saved accounts and the order again after a change, and asks
+    /// for fresh usage when no usage worker is already running.
     pub fn reload_saved(&mut self) {
         if self.mode == Mode::Local {
-            self.spawn_load(Usage::No);
+            self.loaded_at = None;
+            let usage = if self.usage_busy.load(Ordering::SeqCst) {
+                Usage::No
+            } else {
+                Usage::Ask
+            };
+            self.spawn_load(usage);
         }
     }
 
@@ -562,6 +575,7 @@ impl ProvidersPanel {
 
     pub fn retry(&mut self) {
         self.loaded_at = None;
+        self.pending_usage = false;
         self.refresh();
     }
 
@@ -1686,7 +1700,7 @@ impl ProvidersPanel {
             && self
                 .first_reset(now)
                 .is_some_and(|(first, _)| &first == entry);
-        let summary = match entry {
+        let mut summary = match entry {
             // A provider with one credential shows nothing until it has numbers or a wait.
             Entry::Provider(_) if account.usage.is_none() && account.waits.is_empty() => {
                 Line::default()
@@ -1701,6 +1715,11 @@ impl ProvidersPanel {
             // Signed in with a key in config.json but no saved login: not a row yet.
             None => Some("not in the list"),
         };
+        if off.is_some() {
+            for span in &mut summary.spans {
+                span.style = Style::default().fg(DIM_WHITE);
+            }
+        }
         let mut info = vec![Span::raw("  ")];
         if active > 0 {
             info.push(Span::styled(
@@ -3770,16 +3789,30 @@ mod tests {
             .draw(|frame| panel.render(frame, frame.area()))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let (x, y) = (0..30)
-            .find_map(|y| {
-                let row = (0..160)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>();
-                row.find("5h 0% ")
-                    .map(|x| (row[..x].chars().count() as u16 + 3, y))
-            })
+        let find_on_list = |buffer: &ratatui::buffer::Buffer, needle: &str| {
+            (0..30)
+                .find_map(|y| {
+                    let row = (0..70).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+                    row.find(needle)
+                        .map(|x| (row[..x].chars().count() as u16, y))
+                })
+                .unwrap()
+        };
+        let (x, y) = find_on_list(buffer, "5h 0% ");
+        assert_eq!(buffer[(x + 3, y)].fg, ui::remaining_color(0.0));
+
+        // Disabling an account mutes its status (`ready` / `waiting`) and window percentages (`100%` / `0%`).
+        panel.rows[0].accounts[0].waits = vec![(None, crate::rotation::now_ms() + 3_600_000)];
+        panel.set_row_enabled("codex", Some("demo-home"), false);
+        panel.set_row_enabled("kimi", Some("demo-kimi"), false);
+        terminal
+            .draw(|frame| panel.render(frame, frame.area()))
             .unwrap();
-        assert_eq!(buffer[(x, y)].fg, ui::remaining_color(0.0));
+        let buffer = terminal.backend().buffer();
+        for needle in ["waiting", "0%", "ready", "72%"] {
+            let (x, y) = find_on_list(buffer, needle);
+            assert_eq!(buffer[(x, y)].fg, DIM_WHITE, "{needle} should be muted");
+        }
     }
 
     #[test]
@@ -3927,6 +3960,14 @@ mod tests {
         assert_eq!(
             work_line.to_string(),
             "waiting · 3d 3h left · 5h 0% · week 0%"
+        );
+        // The first metadata batch of a reload keeps the waiting status from 0% windows.
+        let mut reloaded = metadata(rows.clone());
+        reloaded[0].accounts[0].waits.clear();
+        reloaded[0].retain_usage(&rows[0]);
+        assert_eq!(
+            reloaded[0].accounts[0].usage_summary(now).to_string(),
+            "waiting · 1d left · 5h 100% · week 0%"
         );
         // A ready account leads with green `ready`.
         let kimi_line = demo_rows()[1].accounts[0].usage_summary(now);

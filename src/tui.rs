@@ -871,6 +871,7 @@ fn finish_account_action(
                 | controls::Action::EnableRouting
                 | controls::Action::DisableRouting
                 | controls::Action::SignIn { .. }
+                | controls::Action::SetEnabled { enabled: true, .. }
         ) {
             app.providers.reload_saved();
         }

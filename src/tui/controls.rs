@@ -161,7 +161,7 @@ impl Action {
                 route::refresh_model_labels();
                 let label = row_label(provider, account.as_deref())?;
                 Ok(if *enabled {
-                    format!("Saved. {label} is on. New chats can use it.")
+                    format!("Saved. {label} is on. Waiting requests and new chats can use it.")
                 } else {
                     format!(
                         "Saved. {label} is off. New chats skip it. Chats already on it move to the next row when they need to."

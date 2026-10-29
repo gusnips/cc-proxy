@@ -3,6 +3,12 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.11 (2026-10-29)
+
+- Enabling or adding an account while requests are waiting for a reset now wakes the waiting queue on the next check (within 500ms). If the newly enabled account is ready, held requests use it right away instead of sitting until the old reset timer expires. If it is also waiting with an earlier reset, the queue countdown updates to the earlier time.
+- Signing in to an account or enabling a row in the monitor immediately refreshes its `ready` or `waiting` status and syncs its quota window to disk instead of waiting for the next 1-minute refresh.
+- Disabled account rows (`off`) now mute their status (`ready`, `waiting`, `out of credit`) and quota percentages (`100%`, `0%`) in dim text so only enabled rows show active status colors.
+
 ## v0.4.10 (2026-10-28)
 
 - New chats now share the top 5 ready accounts of the list, whatever their provider. Before, only the accounts of the first ready provider shared them, so a Claude account at the top kept Codex idle until every Claude account was waiting. A new chat takes the account with the fewest chats in the last hour, and the list order breaks a tie. A row below the top 5 takes new chats only once some of them are waiting or turned off. Change the 5 with `cc-proxy config set auth.spreadChats 3`, or set it to `1` to send every new chat to the first ready account. A chat still stays on its account until it hits a limit, so the provider's prompt cache keeps working.
