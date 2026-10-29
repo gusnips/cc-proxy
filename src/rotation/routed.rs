@@ -9,8 +9,9 @@
 //! Running requests are pinned to the account they started on. A chat's place is
 //! saved (see `chats`), so a restart or an update keeps it too.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::response::Response;
@@ -206,18 +207,18 @@ fn chat_keys(identity: Option<&ConversationIdentity>) -> (Option<String>, Option
 fn ready(
     plans: &[Plan],
     at: usize,
-    tried: &HashSet<usize>,
+    tried: &HashSet<Place>,
     snapshot: &[Cooldown],
     now: u64,
 ) -> bool {
-    !tried.contains(&at) && plans[at].wait(snapshot, now).is_none()
+    !tried.contains(&plans[at].place()) && plans[at].wait(snapshot, now).is_none()
 }
 
 /// The chat's own row when it can serve, else the first row that is ready.
 fn pick(
     plans: &[Plan],
     chat: Option<&Place>,
-    tried: &HashSet<usize>,
+    tried: &HashSet<Place>,
     snapshot: &[Cooldown],
     now: u64,
 ) -> Option<usize> {
@@ -237,7 +238,7 @@ fn spread(
     plans: &[Plan],
     first: usize,
     chat: &str,
-    tried: &HashSet<usize>,
+    tried: &HashSet<Place>,
     snapshot: &[Cooldown],
     now: u64,
     limit: usize,
@@ -290,6 +291,7 @@ pub(crate) async fn execute_routed(
         auto: crate::config::auth_auto_rotate(),
         spread: crate::config::auth_spread_chats(),
         wait_for_reset: None,
+        live_rows: None,
         cooldowns: Cooldowns::new(),
     };
     pool.drive(rows, body, context, identity).await
@@ -311,6 +313,9 @@ struct Pool<'a> {
     spread: usize,
     /// `None` reads `auth.waitForReset` live; tests pass `Some` to stay in memory.
     wait_for_reset: Option<bool>,
+    /// `None` re-reads `config::route()` live when a held request checks the pool;
+    /// tests pass `Some` to stay in memory.
+    live_rows: Option<Arc<Mutex<Vec<PoolEntry>>>>,
     cooldowns: Cooldowns,
 }
 
@@ -318,6 +323,52 @@ impl Pool<'_> {
     fn hold_until_reset(&self) -> bool {
         self.wait_for_reset
             .unwrap_or_else(crate::config::auth_wait_for_reset)
+    }
+
+    /// Re-reads the enabled rows and their plans when a held request checks
+    /// whether a newly enabled or added account can take it.
+    fn replan(
+        &mut self,
+        model: &str,
+        remembered: Option<&Place>,
+        plans: &mut Vec<Plan>,
+        kept: &mut bool,
+    ) {
+        let (route, rows) = match &self.live_rows {
+            Some(rows) => (
+                Cow::Borrowed(self.route),
+                rows.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            ),
+            None => {
+                self.saved.clear();
+                let route = crate::config::route();
+                let Some(rows) =
+                    pool_rows(self.registry, &route, self.primary.name(), self.requested)
+                else {
+                    return;
+                };
+                (Cow::Owned(route), rows)
+            }
+        };
+        let enabled: Vec<Place> = rows
+            .iter()
+            .map(|row| (row.provider.clone(), row.account_id.clone()))
+            .collect();
+        let (next_plans, _) = plan_rows(
+            self.registry,
+            &route,
+            self.requested,
+            &self.primary,
+            model,
+            rows,
+            &mut self.saved,
+        );
+        if !next_plans.is_empty() {
+            *kept = remembered.is_some_and(|place| {
+                enabled.contains(place) && !next_plans.iter().any(|p| &p.place() == place)
+            });
+            *plans = next_plans;
+        }
     }
 
     /// Tries the enabled `rows` in order. See [`execute_routed`].
@@ -328,16 +379,17 @@ impl Pool<'_> {
         context: RequestContext,
         identity: Option<ConversationIdentity>,
     ) -> Response {
+        let incoming_model = body.model.as_deref().unwrap_or_default().to_string();
         let enabled: Vec<Place> = rows
             .iter()
             .map(|row| (row.provider.clone(), row.account_id.clone()))
             .collect();
-        let (plans, refusal) = plan_rows(
+        let (mut plans, refusal) = plan_rows(
             self.registry,
             self.route,
             self.requested,
             &self.primary,
-            body.model.as_deref().unwrap_or_default(),
+            &incoming_model,
             rows,
             &mut self.saved,
         );
@@ -362,15 +414,19 @@ impl Pool<'_> {
         // A chat keeps its place unless that row is gone, turned off or
         // waiting. A row that only has no model for this request (the chat's
         // other tiers) stays its place, and this request must not replace it.
-        let kept = remembered.as_ref().is_some_and(|place| {
+        let mut kept = remembered.as_ref().is_some_and(|place| {
             enabled.contains(place) && !plans.iter().any(|p| &p.place() == place)
         });
-        let mut tried: HashSet<usize> = HashSet::new();
+        let mut tried: HashSet<Place> = HashSet::new();
         let mut last_response = None;
         let mut waited = false;
         let mut shown = self.primary.name().to_string();
         loop {
+            let was_paused = crate::config::auth_pause_requests();
             wait_while_paused(&context.req_id, context.monitor.as_ref()).await;
+            if was_paused {
+                self.replan(&incoming_model, remembered.as_ref(), &mut plans, &mut kept);
+            }
             // Without auto-rotate there are no saved waits to honor: the first row answers.
             let snapshot = if auto {
                 match self.cooldowns.read() {
@@ -414,6 +470,7 @@ impl Pool<'_> {
                         }
                         let slice = (until - now).clamp(1, RESET_WAIT_SLICE_MS);
                         tokio::time::sleep(Duration::from_millis(slice)).await;
+                        self.replan(&incoming_model, remembered.as_ref(), &mut plans, &mut kept);
                         let fresh = match self.cooldowns.read() {
                             Ok(entries) => entries,
                             Err(error) => {
@@ -424,7 +481,11 @@ impl Pool<'_> {
                             }
                         };
                         let now = now_ms();
-                        tried.retain(|at| plans[*at].wait(&fresh, now).is_some());
+                        tried.retain(|place| {
+                            plans.iter().any(|plan| {
+                                &plan.place() == place && plan.wait(&fresh, now).is_some()
+                            })
+                        });
                         if pick(&plans, remembered.as_ref(), &tried, &fresh, now).is_some() {
                             break;
                         }
@@ -446,7 +507,11 @@ impl Pool<'_> {
                         Err(error) => return storage_error(error),
                     };
                     let now = now_ms();
-                    tried.retain(|at| plans[*at].wait(&fresh, now).is_some());
+                    tried.retain(|place| {
+                        plans
+                            .iter()
+                            .any(|plan| &plan.place() == place && plan.wait(&fresh, now).is_some())
+                    });
                     if pick(&plans, remembered.as_ref(), &tried, &fresh, now).is_some() {
                         continue;
                     }
@@ -469,7 +534,7 @@ impl Pool<'_> {
             {
                 at = spread(&plans, at, chat, &tried, &snapshot, now, self.spread);
             }
-            tried.insert(at);
+            tried.insert(plans[at].place());
             let plan = &plans[at];
             let provider = plan.provider.name();
             if provider != shown {
@@ -843,6 +908,7 @@ mod tests {
                 auto,
                 spread: self.spread,
                 wait_for_reset: Some(false),
+                live_rows: Some(Arc::new(Mutex::new(rows.to_vec()))),
                 cooldowns: Cooldowns {
                     path: self.path.clone(),
                 },
@@ -1369,6 +1435,7 @@ mod tests {
             },
         )]);
         let primary = world.registry.provider("claude").unwrap();
+        let live_rows = Arc::new(Mutex::new(rows.clone()));
         let pool = Pool {
             registry: &world.registry,
             route: &world.route,
@@ -1378,6 +1445,7 @@ mod tests {
             auto: true,
             spread: world.spread,
             wait_for_reset: Some(true),
+            live_rows: Some(live_rows),
             cooldowns: Cooldowns {
                 path: world.path.clone(),
             },
@@ -1433,6 +1501,112 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn enabling_an_account_while_waiting_updates_the_queue_and_uses_ready_rows() {
+        let world = world();
+        let monitor = MonitorHandle::default();
+        monitor.request_started("pool-enable-wait", None, None, EndpointKind::Messages);
+        let cooldowns = Cooldowns {
+            path: world.path.clone(),
+        };
+        let late_reset = now_ms() + 600_000;
+        let early_reset = now_ms() + 300_000;
+        cooldowns
+            .mark_with("claude", CLAUDE_PRO, None, late_reset, false)
+            .unwrap();
+        cooldowns
+            .mark_with("claude", CLAUDE_MAX, None, early_reset, false)
+            .unwrap();
+        let rows = vec![row("claude", Some(CLAUDE_PRO))];
+        let live_rows = Arc::new(Mutex::new(rows.clone()));
+        let saved = HashMap::from([
+            (
+                "claude".to_string(),
+                Saved {
+                    accounts: vec![account(CLAUDE_PRO), account(CLAUDE_MAX)],
+                    unusable: HashSet::new(),
+                },
+            ),
+            (
+                "codex".to_string(),
+                Saved {
+                    accounts: vec![account(CODEX_ONE)],
+                    unusable: HashSet::new(),
+                },
+            ),
+        ]);
+        let primary = world.registry.provider("claude").unwrap();
+        let pool = Pool {
+            registry: &world.registry,
+            route: &world.route,
+            requested: "claude-opus-4-8",
+            primary,
+            saved,
+            auto: true,
+            spread: world.spread,
+            wait_for_reset: Some(true),
+            live_rows: Some(live_rows.clone()),
+            cooldowns: Cooldowns {
+                path: world.path.clone(),
+            },
+        };
+        let body =
+            serde_json::from_value(serde_json::json!({"messages": [], "model": "claude/test-1"}))
+                .unwrap();
+        let context = RequestContext {
+            req_id: "pool-enable-wait".into(),
+            session_id: None,
+            session_seq: None,
+            provider: "claude".into(),
+            account: None,
+            traffic: None,
+            monitor: Some(monitor.clone()),
+        };
+        let watch_monitor = monitor.clone();
+        let enabler = tokio::spawn(async move {
+            for _ in 0..40 {
+                if watch_monitor
+                    .snapshot()
+                    .active
+                    .first()
+                    .is_some_and(|req| req.wait_until_ms == Some(late_reset))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // Enabling a waiting account with an earlier reset shortens the queue countdown.
+            live_rows
+                .lock()
+                .unwrap()
+                .push(row("claude", Some(CLAUDE_MAX)));
+            for _ in 0..80 {
+                if watch_monitor
+                    .snapshot()
+                    .active
+                    .first()
+                    .is_some_and(|req| req.wait_until_ms == Some(early_reset))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                watch_monitor.snapshot().active[0].wait_until_ms,
+                Some(early_reset)
+            );
+            // Enabling a ready account wakes the waiting request and serves it immediately.
+            live_rows
+                .lock()
+                .unwrap()
+                .push(row("codex", Some(CODEX_ONE)));
+        });
+        let response = pool.drive(rows, body, context, None).await;
+        enabler.await.unwrap();
+        assert_eq!(text(response).await, format!("codex:{CODEX_ONE}"));
+        assert_eq!(monitor.snapshot().active[0].wait_until_ms, None);
     }
 
     #[tokio::test]

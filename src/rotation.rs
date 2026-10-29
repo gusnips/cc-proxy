@@ -317,6 +317,7 @@ fn retry_deadline(response: &Response, now: u64) -> Option<Sitout> {
 /// keeps going; anything longer surfaces as a 429 unless `auth.waitForReset`
 /// asks cc-proxy to hold until the reset time.
 const MAX_ROTATION_WAIT_MS: u64 = 120_000;
+#[cfg(not(test))]
 const PAUSE_POLL_MS: u64 = 200;
 const RESET_WAIT_SLICE_MS: u64 = 500;
 
@@ -326,6 +327,9 @@ pub(crate) async fn wait_while_paused(
     req_id: &str,
     monitor: Option<&crate::monitor::MonitorHandle>,
 ) {
+    #[cfg(test)]
+    let _ = (req_id, monitor);
+    #[cfg(not(test))]
     wait_while_paused_with(
         req_id,
         monitor,
@@ -892,7 +896,7 @@ async fn execute_with(
             .cloned();
             Ok(Some((list, current, snapshot, now, next)))
         })();
-        let (list, current, snapshot, now, next) = match selection {
+        let (mut list, mut current, snapshot, now, next) = match selection {
             Ok(Some(selected)) => selected,
             Ok(None) => {
                 return match last_response {
@@ -910,6 +914,9 @@ async fn execute_with(
             // Nothing ready: hold the request until the first account frees
             // up (bounded by default, or until reset when `auth.waitForReset`
             // is on), so the turn continues on it instead of dying on a 429.
+            #[cfg(test)]
+            let hold_until_reset = false;
+            #[cfg(not(test))]
             let hold_until_reset = crate::config::auth_wait_for_reset();
             if let Some(mut until) = first_release(&list, &snapshot, provider.name(), model, now)
                 && until > now
@@ -933,11 +940,21 @@ async fn execute_with(
                     if now >= until {
                         break;
                     }
+                    if !short_wait && !hold_until_reset {
+                        break;
+                    }
+                    #[cfg(not(test))]
                     if !short_wait && !crate::config::auth_wait_for_reset() {
                         break;
                     }
                     let slice = (until - now).clamp(1, RESET_WAIT_SLICE_MS);
                     tokio::time::sleep(std::time::Duration::from_millis(slice)).await;
+                    if let Ok(fresh_list) = accounts.list() {
+                        list = servable(provider.cli().accounts(), accounts, fresh_list);
+                    }
+                    if let Ok(Some(fresh_current)) = accounts.current() {
+                        current = fresh_current;
+                    }
                     let fresh = match cooldowns.read() {
                         Ok(entries) => entries,
                         Err(error) => {
