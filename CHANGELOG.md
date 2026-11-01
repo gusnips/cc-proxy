@@ -3,6 +3,10 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.12 (2026-11-01)
+
+- Every OpenCode Go account now shows its own 5-hour, weekly and monthly windows with percentages. Before, only the current login's usage was fetched, so any other saved account fell back to the tokens and dollars seen since the proxy started.
+
 ## v0.4.11 (2026-10-29)
 
 - Enabling or adding an account while requests are waiting for a reset now wakes the waiting queue on the next check (within 500ms). If the newly enabled account is ready, held requests use it right away instead of sitting until the old reset timer expires. If it is also waiting with an earlier reset, the queue countdown updates to the earlier time.
