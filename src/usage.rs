@@ -630,7 +630,8 @@ pub fn run(only: Option<UsageProvider>, json: bool) -> anyhow::Result<i32> {
     Ok(code)
 }
 
-/// OpenCode Go reports usage for its current login only.
+/// The usage of the one login OpenCode Go answers for when no account is asked:
+/// the current one, or the key in config.json.
 pub(crate) fn headlines() -> Vec<(&'static str, MonitorUsage)> {
     if crate::accounts::saved_api_key("opencode", None)
         .or_else(config::opencode_api_key)
@@ -641,29 +642,7 @@ pub(crate) fn headlines() -> Vec<(&'static str, MonitorUsage)> {
     let results = fetch_reports(&[UsageProvider::OpenCode]);
     let headline = match results {
         Ok(results) => match results.into_iter().next() {
-            Some(Ok(Some(Report::OpenCode(response)))) => {
-                let usage = &response.usage;
-                MonitorUsage::Reported(
-                    [
-                        ("5h", &usage.rolling),
-                        ("week", &usage.weekly),
-                        ("month", &usage.monthly),
-                    ]
-                    .into_iter()
-                    .filter_map(|(label, window)| {
-                        let window = window.as_ref()?;
-                        Some(UsageWindow {
-                            label,
-                            remaining_percent: (100.0 - window.percent?).clamp(0.0, 100.0),
-                            resets_at_ms: window
-                                .resets_at
-                                .as_deref()
-                                .and_then(|reset| reset_ms(&Value::from(reset))),
-                        })
-                    })
-                    .collect(),
-                )
-            }
+            Some(Ok(Some(Report::OpenCode(response)))) => opencode_monitor_usage(&response),
             Some(Ok(None)) => return Vec::new(),
             _ => MonitorUsage::Unavailable(
                 "Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into(),
@@ -677,6 +656,84 @@ pub(crate) fn headlines() -> Vec<(&'static str, MonitorUsage)> {
         }
     };
     vec![("opencode", headline)]
+}
+
+/// OpenCode Go's monthly window has no place in the shared plan shape, so it
+/// keeps its own labels.
+fn opencode_monitor_usage(response: &OpenCodeUsageResponse) -> MonitorUsage {
+    let usage = &response.usage;
+    MonitorUsage::Reported(
+        [
+            ("5h", &usage.rolling),
+            ("week", &usage.weekly),
+            ("month", &usage.monthly),
+        ]
+        .into_iter()
+        .filter_map(|(label, window)| {
+            let window = window.as_ref()?;
+            Some(UsageWindow {
+                label,
+                remaining_percent: (100.0 - window.percent?).clamp(0.0, 100.0),
+                resets_at_ms: window
+                    .resets_at
+                    .as_deref()
+                    .and_then(|reset| reset_ms(&Value::from(reset))),
+            })
+        })
+        .collect(),
+    )
+}
+
+/// OpenCode Go answers usage per API key, so every saved account has its own
+/// windows. An account whose login holds no readable key uses the config key,
+/// the same key its requests fall back to.
+fn opencode_account_usage(usage: &mut HashMap<(String, String), MonitorUsage>) {
+    let accounts = match crate::accounts::Accounts::new("opencode").list() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            tracing::warn!(%error, "Could not read saved OpenCode accounts for usage");
+            return;
+        }
+    };
+    if accounts.is_empty() {
+        return;
+    }
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    let results = runtime.block_on(futures_util::future::join_all(
+        accounts.into_iter().map(|account| {
+            let key = crate::accounts::saved_api_key("opencode", Some(&account.id))
+                .or_else(config::opencode_api_key);
+            async move {
+                let report = match key {
+                    Some(key) => match OpenCodeClient::new(config::opencode_base_url(), Some(key)) {
+                        Ok(client) => match client.get_usage().await {
+                            Ok(response) => opencode_monitor_usage(&response),
+                            Err(error) => MonitorUsage::Unavailable(format!(
+                                "Usage unavailable: {}. Press r to retry, or run cc-proxy usage opencode.",
+                                error.message
+                            )),
+                        },
+                        Err(error) => MonitorUsage::Unavailable(format!(
+                            "Usage unavailable: {error}. Press r to retry, or run cc-proxy usage opencode."
+                        )),
+                    },
+                    None => MonitorUsage::Unavailable(format!(
+                        "No API key saved for {}. Run `cc-proxy auth login opencode --replace --account {}`.",
+                        account.name, account.name
+                    )),
+                };
+                (account.id, report)
+            }
+        }),
+    ));
+    for (id, report) in results {
+        usage.insert(("opencode".to_string(), id), report);
+    }
 }
 
 /// Structured usage per saved account for the monitor. Call on its background
@@ -714,6 +771,7 @@ pub(crate) fn account_usage_paced() -> HashMap<(String, String), MonitorUsage> {
             }
         }
     }
+    opencode_account_usage(&mut usage);
     let results = match fetch_reports(&[
         UsageProvider::Claude,
         UsageProvider::Codex,
@@ -748,9 +806,10 @@ pub(crate) fn account_usage_paced() -> HashMap<(String, String), MonitorUsage> {
 }
 
 /// Every label a window can carry, so a saved window gets its `&'static str` back.
-const WINDOW_LABELS: [&str; 6] = [
+const WINDOW_LABELS: [&str; 7] = [
     "5h",
     "week",
+    "month",
     "Gemini 5h",
     "Gemini week",
     "Claude 5h",
@@ -2066,6 +2125,41 @@ mod tests {
         // A file that isn't ours restores nothing and never panics.
         std::fs::write(&path, "not json").unwrap();
         assert!(restore_usage(read_saved_usage(&path)).is_empty());
+    }
+
+    #[test]
+    fn opencode_keeps_its_three_windows_and_saves_the_month_one() {
+        let response: OpenCodeUsageResponse = serde_json::from_value(serde_json::json!({
+            "usage": {
+                "rolling": {"status": "ok", "percent": 23},
+                "weekly": {"percent": 49},
+                "monthly": {"percent": 24}
+            }
+        }))
+        .unwrap();
+        let MonitorUsage::Reported(windows) = opencode_monitor_usage(&response) else {
+            panic!("expected reported windows");
+        };
+        let shown: Vec<_> = windows
+            .iter()
+            .map(|window| (window.label, window.remaining_percent))
+            .collect();
+        assert_eq!(shown, [("5h", 77.0), ("week", 51.0), ("month", 76.0)]);
+
+        // The monitor restores these from disk after a failed refresh.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage-last.json");
+        let usage = HashMap::from([(
+            ("opencode".to_string(), "work".to_string()),
+            MonitorUsage::Reported(windows),
+        )]);
+        remember_last_good(&path, &usage);
+        assert_eq!(
+            restore_usage(read_saved_usage(&path))
+                .get(&("opencode".to_string(), "work".to_string()))
+                .map(|windows| windows.len()),
+            Some(3)
+        );
     }
 
     #[test]

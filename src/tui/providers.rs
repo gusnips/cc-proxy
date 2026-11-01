@@ -2596,8 +2596,7 @@ fn apply_account_usage(rows: &mut [ProviderRow], usage: &HashMap<(String, String
             let lines = usage.get(&(row.id.clone(), account.id.clone())).cloned().unwrap_or_else(|| {
                 match row.id.as_str() {
                     "opencode" if account.current => row.usage.clone().unwrap_or_else(|| MonitorUsage::Unavailable("Usage unavailable. Press r to retry, or run cc-proxy usage opencode.".into())),
-                    "opencode" => MonitorUsage::NotReported("OpenCode Go reports usage for the current account only."),
-                    "claude" | "codex" | "kimi" | "antigravity" => MonitorUsage::Unavailable(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id)),
+                    "claude" | "codex" | "kimi" | "antigravity" | "opencode" => MonitorUsage::Unavailable(format!("Usage unavailable. Press r to retry, or run cc-proxy usage {}.", row.id)),
                     _ => MonitorUsage::NotReported("This provider does not report a balance or usage. With auto-rotate on, cc-proxy moves to the next account when the provider says this one is out of credit."),
                 }
             });
@@ -3860,7 +3859,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_usage_stays_with_the_current_account() {
+    fn opencode_shows_each_account_its_own_usage() {
         let mut rows = demo_rows();
         rows[0].id = "opencode".into();
         rows[0].usage = Some(MonitorUsage::Reported(vec![UsageWindow {
@@ -3868,11 +3867,15 @@ mod tests {
             remaining_percent: 58.0,
             resets_at_ms: None,
         }]));
-        apply_account_usage(&mut rows, &HashMap::new());
-        assert!(matches!(
-            rows[0].accounts[0].usage,
-            Some(MonitorUsage::NotReported(_))
-        ));
+        let home = MonitorUsage::Reported(vec![UsageWindow {
+            label: "month",
+            remaining_percent: 33.0,
+            resets_at_ms: None,
+        }]);
+        let usage = HashMap::from([(("opencode".into(), "demo-home".into()), home.clone())]);
+        apply_account_usage(&mut rows, &usage);
+        assert_eq!(rows[0].accounts[0].usage, Some(home));
+        // The current account keeps the provider-wide answer when its own lookup is missing.
         assert_eq!(rows[0].accounts[1].usage, rows[0].usage);
     }
 
