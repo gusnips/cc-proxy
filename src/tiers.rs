@@ -340,8 +340,9 @@ pub fn resolve(registry: &Registry, route: &Route, model: &str) -> Result<String
         }
         return Err(format!(
             "cc-proxy routing is off, so it can't serve \"{model}\". This Claude Code window \
-             still points at the proxy. Run `cc-proxy use direct` to restore Claude Code's \
-             original settings and login, or `cc-proxy start` to route it through a provider."
+             still points at the proxy. If you just ran `cc-proxy use direct`, send your message \
+             again in a few seconds: the window switches by itself. If it keeps failing, restart \
+             the window. `cc-proxy start` routes it through a provider again."
         ));
     };
     // The first provider that has a model for the name. A pool that mixes
@@ -509,6 +510,19 @@ mod tests {
         assert_eq!(model("sonnet"), "gpt-5.6-terra");
         assert_eq!(model("haiku"), "gpt-6-luna");
         assert!(found.values().all(|guess| guess.confident));
+    }
+
+    #[test]
+    fn a_newly_listed_claude_model_takes_over_its_name() {
+        let found = picked(&[
+            "claude/claude-fable-5-1",
+            "claude/claude-fable-5-2",
+            "claude/claude-opus-5-5",
+            "claude/claude-sonnet-5-5",
+            "claude/claude-haiku-5-5",
+        ]);
+        let fable = found.iter().find(|(tier, ..)| *tier == "fable").unwrap();
+        assert_eq!(fable.1, "claude/claude-fable-5-2");
     }
 
     #[test]

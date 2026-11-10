@@ -148,7 +148,7 @@ cc-proxy models refresh [provider|all]
 
 `models set` sets one Claude name directly, and `models reset` forgets your choice for one name, or for all four when you give no name.
 
-`models refresh` fetches live lists for Antigravity, GitHub Copilot, Gemini, OpenCode Go, OpenCode Zen and providers you added. Use `models refresh all` to refresh them together. Failures keep the saved list and do not stop the other refreshes. Providers without live discovery are reported as skipped. See [Refresh model lists](/using/models-and-routing/#refresh-model-lists).
+`models refresh` fetches live lists for Claude, Anthropic, Antigravity, GitHub Copilot, Gemini, OpenCode Go, OpenCode Zen and providers you added. Use `models refresh all` to refresh them together. Failures keep the saved list and do not stop the other refreshes. Providers without live discovery are reported as skipped. See [Refresh model lists](/using/models-and-routing/#refresh-model-lists).
 
 ## Provider authentication
 

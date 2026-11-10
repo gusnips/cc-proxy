@@ -3,6 +3,11 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.13 (2026-11-10)
+
+- `cc-proxy models refresh claude` now asks Anthropic which models your Claude login can use, and `cc-proxy models refresh anthropic` does the same for an API key. Before, both used a fixed list, so a new model such as Fable 5.2 never showed up. The monitor's action menu now has `Refresh Claude model list` too, and `models refresh all` includes both. A name you pinned with `models set` stays as you set it. Run `cc-proxy models reset fable --provider claude` to follow the newest Fable again.
+- The "routing is off" error now says what to do right after `cc-proxy use direct`: send the message again in a few seconds. Before, it told you to run `use direct`, which you had just done. A window that was open at that moment can send one more message to the proxy before it follows the new settings.
+
 ## v0.4.12 (2026-11-01)
 
 - Every OpenCode Go account now shows its own 5-hour, weekly and monthly windows with percentages. Before, only the current login's usage was fetched, so any other saved account fell back to the tokens and dollars seen since the proxy started.

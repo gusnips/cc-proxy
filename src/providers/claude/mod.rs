@@ -7,6 +7,7 @@ mod wire;
 
 use std::time::Duration;
 
+use anyhow::Context;
 use async_trait::async_trait;
 use axum::{
     Json,
@@ -23,12 +24,34 @@ use crate::provider::{
     RequestContext,
 };
 use crate::providers::{
-    custom::ANTHROPIC_MODELS,
+    custom::anthropic_models,
     kimi::count_tokens,
+    model_catalog::{self, AnthropicLogin},
     opencode::{messages, sse_response, update_buffered_usage},
     upstream_error,
 };
 use crate::rotation::{RotationHint, now_ms};
+
+const BASE_URL: &str = "https://api.anthropic.com";
+
+/// Asks Anthropic which models the current login can use and saves the list.
+/// Blocking.
+pub fn refresh_models() -> anyhow::Result<Vec<String>> {
+    let accounts = Accounts::open("claude", &auth::CLI)?;
+    let store = accounts.for_request::<auth::StoredAuth>(None)?;
+    let login = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(auth::AuthManager::new(store).get_auth())?;
+    let ids = model_catalog::fetch_anthropic(
+        BASE_URL,
+        AnthropicLogin::Subscription(&login.access),
+        Duration::from_secs(30),
+    )
+    .context("Could not refresh Claude. Check `cc-proxy auth status claude`, then retry `cc-proxy models refresh claude`.")?;
+    model_catalog::save("claude", &ids)?;
+    Ok(ids)
+}
 
 pub struct ClaudeProvider {
     client: reqwest::Client,
@@ -54,7 +77,7 @@ impl ClaudeProvider {
         });
         Self {
             client: CLIENT.clone(),
-            base_url: "https://api.anthropic.com".into(),
+            base_url: BASE_URL.into(),
         }
     }
 
@@ -260,8 +283,8 @@ impl Provider for ClaudeProvider {
         "claude"
     }
     fn supported_models(&self) -> Vec<String> {
-        ANTHROPIC_MODELS
-            .iter()
+        anthropic_models("claude")
+            .into_iter()
             .map(|model| format!("claude/{model}"))
             .collect()
     }

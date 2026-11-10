@@ -35,7 +35,7 @@ use crate::providers::upstream_error;
 use crate::registry::normalize_incoming_model;
 use crate::ui;
 
-pub const ANTHROPIC_MODELS: &[&str] = &[
+const ANTHROPIC_MODELS: &[&str] = &[
     "claude-fable-5-1",
     "claude-opus-5-5",
     "claude-opus-4-8",
@@ -44,6 +44,17 @@ pub const ANTHROPIC_MODELS: &[&str] = &[
     "claude-haiku-5-5",
     "claude-haiku-4-5",
 ];
+
+/// Claude models `provider` (`claude` or `anthropic`) offers: the list its last
+/// `cc-proxy models refresh` saved, else the built-in one.
+pub fn anthropic_models(provider: &str) -> Vec<String> {
+    super::model_catalog::load(provider).unwrap_or_else(|| {
+        ANTHROPIC_MODELS
+            .iter()
+            .map(|model| (*model).to_string())
+            .collect()
+    })
+}
 
 pub const BUILTIN_PROVIDER_NAMES: &[&str] = &[
     "codex",
@@ -84,12 +95,11 @@ impl CustomProvider {
         .map(Arc::new)
         .map(ClientState::Ready)
         .unwrap_or_else(|e| ClientState::Invalid(e.to_string()));
-        let models = ANTHROPIC_MODELS.iter().map(|m| (*m).to_string()).collect();
         Self {
             name: "anthropic",
             label: "Anthropic",
             format: CustomFormat::Anthropic,
-            models,
+            models: Vec::new(),
             builtin_anthropic: true,
             client,
             cli: CustomCli {
@@ -155,9 +165,10 @@ impl CustomProvider {
     }
 
     fn model_ids(&self) -> Vec<String> {
-        if !self.builtin_anthropic
-            && let Some(cfg) = config::custom_providers().remove(self.name)
-        {
+        if self.builtin_anthropic {
+            return anthropic_models(self.name);
+        }
+        if let Some(cfg) = config::custom_providers().remove(self.name) {
             return cfg.models;
         }
         self.models.clone()
@@ -871,6 +882,21 @@ pub fn refresh_models(name: &str) -> Result<Vec<String>> {
     cfg.models = models.clone();
     config::save_custom_provider(name, &cfg)?;
     Ok(models)
+}
+
+/// Asks Anthropic which models the API key can use and saves the list.
+pub fn refresh_anthropic_models() -> Result<Vec<String>> {
+    let Some(key) = anthropic_key_for(None) else {
+        bail!("Anthropic API key isn't configured. Run `cc-proxy auth login anthropic` first.");
+    };
+    let ids = super::model_catalog::fetch_anthropic(
+        &config::anthropic_base_url(),
+        super::model_catalog::AnthropicLogin::ApiKey(&key),
+        Duration::from_secs(30),
+    )
+    .context("Could not refresh Anthropic. Check `cc-proxy auth status anthropic`, then retry `cc-proxy models refresh anthropic`.")?;
+    super::model_catalog::save("anthropic", &ids)?;
+    Ok(ids)
 }
 
 pub fn run_provider_remove(name: Option<&str>) -> Result<()> {
