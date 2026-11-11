@@ -153,7 +153,7 @@ pub(crate) fn basis_label(basis: Basis) -> &'static str {
 pub(crate) fn supports_refresh(provider: &str) -> bool {
     matches!(
         provider,
-        "copilot" | "antigravity" | "gemini" | "opencode" | "opencode-zen"
+        "claude" | "anthropic" | "copilot" | "antigravity" | "gemini" | "opencode" | "opencode-zen"
     ) || config::custom_providers().contains_key(provider)
 }
 
@@ -217,6 +217,8 @@ pub(crate) fn refresh_provider(provider: &str) -> Result<Option<Vec<String>>> {
             };
             crate::providers::copilot::models::refresh(&auth)?
         }
+        "claude" => crate::providers::claude::refresh_models()?,
+        "anthropic" => crate::providers::custom::refresh_anthropic_models()?,
         "antigravity" => crate::providers::antigravity::refresh_models()?,
         "gemini" => crate::providers::gemini::refresh_models()?,
         "opencode" => crate::providers::opencode::model::refresh_models(false)?,
@@ -246,14 +248,15 @@ fn refresh_all(registry: &Registry) -> Result<()> {
     let mut failures = 0;
     for provider in routable_providers(registry) {
         let name = ui::provider_name(provider);
-        if matches!(provider, "antigravity" | "copilot" | "gemini")
-            && registry.provider(provider).is_some_and(|handler| {
-                matches!(
-                    handler.cli().auth_state(),
-                    crate::provider::AuthState::Missing
-                )
-            })
-        {
+        if matches!(
+            provider,
+            "claude" | "anthropic" | "antigravity" | "copilot" | "gemini"
+        ) && registry.provider(provider).is_some_and(|handler| {
+            matches!(
+                handler.cli().auth_state(),
+                crate::provider::AuthState::Missing
+            )
+        }) {
             println!(
                 "{name}: skipped. Sign in with `cc-proxy auth login {provider}` to fetch its models."
             );
@@ -388,6 +391,14 @@ mod tests {
             once_each(models),
             ["opencode-go/kimi-k2.5", "glm-5", "opencode-go/kimi-k3"]
         );
+    }
+
+    #[test]
+    fn the_claude_providers_have_live_model_lists() {
+        // The monitor shows its refresh action for exactly these.
+        assert!(supports_refresh("claude"));
+        assert!(supports_refresh("anthropic"));
+        assert!(!supports_refresh("kimi"));
     }
 
     #[test]

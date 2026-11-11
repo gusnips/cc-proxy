@@ -28,6 +28,40 @@ pub(crate) fn fetch_openai(
     api_key: Option<&str>,
     timeout: Duration,
 ) -> Result<Vec<String>> {
+    let mut headers = Vec::new();
+    if let Some(key) = api_key.filter(|key| !key.is_empty()) {
+        headers.push(("Authorization", format!("Bearer {key}")));
+        headers.push(("x-api-key", key.to_string()));
+    }
+    fetch_ids(base_url, &headers, timeout)
+}
+
+/// What proves who is asking Anthropic for its model list.
+pub(crate) enum AnthropicLogin<'a> {
+    /// A Claude subscription's access token.
+    Subscription(&'a str),
+    ApiKey(&'a str),
+}
+
+/// Anthropic's `GET /v1/models`. It returns up to 1000 models in one page, and
+/// Anthropic lists tens.
+pub(crate) fn fetch_anthropic(
+    base_url: &str,
+    login: AnthropicLogin<'_>,
+    timeout: Duration,
+) -> Result<Vec<String>> {
+    let mut headers = vec![("anthropic-version", "2023-06-01".to_string())];
+    match login {
+        AnthropicLogin::Subscription(token) => {
+            headers.push(("Authorization", format!("Bearer {token}")));
+            headers.push(("anthropic-beta", "oauth-2025-04-20".to_string()));
+        }
+        AnthropicLogin::ApiKey(key) => headers.push(("x-api-key", key.to_string())),
+    }
+    fetch_ids(base_url, &headers, timeout)
+}
+
+fn fetch_ids(base_url: &str, headers: &[(&str, String)], timeout: Duration) -> Result<Vec<String>> {
     let mut url = reqwest::Url::parse(base_url)?;
     let path = url.path().trim_end_matches('/');
     let path = if path.is_empty() {
@@ -41,14 +75,14 @@ pub(crate) fn fetch_openai(
         .timeout(timeout)
         .build()?;
     let mut request = client.get(url).header("Accept", "application/json");
-    if let Some(key) = api_key.filter(|key| !key.is_empty()) {
-        request = request.bearer_auth(key).header("x-api-key", key);
+    for (name, value) in headers {
+        request = request.header(*name, value);
     }
     let body: Value = request
         .send()
         .context("Could not fetch the model list. Check the provider address and your connection.")?
         .error_for_status()
-        .context("The provider refused the model list request. Check its address and API key.")?
+        .context("The provider refused the model list request. Check its address and sign-in.")?
         .json()
         .context("The provider's model list was not JSON.")?;
     openai_ids(&body)

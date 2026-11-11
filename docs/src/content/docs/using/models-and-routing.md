@@ -67,21 +67,22 @@ cc-proxy models refresh openrouter       # fetch a custom provider's live catalo
 
 Each line says who decided: `your choice`, `picked by cc-proxy`, or `a guess, not confirmed`. A choice is checked against the models cc-proxy serves. It takes effect on the next request, with no restart. It is stored in `config.json` as `route.tiers.<provider>.<name>`.
 
-While routing is off, a Claude name gets an HTTP 400 that says so. That window still points at the proxy. Restart it, or run `cc-proxy start`.
+While routing is off, a Claude name gets an HTTP 400 that says so. A window that was open when you ran `cc-proxy use direct` can send one more message to the proxy before it follows the new settings. Send it again in a few seconds. A window that keeps failing needs a restart, or `cc-proxy start`.
 
 ## Refresh model lists
 
 ```sh
+cc-proxy models refresh claude
 cc-proxy models refresh antigravity
 ```
 
-This asks Antigravity which models your account can use, saves the list and updates Claude Code's picker. It does not restart the proxy.
+This asks the provider which models your account can use, saves the list and updates Claude Code's picker. It does not restart the proxy. A new Claude model shows up as soon as Anthropic lists it for your login, and an automatic `fable`, `opus`, `sonnet` or `haiku` name starts using it on the next request.
 
-Use `cc-proxy models refresh all` to refresh Antigravity, GitHub Copilot, Gemini, OpenCode Go, OpenCode Zen and providers you added. Providers that need sign-in are skipped until you sign in. Each failed refresh keeps its saved list; the command continues with the others and exits with an error if any refresh failed.
+Use `cc-proxy models refresh all` to refresh Claude, Anthropic, Antigravity, GitHub Copilot, Gemini, OpenCode Go, OpenCode Zen and providers you added. Providers that need sign-in are skipped until you sign in. Each failed refresh keeps its saved list; the command continues with the others and exits with an error if any refresh failed.
 
 Successful refreshes replace the saved list, so retired models disappear. The built-in lists are fallbacks until a live list has been saved. Your chosen tier mappings stay unchanged. Automatic defaults use the refreshed catalog on the next request.
 
-Codex reads the Codex CLI's local model cache automatically. Cursor, Grok, Kimi, GLM and direct Anthropic do not have live discovery in cc-proxy yet. The command reports these limits rather than claiming to refresh them.
+Codex reads the Codex CLI's local model cache automatically. Cursor, Grok, Kimi and GLM do not have live discovery in cc-proxy yet. The command reports these limits rather than claiming to refresh them.
 
 ### Antigravity defaults and effort
 
