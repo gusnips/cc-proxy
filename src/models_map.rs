@@ -3,10 +3,13 @@
 //! provider's live model list.
 
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 
 use crate::auth::AuthStorage;
+use crate::provider::AuthState;
 use crate::registry::Registry;
 use crate::route::routable_providers;
 use crate::tiers::{self, Basis, TIERS};
@@ -150,11 +153,90 @@ pub(crate) fn basis_label(basis: Basis) -> &'static str {
     }
 }
 
+/// Providers that keep their saved list in `models.json`, which `refresh_provider`
+/// replaces. A provider you added keeps its list in `config.json` instead.
+const LIVE_LISTS: [&str; 7] = [
+    "claude",
+    "anthropic",
+    "copilot",
+    "antigravity",
+    "gemini",
+    "opencode",
+    "opencode-zen",
+];
+
 pub(crate) fn supports_refresh(provider: &str) -> bool {
-    matches!(
-        provider,
-        "claude" | "anthropic" | "copilot" | "antigravity" | "gemini" | "opencode" | "opencode-zen"
-    ) || config::custom_providers().contains_key(provider)
+    LIVE_LISTS.contains(&provider) || config::custom_providers().contains_key(provider)
+}
+
+const LIST_UPKEEP_FIRST: Duration = Duration::from_secs(60);
+const LIST_UPKEEP_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Keeps the saved model lists current while the proxy runs, so a model a
+/// provider launches today shows up without anyone running `models refresh`.
+/// It asks each signed-in provider a minute after the proxy starts and then
+/// every 6 hours. A plain thread, because some refreshes block on their own
+/// runtime.
+// ponytail: the 6 hours count awake time only (a sleeping laptop does not
+// advance the clock), and a provider you added is not refreshed, because its
+// list lives in config.json, which this job should not rewrite on its own.
+pub(crate) fn spawn_list_upkeep(registry: Arc<Registry>) {
+    let signed_in = move |provider: &str| {
+        registry
+            .provider(provider)
+            .is_some_and(|handler| handler.cli().auth_state() != AuthState::Missing)
+    };
+    let job = move || {
+        std::thread::sleep(LIST_UPKEEP_FIRST);
+        loop {
+            if refresh_lists(&signed_in, refresh_provider) {
+                crate::route::refresh_model_labels();
+            }
+            std::thread::sleep(LIST_UPKEEP_EVERY);
+        }
+    };
+    if let Err(error) = std::thread::Builder::new()
+        .name("model-list-upkeep".into())
+        .spawn(job)
+    {
+        tracing::warn!(%error, "Could not start the model list refresh");
+    }
+}
+
+/// Refreshes the list of every signed-in provider. A failure keeps that list
+/// as it was and does not stop the others. True when a list was replaced.
+fn refresh_lists(
+    signed_in: impl Fn(&str) -> bool,
+    refresh: impl Fn(&str) -> Result<Option<Vec<String>>>,
+) -> bool {
+    let log = crate::logging::create_logger("models");
+    let fields = |provider: &str, key: &str, value: serde_json::Value| {
+        Some(serde_json::Map::from_iter([
+            ("provider".to_string(), serde_json::json!(provider)),
+            (key.to_string(), value),
+        ]))
+    };
+    let mut replaced = false;
+    for provider in LIVE_LISTS
+        .into_iter()
+        .filter(|provider| signed_in(provider))
+    {
+        match refresh(provider) {
+            Ok(Some(ids)) => {
+                replaced = true;
+                log.info(
+                    "models_refreshed",
+                    fields(provider, "count", serde_json::json!(ids.len())),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => log.warn(
+                "models_refresh_failed",
+                fields(provider, "error", serde_json::json!(format!("{error:#}"))),
+            ),
+        }
+    }
+    replaced
 }
 
 /// Fetches the live model list of a provider (or every provider that supports
@@ -399,6 +481,32 @@ mod tests {
         assert!(supports_refresh("claude"));
         assert!(supports_refresh("anthropic"));
         assert!(!supports_refresh("kimi"));
+    }
+
+    #[test]
+    fn the_refresh_job_skips_signed_out_providers_and_survives_a_failure() {
+        use std::cell::RefCell;
+        let asked = RefCell::new(Vec::new());
+        let refresh = |provider: &str| {
+            asked.borrow_mut().push(provider.to_string());
+            match provider {
+                "gemini" => bail!("Gemini refused the request"),
+                _ => Ok(Some(vec!["a".to_string()])),
+            }
+        };
+
+        assert!(refresh_lists(
+            |provider| matches!(provider, "claude" | "gemini" | "copilot"),
+            refresh
+        ));
+        // Listed order, no provider that is signed out, and Gemini's failure
+        // did not stop Copilot.
+        assert_eq!(*asked.borrow(), ["claude", "copilot", "gemini"]);
+
+        asked.borrow_mut().clear();
+        assert!(!refresh_lists(|_| false, refresh));
+        assert!(asked.borrow().is_empty());
+        assert!(!refresh_lists(|provider| provider == "gemini", refresh));
     }
 
     #[test]
