@@ -45,7 +45,7 @@ Versions compare as numbers, so 6.10 is newer than 6.9. cc-proxy keeps no list o
 - A provider with one line of models (Kimi, GLM, Grok) uses it for every name. Its small models go to `haiku`.
 - On GitHub Copilot, the Claude models answer the Claude names.
 
-When two lines of models compete for a name, cc-proxy isn't sure. `start` and `use` then show the guesses and ask once: `Use these? [Y/n]`. Your answer is saved. If there is nobody to answer (a script), cc-proxy uses its guesses for now and saves nothing.
+When two lines of models compete for a name, cc-proxy isn't sure. `start` and `use` then show their guesses and save nothing. A guess moves to a newer model when the provider lists one. Run `cc-proxy models choose` to fix a name for good.
 
 On a reseller, `start` and `use` ask for each name that has no model, the same way `cc-proxy models choose` does. Press Enter to skip a name. A skipped name stays empty, and the next `start` or `use` asks about it again.
 
@@ -80,7 +80,9 @@ This asks the provider which models your account can use, saves the list and upd
 
 Use `cc-proxy models refresh all` to refresh Claude, Anthropic, Antigravity, GitHub Copilot, Gemini, OpenCode Go, OpenCode Zen and providers you added. Providers that need sign-in are skipped until you sign in. Each failed refresh keeps its saved list; the command continues with the others and exits with an error if any refresh failed.
 
-Successful refreshes replace the saved list, so retired models disappear. The built-in lists are fallbacks until a live list has been saved. Your chosen tier mappings stay unchanged. Automatic defaults use the refreshed catalog on the next request.
+A running proxy does this by itself for the providers you are signed in to, a minute after it starts and then every 6 hours. A failed refresh keeps the saved list and logs `models_refresh_failed` in `proxy.log`. Providers you added are not refreshed this way: their list lives in `config.json`, so refresh them with the command above.
+
+Successful refreshes replace the saved list, so retired models disappear. The built-in lists are fallbacks until a live list has been saved. Your chosen tier mappings stay unchanged, so a name you chose keeps its model even when a newer one is listed. Choose again with `cc-proxy models choose`, or run `cc-proxy models reset <name>` to let cc-proxy pick. Automatic defaults use the refreshed catalog on the next request.
 
 Codex reads the Codex CLI's local model cache automatically. Cursor, Grok, Kimi and GLM do not have live discovery in cc-proxy yet. The command reports these limits rather than claiming to refresh them.
 

@@ -10,7 +10,7 @@ use crate::registry::Registry;
 use crate::route::{DIRECT, routable_providers};
 use crate::tiers::{self, Basis};
 use crate::ui::{self, Mood};
-use crate::{config, config_keys, models_map, prompt};
+use crate::{config, models_map, prompt};
 
 /// Where Claude Code goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,19 +43,19 @@ fn open_tiers(registry: &Registry, provider: &str) -> Vec<tiers::Mapping> {
         .collect()
 }
 
-/// Asks which model a Claude name should use, but only for the names with no
-/// model or only a guess, and only once: the answers are kept. A name with no
-/// model (a provider that resells other vendors' models has none until you
-/// choose) is asked with search, and Enter skips it. With no answer to read,
-/// guesses stay in use this time and nothing is kept.
+/// Asks which model a Claude name should use when it has none, and says so
+/// when it is only guessing. A name with no model (a provider that resells
+/// other vendors' models has none until you choose) is asked with search, and
+/// Enter skips it. A guess is never saved: it stays a guess, so it moves to a
+/// newer model when the provider lists one, until you choose with `models choose`.
 fn settle_tiers(registry: &Registry, provider: &str) -> Result<()> {
     let open = open_tiers(registry, provider);
     if open.is_empty() {
         return Ok(());
     }
-    let open_tiers: Vec<&'static str> = open.iter().map(|mapping| mapping.tier).collect();
     let name = ui::provider_name(provider);
     if open.iter().any(|mapping| mapping.model.is_none()) {
+        let open_tiers: Vec<&'static str> = open.iter().map(|mapping| mapping.tier).collect();
         ui::print_note(
             Mood::Awake,
             &[format!(
@@ -70,36 +70,17 @@ fn settle_tiers(registry: &Registry, provider: &str) -> Result<()> {
     )];
     lines.extend(open.iter().filter_map(|mapping| {
         Some(format!(
-            "{} would use {}.",
+            "{} uses {} for now.",
             mapping.tier,
             mapping.model.as_ref()?
         ))
     }));
+    lines.push(format!(
+        "It picks again when {name} lists a newer model. `cc-proxy models choose {provider}` \
+         fixes them for good."
+    ));
     ui::print_note(Mood::Unsure, &lines);
-    match prompt::ask_yes_no("Use these?", true)? {
-        None => {
-            ui::print_note(
-                Mood::Unsure,
-                &[format!(
-                    "No answer, so cc-proxy uses these guesses for now. \
-                     `cc-proxy models choose {provider}` picks them for good."
-                )],
-            );
-            Ok(())
-        }
-        Some(false) => models_map::choose(registry, provider, &open_tiers),
-        Some(true) => {
-            let paths: Vec<String> = open
-                .iter()
-                .map(|mapping| tiers::choice_key(provider, mapping.tier))
-                .collect();
-            let models = open.iter().filter_map(|mapping| mapping.model.clone());
-            config_keys::write_values(
-                paths.iter().map(String::as_str).zip(models.map(Into::into)),
-            )?;
-            Ok(())
-        }
-    }
+    Ok(())
 }
 
 fn pick_named(registry: &Registry, asked: &str) -> Result<Pick> {

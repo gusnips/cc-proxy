@@ -3,6 +3,11 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.14 (2026-11-11)
+
+- A running proxy now asks Claude, Anthropic, GitHub Copilot, Antigravity, Gemini, OpenCode Go and OpenCode Zen for their model lists a minute after it starts and then every 6 hours, for the ones you are signed in to. A model launched today shows up without `cc-proxy models refresh`. A failed refresh keeps the saved list and writes `models_refresh_failed` to `proxy.log`. Providers you added are still refreshed by hand, because their list lives in `config.json`.
+- `cc-proxy start` and `cc-proxy use` no longer ask `Use these?` or save a guess as your choice. Before, answering yes pinned the guess, so a newer model never replaced it. They now show the guesses and keep following the newest model until you pick one with `cc-proxy models choose`. A name you already pinned stays as it is. `cc-proxy models reset <name> --provider <provider>` lets cc-proxy pick it again.
+
 ## v0.4.13 (2026-11-10)
 
 - `cc-proxy models refresh claude` now asks Anthropic which models your Claude login can use, and `cc-proxy models refresh anthropic` does the same for an API key. Before, both used a fixed list, so a new model such as Fable 5.2 never showed up. The monitor's action menu now has `Refresh Claude model list` too, and `models refresh all` includes both. A name you pinned with `models set` stays as you set it. Run `cc-proxy models reset fable --provider claude` to follow the newest Fable again.

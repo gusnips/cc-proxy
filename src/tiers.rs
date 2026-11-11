@@ -526,6 +526,21 @@ mod tests {
     }
 
     #[test]
+    fn the_built_in_claude_list_is_sure_of_all_four_names() {
+        let found = derive(&ids(&[
+            "claude/claude-fable-5-1",
+            "claude/claude-opus-5-5",
+            "claude/claude-opus-4-8",
+            "claude/claude-sonnet-5-5",
+            "claude/claude-sonnet-4-6",
+            "claude/claude-haiku-5-5",
+            "claude/claude-haiku-4-5",
+        ]));
+        assert_eq!(found.len(), 4);
+        assert!(found.values().all(|guess| guess.confident), "{found:?}");
+    }
+
+    #[test]
     fn versions_compare_as_numbers() {
         let found = derive(&ids(&["gpt-6.9-sol", "gpt-6.10-sol"]));
         assert_eq!(found["opus"].model, "gpt-6.10-sol");
