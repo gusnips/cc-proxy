@@ -3,6 +3,10 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.15 (2026-11-15)
+
+- The monitor now refreshes each Claude account's usage every 5 minutes instead of every minute, reducing requests to Claude's usage endpoint. Other providers still refresh every minute. Press `r` for fresh values; if a provider has asked cc-proxy to wait, `r` respects that retry timer too.
+
 ## v0.4.14 (2026-11-11)
 
 - A running proxy now asks Claude, Anthropic, GitHub Copilot, Antigravity, Gemini, OpenCode Go and OpenCode Zen for their model lists a minute after it starts and then every 6 hours, for the ones you are signed in to. A model launched today shows up without `cc-proxy models refresh`. A failed refresh keeps the saved list and writes `models_refresh_failed` to `proxy.log`. Providers you added are still refreshed by hand, because their list lives in `config.json`.
