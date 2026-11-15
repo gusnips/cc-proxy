@@ -119,7 +119,7 @@ applies on the next request.
 | `auth.pauseRequests` | `false` | Holds new generations before they start until resumed (`p` in the monitor or `cc-proxy config set auth.pauseRequests false`). Active replies finish, and `count_tokens`, health and usage work.          |
 | `auth.waitForReset`  | `false` | With `auth.autoRotate` on, holds streamed Messages requests when every enabled account has a confirmed reset time, then rechecks at the earliest reset. Never waits on guessed limits or credit.         |
 | `auth.spreadChats`   | `5`     | How many of the top ready accounts of the request pool share new chats, whatever their provider. `1` sends every new chat to the first ready account. A chat stays on its account until it hits a limit. |
-| `auth.hourlyPing`    | `false` | Sends a 1-token request at the top of each hour, and a minute after an account's wait ends, to enabled accounts on plans with a rolling 5-hour window (`CCP_HOURLY_PING` overrides).                     |
+| `auth.hourlyPing`    | `false` | Sends a tiny request on startup, hourly and after waits end to start 5-hour or weekly reset timers. Runs while the proxy or a local panel is open, even with routing off (`CCP_HOURLY_PING` overrides).                     |
 
 Both `auth.pauseRequests` and `auth.waitForReset` live in `config.json` and stay
 in effect across monitor closes and proxy restarts until you turn them off.
@@ -163,27 +163,32 @@ The current account is used again once its wait ends. An account whose wait
 ends becomes eligible again. `cc-proxy auth status codex` shows each account's
 wait.
 
-To start rolling 5-hour quota windows early while `cc-proxy` is running, enable
-`auth.hourlyPing`:
+To start 5-hour or weekly reset timers early while the proxy or a local
+monitor panel is open, enable `auth.hourlyPing`:
 
 ```sh
 cc-proxy config set auth.hourlyPing true
 ```
 
-cc-proxy sends a one-token request using the smallest tier model to every
-account that is turned on in the request pool, not only the one in use. It does
-this at the start of every hour (`XX:00`), and again a minute after an
-account's wait ends: a window that opens at 06:10 starts at 06:11, not at 07:00.
-The hourly ping also starts a window that ended without a limit, up to an hour
-late. Rows that are turned off are not pinged. Only plans with a rolling
-window get it: Claude, Codex, Kimi, Antigravity, OpenCode Go and GLM. A key that
-pays per token (Anthropic, Gemini, OpenCode Zen, a custom provider) would be
-charged for every ping, and a monthly plan (Cursor, Copilot) has no window to
-start, so those are left alone. A saved wait never stops a ping: a window that
-ends at the top of the hour is still counted as waiting for a moment, so the
-provider decides. An account that is still limited answers `429`, and cc-proxy
-saves that wait again. Free Claude accounts are skipped. With routing off there
-is nothing to ping.
+cc-proxy sends a tiny request using the smallest tier model to every account
+that is turned on in the request pool, not only the one in use. It runs when
+the proxy or first local panel opens, at the start of every hour (`XX:00`)
+and a minute after an account's wait ends. Weekly-only Claude and Codex plans
+are included. Each ping uses a small amount of the account's allowance.
+
+Pings work with proxy routing off and with the proxy stopped while a local
+panel stays open. The proxy and panels share one scheduler, so opening another
+panel does not send a second batch. Closing the process that owns it lets
+another open panel or the proxy take over within 30 seconds. Explicit
+`--url` panels and demo mode never send pings.
+
+Rows that are turned off are not pinged. Only plans with a rolling window
+get it: Claude, Codex, Kimi, Antigravity, OpenCode Go and GLM. A key that pays
+per token (Anthropic, Gemini, OpenCode Zen, a custom provider) would be charged
+for every ping, and a monthly plan (Cursor, Copilot) has no timer to start, so
+those are left alone. The provider decides whether an account can take the
+request: a limited account answers `429`, and cc-proxy saves that wait again.
+Free Claude accounts are skipped.
 
 ## Request pool
 

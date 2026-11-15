@@ -97,12 +97,12 @@ static CONFIG_KEYS: &[ConfigKey] = &[
         blurb: "new chats share the top ready accounts of the list, whatever the provider; 1 sends every new chat to the first ready one",
     },
     ConfigKey {
-        label: "Hourly 5-hour window ping",
+        label: "Start reset timers early",
         path: "auth.hourlyPing",
         kind: ConfigKind::Bool,
         env: &["CCP_HOURLY_PING"],
         default: Some("false"),
-        blurb: "ping each account with a 5h window every hour, and a minute after its wait ends, to start the window early",
+        blurb: "send a tiny request on open, hourly and after waits end to start 5-hour or weekly timers; uses a small amount of your allowance",
     },
     ConfigKey {
         label: "Listener port",

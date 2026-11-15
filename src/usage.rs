@@ -1260,22 +1260,35 @@ fn parse_antigravity(body: &Value, plan: Option<String>) -> PlanUsage {
     }
 }
 
-/// ChatGPT's `wham/usage`: `plan_type`, and `rate_limit.primary_window`
-/// (5 hours) and `secondary_window` (weekly), each with a `used_percent`.
+/// ChatGPT's `wham/usage` names windows by priority, not duration. A weekly-only
+/// plan reports its week as `primary_window`, so use `limit_window_seconds`.
 fn parse_chatgpt(body: &Value) -> PlanUsage {
-    let window = |key: &str| {
-        let window = body.get("rate_limit")?.get(key)?;
-        Some(Window {
-            used_percent: number(window.get("used_percent")?)?,
-            resets_at_ms: first_present(window, &["resets_at", "reset_at"]).and_then(reset_ms),
-        })
-    };
-    PlanUsage {
+    let mut usage = PlanUsage {
         plan: text(body.get("plan_type")),
-        five_hour: window("primary_window"),
-        weekly: window("secondary_window"),
         ..Default::default()
+    };
+    for (key, default_seconds) in [("primary_window", 18_000), ("secondary_window", 604_800)] {
+        let Some(window) = body.get("rate_limit").and_then(|limits| limits.get(key)) else {
+            continue;
+        };
+        let Some(used_percent) = window.get("used_percent").and_then(number) else {
+            continue;
+        };
+        let target = match window
+            .get("limit_window_seconds")
+            .and_then(Value::as_u64)
+            .unwrap_or(default_seconds)
+        {
+            18_000 => &mut usage.five_hour,
+            604_800 => &mut usage.weekly,
+            _ => continue,
+        };
+        *target = Some(Window {
+            used_percent,
+            resets_at_ms: first_present(window, &["resets_at", "reset_at"]).and_then(reset_ms),
+        });
     }
+    usage
 }
 
 /// Kimi's `/usages`: the plan in `user.membership.level` (or `subType`),
@@ -1632,6 +1645,49 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn chatgpt_weekly_only_plan_labels_its_primary_window_as_weekly() {
+        let usage = parse_chatgpt(&serde_json::json!({
+            "plan_type": "prolite",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 80,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1795309788_i64
+                },
+                "secondary_window": null
+            }
+        }));
+        assert_eq!(usage.five_hour, None);
+        assert_eq!(usage.weekly, window(80.0, Some(1_795_309_788_000)));
+        assert_eq!(usage.plan.as_deref(), Some("prolite"));
+        let MonitorUsage::Reported(windows) = usage.monitor_usage() else {
+            panic!("expected reported usage");
+        };
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "week");
+        assert_eq!(windows[0].remaining_percent, 20.0);
+        assert!(
+            serde_json::to_value(&usage)
+                .unwrap()
+                .get("five_hour")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn chatgpt_classifies_both_windows_by_duration_and_skips_unknown_durations() {
+        let mut body = serde_json::json!({"rate_limit": {
+            "primary_window": {"used_percent": 12, "limit_window_seconds": 604800},
+            "secondary_window": {"used_percent": 34, "limit_window_seconds": 18000}
+        }});
+        let usage = parse_chatgpt(&body);
+        assert_eq!(usage.weekly, window(12.0, None));
+        assert_eq!(usage.five_hour, window(34.0, None));
+        body["rate_limit"]["secondary_window"]["limit_window_seconds"] = 3600.into();
+        assert_eq!(parse_chatgpt(&body).five_hour, None);
     }
 
     #[test]

@@ -89,6 +89,9 @@ pub fn run_attached_monitor(
     listen_url: String,
     local: bool,
 ) -> Result<MonitorExit, anyhow::Error> {
+    if local {
+        crate::rotation::spawn_window_pings(std::sync::Arc::new(Registry::new()));
+    }
     let setup_text = format!(
         "Attached to {listen_url}\nClosing the monitor leaves the proxy running.\nUse the Accounts tab to manage a local proxy. Explicit --url connections are read-only."
     );

@@ -3,6 +3,11 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.16 (2026-11-15)
+
+- Weekly-only Codex accounts now show `week`, not `5h`. Labels use the duration Codex reports, so plans with both limits still show both.
+- `Start reset timers early` (`auth.hourlyPing`) now covers weekly-only plans too. Pings start when the proxy or first local panel opens, then run hourly and after waits end. They keep working with routing off or the proxy stopped while a local panel stays open. The proxy and panels share one scheduler. Disabled rows and pay-per-token providers remain excluded. Each ping uses a small amount of your allowance.
+
 ## v0.4.15 (2026-11-15)
 
 - The monitor now refreshes each Claude account's usage every 5 minutes instead of every minute, reducing requests to Claude's usage endpoint. Other providers still refresh every minute. Press `r` for fresh values; if a provider has asked cc-proxy to wait, `r` respects that retry timer too.

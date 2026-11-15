@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -557,7 +557,7 @@ fn ms_until_next_hour(now_ms: u64) -> u64 {
     HOUR_MS - (now_ms % HOUR_MS)
 }
 
-/// Providers whose plans run a rolling window (5 hours, then a week) that
+/// Providers whose plans run a rolling 5-hour or weekly window that
 /// starts with the first request. Only these gain from an early start.
 /// A pay-as-you-go key (Anthropic, Gemini, OpenCode Zen, a custom provider)
 /// would be charged for every ping, and a monthly plan (Cursor, Copilot) has no
@@ -568,8 +568,8 @@ const WINDOWED_PLANS: &[&str] = &["antigravity", "claude", "codex", "glm", "kimi
 /// The providers one hourly ping reaches: the providers with an enabled row in
 /// the pool, in pool order, when their plan has a window.
 fn pinged_providers(route: &crate::config::Route) -> Vec<&str> {
-    // Routing off means Claude Code bypasses the proxy: there is no pool.
-    let Some(primary) = route.target() else {
+    // Enabled rows still need their timers started when Claude Code runs directly.
+    let Some(primary) = route.provider.as_deref() else {
         return Vec::new();
     };
     let mut pool: Vec<&str> = Vec::new();
@@ -589,40 +589,39 @@ const PING_TICK: std::time::Duration = std::time::Duration::from_secs(30);
 /// 429 and saves the wait again.
 const READY_PING_DELAY_MS: u64 = 60_000;
 
-/// Sends a one-token Messages request to every enabled account of the request
-/// pool, not only the one in use, for each provider whose plan has a rolling
-/// window (see `WINDOWED_PLANS`). The windows start counting down early while
-/// `cc-proxy` is running. Controlled by `auth.hourlyPing` (read on each tick).
+/// Sends a one-token Messages request to every enabled subscription account.
+/// Runs on proxy or local panel startup, hourly and a minute after waits end.
+/// `auth.hourlyPing` is checked on every tick, independently of proxy routing.
 ///
-/// Two moments send it. The first is the start of every hour (`XX:00`), which
-/// also catches a window that ended without a limit. The second is a minute
-/// after an account's wait ends, so a window that opens at 06:10 starts at 06:11
-/// and not at 07:00. The loop ticks every `PING_TICK` and reads the wall clock,
-/// so a sleeping laptop pings on waking, not whenever its timer catches up.
-///
-/// A saved wait never stops a ping. A window that ends at the top of the hour
-/// is still "waiting" for a moment when the tick fires, and skipping it would
-/// leave the next window unstarted for a whole hour. The provider answers: a
-/// limited account says 429, which also refreshes its wait.
-// ponytail: a window that ends with no limit is only seen by the hourly ping,
-// up to an hour late. Upgrade path: read the window's end from each ping's
-// answer and ping again a minute after it.
+/// The proxy and panels share one scheduler lock. If its process closes,
+/// another open process takes over on its next tick. A new scheduler starts
+/// with a ping, so weekly-only plans do not wait for a real conversation.
+// ponytail: ready-ping history stays in memory. After a restart the immediate
+// pass covers accounts whose reset was missed while cc-proxy was closed.
 pub(crate) fn spawn_window_pings(registry: Arc<Registry>) {
     tokio::spawn(async move {
+        let path = crate::paths::config_dir().join("window-ping.lock");
+        let _lock = loop {
+            match window_ping_lock(&path) {
+                Ok(Some(lock)) => break lock,
+                Ok(None) => tokio::time::sleep(PING_TICK).await,
+                Err(error) => {
+                    tracing::warn!(%error, "Could not start usage window pings");
+                    return;
+                }
+            }
+        };
         let cooldowns = Cooldowns::new();
         let mut ready = ReadyPings::default();
-        let started = now_ms();
-        let mut next_hour = started + ms_until_next_hour(started);
+        let mut next_hour = 0;
+        let mut interval = tokio::time::interval(PING_TICK);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::time::sleep(PING_TICK).await;
+            interval.tick().await;
             let now = now_ms();
-            let hour_is_up = now >= next_hour;
-            if hour_is_up {
-                next_hour = now + ms_until_next_hour(now);
-            }
             if !crate::config::auth_hourly_ping() {
-                // Waits seen before it went off say nothing about the time after.
                 ready = ReadyPings::default();
+                next_hour = 0;
                 continue;
             }
             // A failed read keeps what was seen: no waits is not "all ended".
@@ -631,13 +630,28 @@ pub(crate) fn spawn_window_pings(registry: Arc<Registry>) {
             };
             let due = ready.look(now, waits);
             let route = crate::config::route();
-            if hour_is_up {
+            if now >= next_hour {
+                next_hour = now + ms_until_next_hour(now);
                 ping_routed_providers(&registry, &route, &cooldowns, None).await;
             } else if !due.is_empty() {
                 ping_routed_providers(&registry, &route, &cooldowns, Some(&due)).await;
             }
         }
     });
+}
+
+/// One process owns the scheduler; the OS releases the lock if it closes.
+fn window_ping_lock(path: &Path) -> io::Result<Option<File>> {
+    fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| io::Error::other("the ping lock has no folder"))?,
+    )?;
+    let lock = File::create(path)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(error)) => Err(error),
+    }
 }
 
 /// Finds the accounts whose wait just ended and when each one is due a ping.
@@ -1997,7 +2011,19 @@ mod tests {
     }
 
     #[test]
-    fn the_hourly_ping_reaches_only_routed_providers_with_a_window() {
+    fn window_ping_lock_allows_one_scheduler_and_releases_on_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config-a/window-ping.lock");
+        let leader = window_ping_lock(&path).unwrap().unwrap();
+        assert!(window_ping_lock(&path).unwrap().is_none());
+        let other_pool = dir.path().join("config-b/window-ping.lock");
+        assert!(window_ping_lock(&other_pool).unwrap().is_some());
+        drop(leader);
+        assert!(window_ping_lock(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn the_hourly_ping_reaches_enabled_subscriptions_even_with_routing_off() {
         // Primary first, then fallbacks in order. Pay-as-you-go keys and monthly
         // plans are left out, and so is a provider named twice.
         let route = route_to(
@@ -2014,10 +2040,10 @@ mod tests {
         assert_eq!(pinged_providers(&route), ["codex", "antigravity", "claude"]);
         // A key that bills every token is never the target, even as the primary.
         assert!(pinged_providers(&route_to("anthropic", &[])).is_empty());
-        // Routing off: Claude Code bypasses the proxy, so there is no pool.
+        // The pool stays enabled while Claude Code runs directly.
         let mut off = route_to("codex", &["kimi"]);
         off.on = false;
-        assert!(pinged_providers(&off).is_empty());
+        assert_eq!(pinged_providers(&off), ["codex", "kimi"]);
         // Flat plans that sign in with a key still count: their windows are the point.
         assert_eq!(
             pinged_providers(&route_to("opencode", &["glm"])),
@@ -2065,14 +2091,10 @@ mod tests {
         let cooldowns = Cooldowns {
             path: dir.path().join("rotation.json"),
         };
-        // Kimi is signed in but not routed. Anthropic is routed but bills per token.
-        ping_routed_providers(
-            &registry,
-            &route_to("codex", &["anthropic", "antigravity"]),
-            &cooldowns,
-            None,
-        )
-        .await;
+        // Kimi is signed in but not enabled. Anthropic bills per token.
+        let mut route = route_to("codex", &["anthropic", "antigravity"]);
+        route.on = false;
+        ping_routed_providers(&registry, &route, &cooldowns, None).await;
         let calls = |counter: &Arc<std::sync::atomic::AtomicUsize>| {
             counter.load(std::sync::atomic::Ordering::SeqCst)
         };
