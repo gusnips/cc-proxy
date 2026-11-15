@@ -600,7 +600,7 @@ const READY_PING_DELAY_MS: u64 = 60_000;
 // pass covers accounts whose reset was missed while cc-proxy was closed.
 pub(crate) fn spawn_window_pings(registry: Arc<Registry>) {
     tokio::spawn(async move {
-        let path = crate::paths::state_dir().join("window-ping.lock");
+        let path = crate::paths::config_dir().join("window-ping.lock");
         let _lock = loop {
             match window_ping_lock(&path) {
                 Ok(Some(lock)) => break lock,
@@ -2013,9 +2013,11 @@ mod tests {
     #[test]
     fn window_ping_lock_allows_one_scheduler_and_releases_on_close() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state/window-ping.lock");
+        let path = dir.path().join("config-a/window-ping.lock");
         let leader = window_ping_lock(&path).unwrap().unwrap();
         assert!(window_ping_lock(&path).unwrap().is_none());
+        let other_pool = dir.path().join("config-b/window-ping.lock");
+        assert!(window_ping_lock(&other_pool).unwrap().is_some());
         drop(leader);
         assert!(window_ping_lock(&path).unwrap().is_some());
     }
