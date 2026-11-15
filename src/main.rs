@@ -368,6 +368,7 @@ fn run() -> Result<()> {
                     cc_proxy::monitor::remote::RemoteMonitor::wait_for(client, url.clone()).await
                 }
             })?;
+            let _runtime = runtime.enter();
             tui::run_attached_monitor(|| monitor.snapshot(), url.to_string(), !from_flag)?;
             Ok(())
         }
