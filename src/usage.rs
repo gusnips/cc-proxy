@@ -32,10 +32,12 @@ use crate::providers::opencode::client::{OpenCodeClient, OpenCodeUsageResponse};
 use crate::ui;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Claude's usage endpoint needs less frequent polling than the other providers.
+const CLAUDE_REFRESH_AFTER: Duration = Duration::from_secs(300);
 /// How long to leave an account alone after a 429 that gives no `Retry-After`.
 const RATE_LIMIT_FLOOR: Duration = Duration::from_secs(300);
 /// The longest wait a `Retry-After` can ask for, so one odd answer can't switch
-/// the automatic refresh off for a day. The `r` key still asks at once.
+/// usage lookups off for a day.
 const RATE_LIMIT_CEILING: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -281,7 +283,7 @@ fn wait_left(provider: UsageProvider, account: &str) -> Option<Duration> {
     left
 }
 
-/// A 429 makes the next automatic refresh skip the account.
+/// A 429 makes automatic and manual refreshes skip the account.
 fn start_wait(provider: UsageProvider, account: &str, retry_after: Option<u64>) {
     lock_waits().insert(
         (provider.id(), account.to_string()),
@@ -337,6 +339,25 @@ struct PlanUsage {
     /// instead of in `five_hour` and `weekly`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     groups: Vec<GroupUsage>,
+}
+
+type ClaudeUsageCache = HashMap<String, (Instant, PlanUsage)>;
+
+// ponytail: cache per process, like rate-limit waits. Multiple monitors still
+// poll independently; share the cache on disk if that becomes a problem.
+static CLAUDE_USAGE: LazyLock<Mutex<ClaudeUsageCache>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn lock_claude_usage() -> MutexGuard<'static, ClaudeUsageCache> {
+    CLAUDE_USAGE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+fn cached_claude_usage(id: &str, now: Instant) -> Option<PlanUsage> {
+    let cache = lock_claude_usage();
+    let (fetched_at, usage) = cache.get(id)?;
+    (now.saturating_duration_since(*fetched_at) < CLAUDE_REFRESH_AFTER).then(|| usage.clone())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -739,15 +760,16 @@ fn opencode_account_usage(usage: &mut HashMap<(String, String), MonitorUsage>) {
 /// Structured usage per saved account for the monitor. Call on its background
 /// worker, never a request. UUIDs join the results without exposing credentials.
 ///
-/// Asks every account, including the ones an earlier 429 told cc-proxy to leave
-/// alone: this is the first read and the `r` key.
+/// The first read and the `r` key ask for fresh usage, but still respect an
+/// account's active rate-limit wait.
 pub(crate) fn account_usage() -> HashMap<(String, String), MonitorUsage> {
-    lock_waits().clear();
+    lock_claude_usage().clear();
     account_usage_paced()
 }
 
-/// Like `account_usage`, for the refresh nobody asked for. An account that
-/// answered 429 is skipped until its wait is over, and its row says how long.
+/// Like `account_usage`, for the refresh nobody asked for. Claude's successful
+/// lookups are reused for five minutes. A 429 skips the account until its wait
+/// is over, and its row says how long.
 pub(crate) fn account_usage_paced() -> HashMap<(String, String), MonitorUsage> {
     let mut usage = HashMap::new();
     for provider in ["claude", "codex", "kimi", "grok", "antigravity"] {
@@ -999,6 +1021,11 @@ async fn fetch_account(
     id: &str,
     client: &reqwest::Client,
 ) -> Result<PlanUsage, Failure> {
+    if provider == UsageProvider::Claude
+        && let Some(usage) = cached_claude_usage(id, Instant::now())
+    {
+        return Ok(usage);
+    }
     let usage = match provider {
         UsageProvider::Claude => claude(client, id).await?,
         UsageProvider::Codex => codex(client, id).await?,
@@ -1010,6 +1037,9 @@ async fn fetch_account(
     let free = usage.plan.as_deref() == Some("free");
     if !free && usage.five_hour.is_none() && usage.weekly.is_none() && usage.groups.is_empty() {
         return Err(Failure::Unreadable);
+    }
+    if provider == UsageProvider::Claude {
+        lock_claude_usage().insert(id.to_string(), (Instant::now(), usage.clone()));
     }
     Ok(usage)
 }
@@ -1902,6 +1932,43 @@ mod tests {
             assert!(!short.contains("cc-proxy usage"), "{short}");
             assert!(!short.contains("auth login"), "{short}");
         }
+    }
+
+    #[test]
+    fn claude_usage_is_cached_per_account_for_five_minutes() {
+        let now = Instant::now();
+        let account = "claude-cache-test-account";
+        let other = "claude-cache-test-other";
+        let usage = PlanUsage {
+            five_hour: Some(Window {
+                used_percent: 42.0,
+                resets_at_ms: Some(1_700_000_000_000),
+            }),
+            ..PlanUsage::default()
+        };
+        let other_usage = PlanUsage {
+            plan: Some("free".into()),
+            ..PlanUsage::default()
+        };
+        lock_claude_usage().insert(account.into(), (now, usage.clone()));
+        lock_claude_usage().insert(other.into(), (now, other_usage.clone()));
+
+        assert_eq!(CLAUDE_REFRESH_AFTER, Duration::from_secs(300));
+        for seconds in [0, 60, 299] {
+            assert_eq!(
+                cached_claude_usage(account, now + Duration::from_secs(seconds)),
+                Some(usage.clone())
+            );
+        }
+        assert_eq!(cached_claude_usage(other, now), Some(other_usage));
+        assert_eq!(cached_claude_usage("claude-cache-test-missing", now), None);
+        assert_eq!(
+            cached_claude_usage(account, now + CLAUDE_REFRESH_AFTER),
+            None
+        );
+
+        lock_claude_usage().remove(account);
+        lock_claude_usage().remove(other);
     }
 
     #[test]
