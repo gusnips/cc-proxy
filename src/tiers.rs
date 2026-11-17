@@ -75,15 +75,22 @@ fn version_part(token: &str) -> Option<Vec<u32>> {
     digits.split('.').map(|part| part.parse().ok()).collect()
 }
 
+pub(crate) fn is_chat_model(id: &str) -> bool {
+    !id.split(['-', '/', ':', '_']).any(|token| {
+        NOT_FOR_CHAT
+            .iter()
+            .any(|word| word.eq_ignore_ascii_case(token))
+    })
+}
+
 fn parse(id: &str) -> Option<Parsed<'_>> {
-    let lower = id.to_ascii_lowercase();
-    let tokens: Vec<&str> = lower
-        .split(['-', '/', ':', '_'])
-        .filter(|token| !token.is_empty())
-        .collect();
-    if tokens.iter().any(|token| NOT_FOR_CHAT.contains(token)) {
+    if !is_chat_model(id) {
         return None;
     }
+    let lower = id.to_ascii_lowercase();
+    let tokens = lower
+        .split(['-', '/', ':', '_'])
+        .filter(|token| !token.is_empty());
 
     let mut tiers: BTreeSet<&'static str> = BTreeSet::new();
     let mut version = Vec::new();

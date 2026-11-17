@@ -200,6 +200,7 @@ change fixed choices, Enter edits a value. Changes save at once.
 | Provider       | Account                                | Model selection                                                          |
 | -------------- | -------------------------------------- | ------------------------------------------------------------------------ |
 | Codex          | ChatGPT Plus or Pro                    | Any `gpt-*` ID (unlisted ones forward raw; `-fast` = priority tier)      |
+| OpenAI API     | OpenAI API key (billed separately)     | `openai-api/<model-id>`                                                  |
 | Kimi           | A Kimi account with Kimi Code access   | `k3`/`kimi-k3` (legacy `kimi-for-coding`); unlisted `kimi-*` forward raw |
 | Grok           | grok.com                               | `grok-*` IDs (unlisted ones forward raw)                                 |
 | Antigravity    | Google account with Antigravity access | `antigravity/<id>`; `cc-proxy models list antigravity` lists models      |

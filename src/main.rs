@@ -1229,6 +1229,7 @@ fn print_models(registry: &Registry, full: bool, filter_provider: Option<&str>) 
     let styled = ui::styled(&std::io::stdout());
     let builtins = [
         "codex",
+        "openai-api",
         "kimi",
         "grok",
         "opencode",
@@ -1256,7 +1257,9 @@ fn print_models(registry: &Registry, full: bool, filter_provider: Option<&str>) 
             continue;
         };
         let name = ui::strong(&provider, ui::provider_color(&provider), styled);
-        if full || provider != "cursor" {
+        if models.is_empty() {
+            println!("{name}: no models saved. Run `cc-proxy models refresh {provider}`.");
+        } else if full || provider != "cursor" {
             println!("{name}: {}", models.join(", "));
         } else {
             println!("{name}: {}", compact_cursor_list(models));

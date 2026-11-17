@@ -61,7 +61,11 @@ pub(crate) fn fetch_anthropic(
     fetch_ids(base_url, &headers, timeout)
 }
 
-fn fetch_ids(base_url: &str, headers: &[(&str, String)], timeout: Duration) -> Result<Vec<String>> {
+pub(crate) fn fetch_ids(
+    base_url: &str,
+    headers: &[(&str, String)],
+    timeout: Duration,
+) -> Result<Vec<String>> {
     let mut url = reqwest::Url::parse(base_url)?;
     let path = url.path().trim_end_matches('/');
     let path = if path.is_empty() {

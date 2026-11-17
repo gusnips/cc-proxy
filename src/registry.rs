@@ -76,6 +76,10 @@ impl Registry {
                 Arc::new(crate::providers::custom::CustomProvider::new_anthropic()),
             ),
             (
+                crate::providers::custom::OPENAI_API.into(),
+                Arc::new(crate::providers::custom::CustomProvider::new_openai_api()),
+            ),
+            (
                 "gemini".into(),
                 Arc::new(crate::providers::gemini::GeminiProvider::new()),
             ),

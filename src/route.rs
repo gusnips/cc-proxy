@@ -19,8 +19,9 @@ use crate::ui::{self, Mood};
 use crate::{claude_settings, config, config_keys, daemon, pool, tiers};
 
 /// The built-in providers `start` and `use` can send Claude Code to.
-pub const PROVIDERS: [&str; 12] = [
+pub const PROVIDERS: [&str; 13] = [
     "codex",
+    crate::providers::custom::OPENAI_API,
     "kimi",
     "cursor",
     "grok",
@@ -186,10 +187,12 @@ fn picker_models(registry: &Registry, target: &str) -> Vec<String> {
         .iter()
         .map(|tier| (*tier).to_string())
         .collect();
-    let whole_catalog = matches!(target, "codex" | "antigravity" | "gemini")
-        || registry
-            .provider(target)
-            .is_some_and(|handler| handler.aggregator());
+    let whole_catalog = matches!(
+        target,
+        "codex" | "antigravity" | "gemini" | crate::providers::custom::OPENAI_API
+    ) || registry
+        .provider(target)
+        .is_some_and(|handler| handler.aggregator());
     let catalog = registry.catalog_for(target);
     if whole_catalog && catalog.len() <= PICKER_CATALOG_LIMIT {
         for model in catalog {
