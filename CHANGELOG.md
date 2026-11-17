@@ -3,6 +3,10 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.18 (2026-11-17)
+
+- OpenAI API is now built in. Run `cc-proxy auth login openai-api` and `cc-proxy use openai-api` to fetch the models your key can access and use them from Claude Code. API requests are billed separately from ChatGPT. Use the `openai-api/` prefix to pick API models directly. Bare `gpt-*` requests keep their existing routes.
+
 ## v0.4.17 (2026-11-17)
 
 - `cc-proxy models refresh codex` now fetches models from OpenAI using your saved Codex sign-in. You don't need to open or update the Codex CLI. The proxy also refreshes the list in the background and keeps the last saved list if a refresh fails. When Codex is active, its models show up in Claude Code's `/model` picker.
