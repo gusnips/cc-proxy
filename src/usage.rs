@@ -24,7 +24,7 @@ use crate::providers::claude::auth::{
 use crate::providers::codex::auth::constants::CODEX_API_ENDPOINT;
 use crate::providers::codex::auth::manager::CodexAuthManager;
 use crate::providers::codex::auth::token_store as codex_tokens;
-use crate::providers::codex::client::{build_codex_usage_headers, codex_usage_endpoint};
+use crate::providers::codex::client::{build_codex_read_headers, codex_usage_endpoint};
 use crate::providers::kimi::auth::headers::common_headers;
 use crate::providers::kimi::auth::manager::KimiAuthManager;
 use crate::providers::kimi::auth::token_store as kimi_tokens;
@@ -1126,8 +1126,7 @@ async fn codex(client: &reqwest::Client, id: &str) -> Result<PlanUsage, Failure>
         .get_auth()
         .await
         .map_err(|_| Failure::SignInUnusable)?;
-    let headers =
-        build_codex_usage_headers(&auth).map_err(|error| Failure::Setup(error.message))?;
+    let headers = build_codex_read_headers(&auth).map_err(|error| Failure::Setup(error.message))?;
     let url = codex_usage_endpoint(&config::codex_base_url(CODEX_API_ENDPOINT));
     let body = get_json(client, &url, headers).await?;
     Ok(parse_chatgpt(&body))

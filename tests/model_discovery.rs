@@ -128,6 +128,72 @@ fn gemini_refresh_reads_every_page_and_keeps_the_last_good_list_on_failure() {
 }
 
 #[test]
+fn codex_refresh_loads_cloud_models_without_touching_the_cli_cache() {
+    let config = tempfile::tempdir().unwrap();
+    common::write_auth(config.path(), "codex");
+    let cli_cache = config.path().join("models_cache.json");
+    let old = br#"{"models":[{"slug":"gpt-retired-remote"}]}"#;
+    std::fs::write(&cli_cache, old).unwrap();
+    let list = || cli(config.path(), &["models", "list", "codex"], &[]);
+    assert!(String::from_utf8_lossy(&list().stdout).contains("gpt-retired-remote"));
+
+    let models = json!({"models": [
+        {"slug": "gpt-9-astra", "use_responses_lite": true},
+        {"slug": "gpt-hidden-remote", "visibility": "hide"},
+        {"slug": "gpt-unsupported-remote", "supported_in_api": false}
+    ]});
+    let (url, upstream) = mock(vec![
+        (200, models.clone()),
+        (200, json!({"models": []})),
+        (503, json!({})),
+    ]);
+    let base_url = format!("{url}/backend-api/codex/responses/");
+    let refresh = || {
+        cli(
+            config.path(),
+            &["models", "refresh", "codex"],
+            &[("CCP_CODEX_BASE_URL", &base_url)],
+        )
+    };
+    let output = refresh();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Codex lists 1 models now."));
+    let saved = config.path().join("codex/models.json");
+    let before = std::fs::read(&saved).unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&before).unwrap(), models);
+    let listing = list();
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    assert!(listing.contains("gpt-9-astra"));
+    for absent in [
+        "gpt-retired-remote",
+        "gpt-hidden-remote",
+        "gpt-unsupported-remote",
+    ] {
+        assert!(!listing.contains(absent));
+    }
+    for _ in 0..2 {
+        let failed = refresh();
+        assert!(!failed.status.success());
+        assert!(String::from_utf8_lossy(&failed.stderr).contains("The saved list has not changed"));
+        assert_eq!(std::fs::read(&saved).unwrap(), before);
+    }
+    assert_eq!(std::fs::read(cli_cache).unwrap(), old);
+    for request in upstream.join().unwrap() {
+        assert!(request.starts_with("GET /backend-api/codex/models?client_version="));
+        assert!(request.contains("authorization: Bearer test-access"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("chatgpt-account-id: acct_test")
+        );
+    }
+}
+
+#[test]
 fn all_refresh_reports_failures_and_still_updates_other_providers() {
     let config = tempfile::tempdir().unwrap();
     cache(config.path(), "opencode", &["kept-model"]);

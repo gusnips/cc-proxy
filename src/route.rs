@@ -186,7 +186,7 @@ fn picker_models(registry: &Registry, target: &str) -> Vec<String> {
         .iter()
         .map(|tier| (*tier).to_string())
         .collect();
-    let whole_catalog = matches!(target, "antigravity" | "gemini")
+    let whole_catalog = matches!(target, "codex" | "antigravity" | "gemini")
         || registry
             .provider(target)
             .is_some_and(|handler| handler.aggregator());

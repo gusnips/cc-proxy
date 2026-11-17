@@ -363,9 +363,8 @@ pub fn build_codex_transcription_headers(
     Ok(headers)
 }
 
-/// Headers for ChatGPT's usage endpoint: the token, the account it belongs
-/// to, and the user agent every other Codex call sends.
-pub fn build_codex_usage_headers(auth: &StoredAuth) -> Result<http::HeaderMap, CodexError> {
+/// Read-only Codex endpoints use JSON, the saved sign-in and the account ID.
+pub fn build_codex_read_headers(auth: &StoredAuth) -> Result<http::HeaderMap, CodexError> {
     let mut headers = http::HeaderMap::new();
     headers.insert(
         http::header::ACCEPT,

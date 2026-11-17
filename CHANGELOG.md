@@ -3,6 +3,10 @@ title: Changelog
 description: Release notes for cc-proxy.
 ---
 
+## v0.4.17 (2026-11-17)
+
+- `cc-proxy models refresh codex` now fetches models from OpenAI using your saved Codex sign-in. You don't need to open or update the Codex CLI. The proxy also refreshes the list in the background and keeps the last saved list if a refresh fails. When Codex is active, its models show up in Claude Code's `/model` picker.
+
 ## v0.4.16 (2026-11-15)
 
 - Weekly-only Codex accounts now show `week`, not `5h`. Labels use the duration Codex reports, so plans with both limits still show both.

@@ -34,11 +34,11 @@ To see how much of your 5-hour and weekly limits you have used, and when they re
 
 ## Models and service tiers
 
-Use `cc-proxy models list` as the current catalog. Model access depends on your ChatGPT account. A model rejected by the subscription produces the upstream error verbatim.
+Run `cc-proxy models refresh codex` to fetch the current list from OpenAI using your saved cc-proxy sign-in. You don't need the Codex CLI. Run `cc-proxy models list codex` to see the models, or pick one in Claude Code with `/model` while your active provider is Codex. Model access depends on your ChatGPT account.
 
-Claude-style names go to the newest Codex model of the matching family: `fable` to astra, `opus` to sol, `sonnet` to terra and `haiku` to luna. The name can carry any version, such as `claude-sonnet-5-5`, so a new Claude release needs no update. With the models built into cc-proxy today, that is `gpt-6-astra`, `gpt-6.1-sol`, `gpt-5.6-terra` and `gpt-6-luna`. A newer model in the Codex CLI cache takes over by itself. Set `codex.model` to pin one model instead.
+Claude-style names go to the newest Codex model of the matching family: `fable` to astra, `opus` to sol, `sonnet` to terra and `haiku` to luna. The name can carry any version, such as `claude-sonnet-5-5`, so a new Claude release needs no update. A refreshed list can update automatic choices without a restart. Use `cc-proxy models choose codex` to keep a specific model for each name.
 
-Append `-fast` to a Codex model to request `service_tier: "priority"`. For example, `gpt-6-sol-fast` sends `gpt-6-sol` with the priority tier. Models discovered in the Codex CLI cache and unlisted `gpt-*` IDs keep this behavior.
+Append `-fast` to a Codex model to request `service_tier: "priority"`. For example, `gpt-6-sol-fast` sends `gpt-6-sol` with the priority tier. Models from the catalog and unlisted `gpt-*` IDs also accept this suffix.
 
 Use `gpt-6-astra-ultrafast` to request `service_tier: "ultrafast"`. Astra is the only model with known ultrafast support in the proxy's tier list. The CLI cache does not report tier support. An `-ultrafast` suffix on another Codex model is removed and requests priority instead, including unlisted `gpt-*` IDs. Use one suffix; names such as `gpt-6-astra-fast-ultrafast` are rejected.
 
