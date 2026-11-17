@@ -56,21 +56,7 @@ pub fn anthropic_models(provider: &str) -> Vec<String> {
     })
 }
 
-pub const BUILTIN_PROVIDER_NAMES: &[&str] = &[
-    "codex",
-    "kimi",
-    "cursor",
-    "grok",
-    "copilot",
-    "glm",
-    "claude",
-    "anthropic",
-    "opencode",
-    "opencode-go",
-    "opencode-zen",
-    "gemini",
-    "antigravity",
-];
+pub(crate) const OPENAI_API: &str = "openai-api";
 
 enum ClientState {
     Ready(Arc<OpenCodeClient>),
@@ -89,23 +75,48 @@ pub struct CustomProvider {
 
 impl CustomProvider {
     pub fn new_anthropic() -> Self {
-        let client = OpenCodeClient::with_key_source(config::anthropic_base_url(), || {
-            anthropic_key_for(None)
-        })
-        .map(Arc::new)
-        .map(ClientState::Ready)
-        .unwrap_or_else(|e| ClientState::Invalid(e.to_string()));
+        Self::new_builtin(
+            "anthropic",
+            CustomFormat::Anthropic,
+            config::anthropic_base_url(),
+            || anthropic_key_for(None),
+            &ANTHROPIC_ACCOUNTS,
+        )
+    }
+
+    pub fn new_openai_api() -> Self {
+        Self::new_builtin(
+            OPENAI_API,
+            CustomFormat::Responses,
+            openai_api_base_url(),
+            openai_api_key,
+            &OPENAI_ACCOUNTS,
+        )
+    }
+
+    fn new_builtin(
+        name: &'static str,
+        format: CustomFormat,
+        base_url: String,
+        key: impl Fn() -> Option<String> + Send + Sync + 'static,
+        accounts: &'static ApiKeySupport,
+    ) -> Self {
+        let client = OpenCodeClient::with_key_source(base_url, key)
+            .map(Arc::new)
+            .map(ClientState::Ready)
+            .unwrap_or_else(|e| ClientState::Invalid(e.to_string()));
+        let label = ui::provider_name(name);
         Self {
-            name: "anthropic",
-            label: "Anthropic",
-            format: CustomFormat::Anthropic,
+            name,
+            label,
+            format,
             models: Vec::new(),
-            builtin_anthropic: true,
+            builtin_anthropic: name == "anthropic",
             client,
             cli: CustomCli {
-                name: "anthropic",
-                label: "Anthropic",
-                builtin_anthropic: true,
+                name,
+                label,
+                builtin_accounts: Some(accounts),
             },
         }
     }
@@ -134,9 +145,13 @@ impl CustomProvider {
             cli: CustomCli {
                 name: interned,
                 label: interned,
-                builtin_anthropic: false,
+                builtin_accounts: None,
             },
         }
+    }
+
+    fn requires_key(&self) -> bool {
+        self.cli.builtin_accounts.is_some()
     }
 
     fn endpoint(&self) -> EndpointKind {
@@ -165,8 +180,12 @@ impl CustomProvider {
     }
 
     fn model_ids(&self) -> Vec<String> {
-        if self.builtin_anthropic {
-            return anthropic_models(self.name);
+        if self.requires_key() {
+            return if self.builtin_anthropic {
+                anthropic_models(self.name)
+            } else {
+                super::model_catalog::load(self.name).unwrap_or_default()
+            };
         }
         if let Some(cfg) = config::custom_providers().remove(self.name) {
             return cfg.models;
@@ -183,7 +202,7 @@ impl CustomProvider {
             }
             return None;
         }
-        if !self.builtin_anthropic && self.model_ids().iter().any(|m| m == &normalized) {
+        if !self.requires_key() && self.model_ids().iter().any(|m| m == &normalized) {
             return Some(normalized);
         }
         None
@@ -285,7 +304,7 @@ impl CustomProvider {
                         ctx.session_id.as_deref(),
                         self.name,
                         self.label,
-                        self.builtin_anthropic,
+                        self.requires_key(),
                         None,
                     )
                     .await
@@ -332,7 +351,7 @@ impl CustomProvider {
                         ctx.session_id.as_deref(),
                         self.name,
                         self.label,
-                        self.builtin_anthropic,
+                        self.requires_key(),
                         body.anthropic_beta.as_deref(),
                     )
                     .await
@@ -380,7 +399,7 @@ impl CustomProvider {
                         ctx.session_id.as_deref(),
                         self.name,
                         self.label,
-                        self.builtin_anthropic,
+                        self.requires_key(),
                         None,
                     )
                     .await
@@ -424,7 +443,7 @@ impl Provider for CustomProvider {
     fn supported_models(&self) -> Vec<String> {
         let prefix = format!("{}/", self.name);
         let models = self.model_ids();
-        if models.is_empty() {
+        if models.is_empty() && !self.requires_key() {
             return vec![format!("{prefix}default")];
         }
         let mut out = Vec::new();
@@ -433,7 +452,7 @@ impl Provider for CustomProvider {
                 out.push(model.clone());
             } else {
                 out.push(format!("{prefix}{model}"));
-                if !self.builtin_anthropic {
+                if !self.requires_key() {
                     out.push(model.clone());
                 }
             }
@@ -446,7 +465,7 @@ impl Provider for CustomProvider {
     fn catalog(&self) -> Vec<String> {
         let prefix = format!("{}/", self.name);
         let models = self.model_ids();
-        if models.is_empty() {
+        if models.is_empty() && !self.requires_key() {
             return vec![format!("{prefix}default")];
         }
         models
@@ -462,7 +481,7 @@ impl Provider for CustomProvider {
     }
 
     fn aggregator(&self) -> bool {
-        !self.builtin_anthropic
+        !self.requires_key()
     }
 
     fn cli(&self) -> &dyn CliHandlers {
@@ -558,7 +577,7 @@ impl Provider for CustomProvider {
                         ctx.session_id.as_deref(),
                         self.name,
                         self.label,
-                        self.builtin_anthropic,
+                        self.requires_key(),
                         None,
                     )
                     .await
@@ -590,7 +609,7 @@ impl Provider for CustomProvider {
                         ctx.session_id.as_deref(),
                         self.name,
                         self.label,
-                        self.builtin_anthropic,
+                        self.requires_key(),
                         body.anthropic_beta.as_deref(),
                     )
                     .await
@@ -623,7 +642,7 @@ impl Provider for CustomProvider {
                         ctx.session_id.as_deref(),
                         self.name,
                         self.label,
-                        self.builtin_anthropic,
+                        self.requires_key(),
                         None,
                     )
                     .await
@@ -657,6 +676,28 @@ fn anthropic_key_for(account: Option<&str>) -> Option<String> {
     ANTHROPIC_ACCOUNTS.key_for(account, config::anthropic_api_key)
 }
 
+static OPENAI_ACCOUNTS: ApiKeySupport = ApiKeySupport::new(
+    OPENAI_API,
+    "Get a key at https://platform.openai.com/api-keys. API usage is billed separately from ChatGPT.",
+    &["CCP_OPENAI_API_KEY", "OPENAI_API_KEY"],
+);
+
+fn openai_api_key() -> Option<String> {
+    OPENAI_ACCOUNTS.key(|| {
+        OPENAI_ACCOUNTS
+            .pinned_credentials()
+            .and_then(|var| std::env::var(var).ok())
+            .map(|key| key.trim().to_string())
+    })
+}
+
+fn openai_api_base_url() -> String {
+    std::env::var("CCP_OPENAI_API_BASE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+}
+
 fn custom_key_for(name: &str, cfg: &CustomProviderConfig, account: Option<&str>) -> Option<String> {
     let (configured, source) = config::custom_provider_api_key(name, cfg);
     if source.as_deref().is_some_and(|src| src != "config.json") {
@@ -668,7 +709,7 @@ fn custom_key_for(name: &str, cfg: &CustomProviderConfig, account: Option<&str>)
 struct CustomCli {
     name: &'static str,
     label: &'static str,
-    builtin_anthropic: bool,
+    builtin_accounts: Option<&'static ApiKeySupport>,
 }
 
 fn is_loopback_url(raw: &str) -> bool {
@@ -680,8 +721,8 @@ fn is_loopback_url(raw: &str) -> bool {
 
 impl AccountSupport for CustomCli {
     fn sign_in(&self, device: bool) -> Result<Value> {
-        if self.builtin_anthropic {
-            return ANTHROPIC_ACCOUNTS.sign_in(device);
+        if let Some(accounts) = self.builtin_accounts {
+            return accounts.sign_in(device);
         }
         println!(
             "Paste your {} API key (input is hidden) and press Enter:",
@@ -708,8 +749,8 @@ impl AccountSupport for CustomCli {
     }
 
     fn pinned_credentials(&self) -> Option<&'static str> {
-        if self.builtin_anthropic {
-            return ANTHROPIC_ACCOUNTS.pinned_credentials();
+        if let Some(accounts) = self.builtin_accounts {
+            return accounts.pinned_credentials();
         }
         let cfg = config::custom_providers().remove(self.name)?;
         let (_, source) = config::custom_provider_api_key(self.name, &cfg);
@@ -721,8 +762,13 @@ impl AccountSupport for CustomCli {
 
 impl CliHandlers for CustomCli {
     fn auth_state(&self) -> AuthState {
-        if self.builtin_anthropic {
-            return if anthropic_key_for(None).is_some() {
+        if self.builtin_accounts.is_some() {
+            let key = if self.name == "anthropic" {
+                anthropic_key_for(None)
+            } else {
+                openai_api_key()
+            };
+            return if key.is_some() {
                 AuthState::KeySaved
             } else {
                 AuthState::Missing
@@ -755,7 +801,15 @@ impl CliHandlers for CustomCli {
         if !accounts.list()?.is_empty() {
             return crate::auth_cli::AccountCli::open(self.name, self)?.status();
         }
-        if self.builtin_anthropic {
+        if self.name == OPENAI_API {
+            let Some(source) = self.pinned_credentials() else {
+                bail!("OpenAI API has no key. Run `cc-proxy auth login openai-api`.");
+            };
+            println!("API key configured: true");
+            println!("Source: {source}");
+            return Ok(());
+        }
+        if self.name == "anthropic" {
             let Some(source) = config::anthropic_api_key_source() else {
                 bail!("Not authenticated");
             };
@@ -790,6 +844,10 @@ impl CliHandlers for CustomCli {
     }
 }
 
+fn builtin_provider_name(name: &str) -> bool {
+    name == "opencode-go" || crate::route::PROVIDERS.contains(&name)
+}
+
 pub fn validate_custom_provider_name(name: &str) -> Result<String> {
     let trimmed = name.trim().to_ascii_lowercase();
     if trimmed.is_empty() {
@@ -798,7 +856,7 @@ pub fn validate_custom_provider_name(name: &str) -> Result<String> {
     if trimmed == crate::route::DIRECT {
         bail!("`{trimmed}` bypasses the proxy. Pick a different provider name.");
     }
-    if BUILTIN_PROVIDER_NAMES.contains(&trimmed.as_str()) {
+    if builtin_provider_name(&trimmed) {
         bail!("`{trimmed}` is a built-in provider name. Pick a different name.");
     }
     if !trimmed
@@ -884,6 +942,35 @@ pub fn refresh_models(name: &str) -> Result<Vec<String>> {
     Ok(models)
 }
 
+pub(crate) fn refresh_openai_api_models() -> Result<Vec<String>> {
+    let Some(key) = openai_api_key() else {
+        bail!("OpenAI API has no key. Run `cc-proxy auth login openai-api` first.");
+    };
+    let mut ids = super::model_catalog::fetch_ids(
+        &openai_api_base_url(),
+        &[("Authorization", format!("Bearer {key}"))],
+        Duration::from_secs(10),
+    )
+    .context("Could not refresh OpenAI API models. Check `cc-proxy auth status openai-api`, then retry `cc-proxy models refresh openai-api`.")?;
+    // ponytail: /models lists IDs, not their endpoints. List the GPT and o-series
+    // text families. Other IDs can still be requested with the provider prefix.
+    ids.retain(|id| {
+        (id.starts_with("gpt-")
+            || id
+                .strip_prefix('o')
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit())))
+            && crate::tiers::is_chat_model(id)
+            && !id.ends_with("-instruct")
+    });
+    if ids.is_empty() {
+        bail!(
+            "OpenAI API returned no chat models. Check model access in your OpenAI project, then retry `cc-proxy models refresh openai-api`. The saved list has not changed."
+        );
+    }
+    super::model_catalog::save(OPENAI_API, &ids)?;
+    Ok(ids)
+}
+
 /// Asks Anthropic which models the API key can use and saves the list.
 pub fn refresh_anthropic_models() -> Result<Vec<String>> {
     let Some(key) = anthropic_key_for(None) else {
@@ -912,7 +999,7 @@ pub fn run_provider_remove(name: Option<&str>) -> Result<()> {
             names[idx].clone()
         }
     };
-    if BUILTIN_PROVIDER_NAMES.contains(&chosen.as_str()) {
+    if builtin_provider_name(&chosen) {
         bail!("`{chosen}` is a built-in provider and cannot be removed.");
     }
     if !config::remove_custom_provider(&chosen)? {

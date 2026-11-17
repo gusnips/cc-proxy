@@ -66,6 +66,88 @@ fn cache(config: &std::path::Path, provider: &str, ids: &[&str]) {
 }
 
 #[test]
+fn openai_api_discovers_models_and_routes_them_separately_from_codex() {
+    let _lock = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let (url, upstream) = mock(vec![
+        (
+            200,
+            json!({"data": [
+                {"id": "gpt-6.2-astra"}, {"id": "o3"}, {"id": "gpt-image-1"},
+                {"id": "text-embedding-3-small"}
+            ]}),
+        ),
+        (
+            401,
+            json!({"error": {"message": "Mock rejected the request"}}),
+        ),
+        (503, json!({"error": "unavailable"})),
+    ]);
+    let base = format!("{url}/v1");
+    let env = [
+        ("CCP_OPENAI_API_BASE_URL", base.as_str()),
+        ("OPENAI_API_KEY", "test-key"),
+    ];
+    let command = |args: &[&str]| cli(dir.path(), args, &env);
+    let output = command(&["models", "refresh", "openai-api"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let list = command(&["models", "list", "openai-api"]);
+    let list = String::from_utf8_lossy(&list.stdout);
+    assert!(list.contains("openai-api/gpt-6.2-astra, openai-api/o3"));
+    assert!(!list.contains("gpt-image") && !list.contains("embedding"));
+
+    let _env = [
+        EnvGuard::set("CCP_CONFIG_DIR", dir.path()),
+        EnvGuard::set("CODEX_HOME", dir.path()),
+        EnvGuard::set("XDG_STATE_HOME", dir.path().join("state")),
+        EnvGuard::set("CCP_OPENAI_API_BASE_URL", &base),
+        EnvGuard::unset("CCP_OPENAI_API_KEY"),
+        EnvGuard::set("OPENAI_API_KEY", "test-key"),
+    ];
+    let registry = Arc::new(Registry::new());
+    let raw = "gpt-6.2-astra";
+    let qualified = "openai-api/gpt-6.2-astra";
+    assert_eq!(registry.provider_for_model(raw).unwrap().name(), "codex");
+    assert_eq!(
+        registry.provider_for_model(qualified).unwrap().name(),
+        "openai-api"
+    );
+    assert_eq!(
+        tiers::for_provider(&registry, "openai-api")["fable"].model,
+        qualified
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let response = rt.block_on(server::app(registry).oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"model": qualified, "max_tokens": 16, "messages": [{"role": "user", "content": "ping"}]}).to_string()))
+            .unwrap(),
+    )).unwrap();
+    assert_eq!(response.status(), 401);
+    let saved = dir.path().join("openai-api/models.json");
+    let before = std::fs::read(&saved).unwrap();
+    assert!(
+        !command(&["models", "refresh", "openai-api"])
+            .status
+            .success()
+    );
+    assert_eq!(std::fs::read(&saved).unwrap(), before);
+    let requests = upstream.join().unwrap();
+    assert!(requests[0].starts_with("GET /v1/models "));
+    assert!(requests[1].starts_with("POST /v1/responses "));
+    for request in requests {
+        assert!(request.contains("authorization: Bearer test-key"));
+        assert!(!request.to_ascii_lowercase().contains("x-api-key:"));
+    }
+}
+
+#[test]
 fn gemini_refresh_reads_every_page_and_keeps_the_last_good_list_on_failure() {
     let config = tempfile::tempdir().unwrap();
     cache(config.path(), "gemini", &["gemini-retired-pro"]);

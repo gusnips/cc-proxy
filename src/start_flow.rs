@@ -49,7 +49,15 @@ fn open_tiers(registry: &Registry, provider: &str) -> Vec<tiers::Mapping> {
 /// Enter skips it. A guess is never saved: it stays a guess, so it moves to a
 /// newer model when the provider lists one, until you choose with `models choose`.
 fn settle_tiers(registry: &Registry, provider: &str) -> Result<()> {
-    let open = open_tiers(registry, provider);
+    let mut open = open_tiers(registry, provider);
+    if provider == crate::providers::custom::OPENAI_API
+        && !open.is_empty()
+        && registry.catalog_for(provider).is_empty()
+    {
+        println!("Fetching the OpenAI API model list...");
+        models_map::refresh_provider(provider)?;
+        open = open_tiers(registry, provider);
+    }
     if open.is_empty() {
         return Ok(());
     }

@@ -10,6 +10,7 @@ The model ID in each request selects its provider. One proxy listener can serve 
 | Pattern                                                                                               | Provider                                                           |
 | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | Any `gpt-*` ID and its local tier forms (`-fast` or `-ultrafast`; unlisted base IDs forward to Codex) | Codex                                                              |
+| Every `openai-api/<model-id>`                                                                        | OpenAI API                                                         |
 | `k3`, `kimi-k3`, `kimi-k2.6`, `k2.6` (legacy `kimi-for-coding`); unlisted `kimi-*`/`k2-*` forward raw | Kimi                                                               |
 | `grok-composer-2.5-fast`, `grok-4.5`, `grok-4.6`, `grok-4.7`; unlisted `grok-*` forward raw           | Grok                                                               |
 | Non-conflicting OpenCode Go IDs and **every** `opencode-go/<model-id>`, registered or not             | OpenCode Go                                                        |
@@ -79,7 +80,7 @@ cc-proxy models refresh antigravity
 
 This asks the provider which models your account can use, saves the list and updates Claude Code's picker. It does not restart the proxy. A new Claude model shows up as soon as Anthropic lists it for your login, and an automatic `fable`, `opus`, `sonnet` or `haiku` name starts using it on the next request.
 
-Use `cc-proxy models refresh all` to refresh Codex, Claude, Anthropic, Antigravity, GitHub Copilot, Gemini, OpenCode Go, OpenCode Zen and providers you added. Providers that need sign-in are skipped until you sign in. Each failed refresh keeps its saved list; the command continues with the others and exits with an error if any refresh failed.
+Use `cc-proxy models refresh all` to refresh Codex, OpenAI API, Claude, Anthropic, Antigravity, GitHub Copilot, Gemini, OpenCode Go, OpenCode Zen and providers you added. Providers that need sign-in are skipped until you sign in. Each failed refresh keeps its saved list; the command continues with the others and exits with an error if any refresh failed.
 
 A running proxy does this by itself for the providers you are signed in to, a minute after it starts and then every 6 hours. A failed refresh keeps the saved list and logs `models_refresh_failed` in `proxy.log`. Providers you added are not refreshed this way: their list lives in `config.json`, so refresh them with the command above.
 
@@ -149,7 +150,7 @@ If you pin a model in `settings.json` (`ANTHROPIC_MODEL` or an `ANTHROPIC_DEFAUL
 
 `cc-proxy start` turns on `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` in `settings.json` (unless you set it yourself). This lets Claude Code fetch `/v1/models` from the proxy at startup. Current Claude Code keeps discovered IDs containing `claude` or `anthropic`; it filters out other IDs such as `gemini-…`.
 
-cc-proxy also sets `modelPicker.replaceBuiltInOptions: true`, which hides discovery results in favor of its explicit picker rows. Codex, Gemini, Antigravity and reseller catalogs with at most 100 models get direct rows alongside the four mapped Claude names. Refreshing a provider updates those rows from the same catalog used by `models choose`. The env var alone cannot fetch a provider's upstream catalog or add a model missing from these rows.
+cc-proxy also sets `modelPicker.replaceBuiltInOptions: true`, which hides discovery results in favor of its explicit picker rows. Codex, OpenAI API, Gemini, Antigravity and reseller catalogs with at most 100 models get direct rows alongside the four mapped Claude names. Refreshing a provider updates those rows from the same catalog used by `models choose`. The env var alone cannot fetch a provider's upstream catalog or add a model missing from these rows.
 
 See [Claude Code's model discovery rules](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery).
 

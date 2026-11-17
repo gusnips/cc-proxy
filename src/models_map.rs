@@ -10,6 +10,7 @@ use anyhow::{Result, bail};
 
 use crate::auth::AuthStorage;
 use crate::provider::AuthState;
+use crate::providers::custom::OPENAI_API;
 use crate::registry::Registry;
 use crate::route::routable_providers;
 use crate::tiers::{self, Basis, TIERS};
@@ -155,8 +156,9 @@ pub(crate) fn basis_label(basis: Basis) -> &'static str {
 
 /// Providers that keep their saved list in `models.json`, which `refresh_provider`
 /// replaces. A provider you added keeps its list in `config.json` instead.
-const LIVE_LISTS: [&str; 8] = [
+const LIVE_LISTS: [&str; 9] = [
     "codex",
+    OPENAI_API,
     "claude",
     "anthropic",
     "copilot",
@@ -302,6 +304,7 @@ pub(crate) fn refresh_provider(provider: &str) -> Result<Option<Vec<String>>> {
         }
         "codex" => crate::providers::codex::translate::model_catalog::refresh_models()?,
         "claude" => crate::providers::claude::refresh_models()?,
+        OPENAI_API => crate::providers::custom::refresh_openai_api_models()?,
         "anthropic" => crate::providers::custom::refresh_anthropic_models()?,
         "antigravity" => crate::providers::antigravity::refresh_models()?,
         "gemini" => crate::providers::gemini::refresh_models()?,
@@ -328,7 +331,7 @@ fn refresh_all(registry: &Registry) -> Result<()> {
         let name = ui::provider_name(provider);
         if matches!(
             provider,
-            "codex" | "claude" | "anthropic" | "antigravity" | "copilot" | "gemini"
+            "codex" | OPENAI_API | "claude" | "anthropic" | "antigravity" | "copilot" | "gemini"
         ) && registry.provider(provider).is_some_and(|handler| {
             matches!(
                 handler.cli().auth_state(),

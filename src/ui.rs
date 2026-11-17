@@ -46,6 +46,7 @@ pub fn provider_color(provider: &str) -> Color {
 pub fn provider_name(provider: &str) -> &str {
     match provider {
         "codex" => "Codex",
+        "openai-api" => "OpenAI API",
         "glm" => "GLM",
         "copilot" => "GitHub Copilot",
         "cursor" => "Cursor",

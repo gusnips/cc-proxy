@@ -8,6 +8,7 @@ One `start` process supports every provider. Choose based on the account you hav
 | Provider | Account | Upstream protocol | Model selection | Notable capabilities |
 | --- | --- | --- | --- | --- |
 | [Codex](/providers/codex/) | ChatGPT Plus or Pro | OpenAI Responses over WebSocket or HTTP SSE | Named Codex catalog, `-fast` variants | Function tools, image input, hosted web search, reasoning summaries, optional native Responses route |
+| [OpenAI API](#openai-api) | OpenAI API key, billed separately from ChatGPT | OpenAI Responses | `openai-api/<model-id>` | Live list from your API project |
 | [Kimi](/providers/kimi/) | A Kimi account with Kimi Code access | OpenAI-style chat completions | `k3`, `kimi-k3` (legacy `kimi-for-coding` alias); unlisted `kimi-*` forward raw | Function tools, reasoning, image and video input |
 | [Grok](/providers/grok/) | grok.com | Responses API | `grok-composer-2.5-fast`, `grok-4.5`, `grok-4.6`, `grok-4.7`; unlisted `grok-*` forward raw | Function tools, reasoning, web search, X search, citations |
 | [OpenCode Go](/providers/opencode-go/) | OpenCode Go subscription | OpenAI-compatible Chat Completions, OpenAI Responses, or Anthropic-compatible Messages | Non-conflicting bare IDs and `opencode-go/<model-id>` forms | Curated models tested and benchmarked for coding-agent use |
@@ -23,6 +24,19 @@ One `start` process supports every provider. Choose based on the account you hav
 - Choose **OpenCode Go** when you have a Go subscription and want its documented model catalog in Claude Code.
 - Choose **GitHub Copilot** when you already pay for a Copilot plan and want its models in Claude Code.
 - Choose **Cursor Agent** when you want Cursor's model catalog and agent modes. It depends on an installed Cursor Agent bundle for protobuf schemas.
+
+## OpenAI API
+
+Get a key from [OpenAI Platform](https://platform.openai.com/api-keys). OpenAI bills API requests separately from your ChatGPT subscription.
+
+```sh
+cc-proxy auth login openai-api
+cc-proxy use openai-api
+```
+
+`use` fetches the model list if none is saved. To check for new models now, run `cc-proxy models refresh openai-api` or pick **Refresh OpenAI API model list** in the monitor. You can also set `OPENAI_API_KEY` instead of saving a key.
+
+Use `openai-api/<model-id>` to send a model request to your API project. Bare `gpt-*` IDs still go to Codex or the provider you had before. Signing in alone doesn't turn on the API provider in your request pool.
 
 ## Shared behavior
 
