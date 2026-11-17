@@ -72,19 +72,22 @@ While routing is off, a Claude name gets an HTTP 400 that says so. A window that
 ## Refresh model lists
 
 ```sh
+cc-proxy models refresh codex
 cc-proxy models refresh claude
 cc-proxy models refresh antigravity
 ```
 
 This asks the provider which models your account can use, saves the list and updates Claude Code's picker. It does not restart the proxy. A new Claude model shows up as soon as Anthropic lists it for your login, and an automatic `fable`, `opus`, `sonnet` or `haiku` name starts using it on the next request.
 
-Use `cc-proxy models refresh all` to refresh Claude, Anthropic, Antigravity, GitHub Copilot, Gemini, OpenCode Go, OpenCode Zen and providers you added. Providers that need sign-in are skipped until you sign in. Each failed refresh keeps its saved list; the command continues with the others and exits with an error if any refresh failed.
+Use `cc-proxy models refresh all` to refresh Codex, Claude, Anthropic, Antigravity, GitHub Copilot, Gemini, OpenCode Go, OpenCode Zen and providers you added. Providers that need sign-in are skipped until you sign in. Each failed refresh keeps its saved list; the command continues with the others and exits with an error if any refresh failed.
 
 A running proxy does this by itself for the providers you are signed in to, a minute after it starts and then every 6 hours. A failed refresh keeps the saved list and logs `models_refresh_failed` in `proxy.log`. Providers you added are not refreshed this way: their list lives in `config.json`, so refresh them with the command above.
 
-Successful refreshes replace the saved list, so retired models disappear. The built-in lists are fallbacks until a live list has been saved. Your chosen tier mappings stay unchanged, so a name you chose keeps its model even when a newer one is listed. Choose again with `cc-proxy models choose`, or run `cc-proxy models reset <name>` to let cc-proxy pick. Automatic defaults use the refreshed catalog on the next request.
+Successful refreshes replace the saved list, so retired models drop off it. The built-in lists are fallbacks until a live list has been saved. Codex also keeps its built-in models listed. Your chosen tier mappings stay unchanged, so a name you chose keeps its model even when a newer one is listed. Choose again with `cc-proxy models choose`, or run `cc-proxy models reset <name>` to let cc-proxy pick. Automatic defaults use the refreshed catalog on the next request.
 
-Codex reads the Codex CLI's local model cache automatically. Cursor, Grok, Kimi and GLM do not have live discovery in cc-proxy yet. The command reports these limits rather than claiming to refresh them.
+Refresh Codex with `cc-proxy models refresh codex` or **Refresh Codex model list** in the monitor. It uses your saved cc-proxy sign-in. You don't need to install, open or update the Codex CLI. Until the first successful refresh, cc-proxy still reads the Codex CLI's saved list if it exists.
+
+Cursor, Grok, Kimi and GLM do not have live model discovery yet.
 
 ### Antigravity defaults and effort
 
@@ -120,7 +123,7 @@ curl http://127.0.0.1:18765/v1/models
 
 ## Codex service tiers
 
-Codex models have a local `-fast` form. The proxy removes the suffix and requests `service_tier: "priority"`. This also works for models discovered in the Codex CLI cache and unlisted `gpt-*` IDs.
+Codex models have a local `-fast` form. The proxy removes the suffix and requests `service_tier: "priority"`. Models from the Codex catalog and unlisted `gpt-*` IDs also accept this suffix.
 
 `gpt-6-astra-ultrafast` requests `service_tier: "ultrafast"`. Astra is the only model with known ultrafast support in the proxy's tier list; catalog discovery does not add tier support. On other Codex models, including unlisted `gpt-*` IDs, `-ultrafast` is removed and requests priority instead. Use one suffix; repeated or mixed suffixes are rejected.
 
@@ -146,7 +149,7 @@ If you pin a model in `settings.json` (`ANTHROPIC_MODEL` or an `ANTHROPIC_DEFAUL
 
 `cc-proxy start` turns on `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` in `settings.json` (unless you set it yourself). This lets Claude Code fetch `/v1/models` from the proxy at startup. Current Claude Code keeps discovered IDs containing `claude` or `anthropic`; it filters out other IDs such as `gemini-…`.
 
-cc-proxy also sets `modelPicker.replaceBuiltInOptions: true`, which hides discovery results in favor of its explicit picker rows. Gemini, Antigravity and reseller catalogs with at most 100 models get direct rows alongside the four mapped Claude names. Refreshing a provider updates those rows from the same catalog used by `models choose`. The env var alone cannot fetch a provider's upstream catalog or add a model missing from these rows.
+cc-proxy also sets `modelPicker.replaceBuiltInOptions: true`, which hides discovery results in favor of its explicit picker rows. Codex, Gemini, Antigravity and reseller catalogs with at most 100 models get direct rows alongside the four mapped Claude names. Refreshing a provider updates those rows from the same catalog used by `models choose`. The env var alone cannot fetch a provider's upstream catalog or add a model missing from these rows.
 
 See [Claude Code's model discovery rules](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery).
 

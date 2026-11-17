@@ -155,7 +155,8 @@ pub(crate) fn basis_label(basis: Basis) -> &'static str {
 
 /// Providers that keep their saved list in `models.json`, which `refresh_provider`
 /// replaces. A provider you added keeps its list in `config.json` instead.
-const LIVE_LISTS: [&str; 7] = [
+const LIVE_LISTS: [&str; 8] = [
+    "codex",
     "claude",
     "anthropic",
     "copilot",
@@ -299,6 +300,7 @@ pub(crate) fn refresh_provider(provider: &str) -> Result<Option<Vec<String>>> {
             };
             crate::providers::copilot::models::refresh(&auth)?
         }
+        "codex" => crate::providers::codex::translate::model_catalog::refresh_models()?,
         "claude" => crate::providers::claude::refresh_models()?,
         "anthropic" => crate::providers::custom::refresh_anthropic_models()?,
         "antigravity" => crate::providers::antigravity::refresh_models()?,
@@ -314,16 +316,10 @@ pub(crate) fn refresh_provider(provider: &str) -> Result<Option<Vec<String>>> {
 }
 
 fn print_discovery_unavailable(provider: &str) {
-    if provider == "codex" {
-        println!(
-            "Codex: reads the Codex CLI's local model cache automatically. No live refresh was run."
-        );
-    } else {
-        println!(
-            "{}: live model discovery is not supported yet. Use `cc-proxy models list {provider}` to see the saved list.",
-            ui::provider_name(provider)
-        );
-    }
+    println!(
+        "{}: live model discovery is not supported yet. Use `cc-proxy models list {provider}` to see the saved list.",
+        ui::provider_name(provider)
+    );
 }
 
 fn refresh_all(registry: &Registry) -> Result<()> {
@@ -332,7 +328,7 @@ fn refresh_all(registry: &Registry) -> Result<()> {
         let name = ui::provider_name(provider);
         if matches!(
             provider,
-            "claude" | "anthropic" | "antigravity" | "copilot" | "gemini"
+            "codex" | "claude" | "anthropic" | "antigravity" | "copilot" | "gemini"
         ) && registry.provider(provider).is_some_and(|handler| {
             matches!(
                 handler.cli().auth_state(),
@@ -476,8 +472,9 @@ mod tests {
     }
 
     #[test]
-    fn the_claude_providers_have_live_model_lists() {
+    fn subscription_and_api_providers_have_live_model_lists() {
         // The monitor shows its refresh action for exactly these.
+        assert!(supports_refresh("codex"));
         assert!(supports_refresh("claude"));
         assert!(supports_refresh("anthropic"));
         assert!(!supports_refresh("kimi"));
@@ -496,12 +493,12 @@ mod tests {
         };
 
         assert!(refresh_lists(
-            |provider| matches!(provider, "claude" | "gemini" | "copilot"),
+            |provider| matches!(provider, "codex" | "claude" | "gemini" | "copilot"),
             refresh
         ));
         // Listed order, no provider that is signed out, and Gemini's failure
         // did not stop Copilot.
-        assert_eq!(*asked.borrow(), ["claude", "copilot", "gemini"]);
+        assert_eq!(*asked.borrow(), ["codex", "claude", "copilot", "gemini"]);
 
         asked.borrow_mut().clear();
         assert!(!refresh_lists(|_| false, refresh));

@@ -1,24 +1,27 @@
-//! Model knowledge from the Codex CLI's own model cache
-//! (`$CODEX_HOME/models_cache.json`, default `~/.codex/models_cache.json`).
+//! Codex model metadata fetched by the proxy, with the Codex CLI's local cache
+//! as a fallback until the first successful cloud refresh.
 //!
-//! The Codex CLI refreshes that file from the server (ETag fetch), so a model
-//! that OpenAI ships to Codex shows up there before this proxy can ship a
-//! release that lists it. The static allowlist in `model_allowlist` stays the
-//! baseline; the catalog extends it at runtime.
-//!
-//! Only the fields the proxy needs are read. Each model object is decoded
-//! leniently on its own, so one unexpected entry never discards the file.
-//! The parsed result is cached per (mtime, len) of the file; a missing or
-//! unreadable file keeps the last good parse (or yields nothing).
+//! Both sources use the same model schema. Keep lane and visibility metadata,
+//! not just IDs, so new models use the right Responses API. Malformed entries
+//! are skipped individually. A failed refresh leaves the saved catalog alone.
 
 use std::{
     fs,
     path::PathBuf,
     sync::{Mutex, OnceLock},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+
+use crate::{config, providers::model_catalog};
+
+use super::super::auth::{
+    constants::{CODEX_API_ENDPOINT, ORIGINATOR},
+    manager::CodexAuthManager,
+    token_store,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogModel {
@@ -34,7 +37,6 @@ pub struct CatalogModel {
 
 #[derive(Deserialize)]
 struct CacheFile {
-    #[serde(default)]
     models: Vec<serde_json::Value>,
 }
 
@@ -58,7 +60,7 @@ fn default_visibility() -> String {
 }
 
 struct CacheState {
-    key: Option<(SystemTime, u64)>,
+    key: Option<(PathBuf, SystemTime, u64)>,
     models: Vec<CatalogModel>,
 }
 
@@ -95,7 +97,73 @@ pub fn parse_catalog(bytes: &[u8]) -> Option<Vec<CatalogModel>> {
     Some(models)
 }
 
-/// Current catalog snapshot (cached per file mtime/len).
+/// Refreshes the list using cc-proxy's saved Codex sign-in, not the Codex CLI.
+pub(crate) fn refresh_models() -> Result<Vec<String>> {
+    refresh_and_save().context(
+        "Could not refresh Codex models. The saved list has not changed. Retry with `cc-proxy models refresh codex`.",
+    )
+}
+
+fn refresh_and_save() -> Result<Vec<String>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let bytes = runtime.block_on(async {
+        let auth = CodexAuthManager::new(token_store::file_store()?)
+            .get_auth()
+            .await
+            .context("Check your Codex sign-in with `cc-proxy auth status codex`.")?;
+        let base_url = config::codex_base_url(CODEX_API_ENDPOINT);
+        let mut url = reqwest::Url::parse(&base_url).context("Invalid Codex address.")?;
+        let path = url.path().trim_end_matches('/');
+        let root = path.strip_suffix("/responses").unwrap_or(path);
+        url.set_path(&format!("{root}/models"));
+        // Codex expects a Codex protocol version, not the cc-proxy version.
+        // This is the released Codex version used to verify the wire format.
+        const CLIENT_VERSION: &str = "0.169.0";
+        let headers = super::super::client::build_codex_read_headers(&auth)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let response = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?
+            .get(url)
+            .query(&[("client_version", CLIENT_VERSION)])
+            .headers(headers)
+            .header("version", CLIENT_VERSION)
+            .header("originator", config::codex_originator(ORIGINATOR))
+            .send()
+            .await
+            .context("Could not reach Codex. Check your connection.")?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            bail!("Codex rejected the saved sign-in. Run `cc-proxy auth login codex`.");
+        }
+        if !status.is_success() {
+            bail!("Codex returned HTTP {status} for the model list.");
+        }
+        response
+            .bytes()
+            .await
+            .context("Could not read the Codex model list.")
+    })?;
+    let mut ids: Vec<_> = parse_catalog(&bytes)
+        .context("Codex did not return a valid model list.")?
+        .into_iter()
+        .filter(|model| model.listed && model.supported_in_api)
+        .map(|model| model.slug)
+        .collect();
+    if ids.is_empty() {
+        bail!("Codex returned no models cc-proxy can list.");
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    crate::fsutil::write_atomic(&model_catalog::cache_file("codex"), &bytes)
+        .context("Could not save the Codex model list.")?;
+    Ok(ids)
+}
+
+/// Current catalog snapshot (cached per path, mtime and length).
 pub fn catalog_models() -> Vec<CatalogModel> {
     let mutex = CACHE.get_or_init(|| {
         Mutex::new(CacheState {
@@ -107,21 +175,25 @@ pub fn catalog_models() -> Vec<CatalogModel> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let Some(path) = catalog_path() else {
-        return state.models.clone();
-    };
-    let Some(key) = fs::metadata(&path)
-        .ok()
-        .and_then(|meta| Some((meta.modified().ok()?, meta.len())))
-    else {
-        return state.models.clone();
-    };
-    if state.key == Some(key) {
-        return state.models.clone();
-    }
-    if let Some(models) = fs::read(&path).ok().and_then(|bytes| parse_catalog(&bytes)) {
-        state.key = Some(key);
-        state.models = models;
+    for path in std::iter::once(model_catalog::cache_file("codex")).chain(catalog_path()) {
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let key = (path, modified, meta.len());
+        if state.key.as_ref() == Some(&key) {
+            break;
+        }
+        if let Some(models) = fs::read(&key.0)
+            .ok()
+            .and_then(|bytes| parse_catalog(&bytes))
+        {
+            state.key = Some(key);
+            state.models = models;
+            break;
+        }
     }
     state.models.clone()
 }
@@ -179,6 +251,7 @@ mod tests {
     fn garbage_yields_none_and_empty_models_yields_empty() {
         assert!(parse_catalog(b"not json").is_none());
         assert!(parse_catalog(b"[]").is_none());
-        assert_eq!(parse_catalog(b"{}").unwrap(), Vec::<CatalogModel>::new());
+        assert!(parse_catalog(b"{}").is_none());
+        assert!(parse_catalog(br#"{"models":[]}"#).unwrap().is_empty());
     }
 }
